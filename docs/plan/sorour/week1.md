@@ -59,10 +59,12 @@ terraform plan
 terraform apply
 ```
 Creates: 5 ECR repos (`theagentorg-shared-{planner,developer,reviewer,
-security,sre}-agent`, keep-last-5), the `theagentorg-shared-agentcore-
-runtime-role` (trusts `bedrock-agentcore.amazonaws.com`), the GitHub OIDC
-provider + `github-actions-role` (scoped to
-`repo:mohamedsorour1998/TheAgentOrg:*`).
+security,sre}-agent`, keep-last-5) and the `theagentorg-shared-agentcore-
+runtime-role` (trusts `bedrock-agentcore.amazonaws.com`). The
+`github-actions-role` already existed in the account (shared with other
+repos' CI) — it's looked up via a Terraform data source rather than
+created, and `repo:mohamedsorour1998/TheAgentOrg:*` plus the ECR/Bedrock
+policies were added to it via the AWS CLI (see `infra/README.md`).
 
 **Done when:** `terraform output` shows:
 - `ecr_repository_urls` — 5 entries

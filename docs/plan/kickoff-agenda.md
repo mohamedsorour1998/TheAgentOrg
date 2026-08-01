@@ -13,9 +13,9 @@
 2. **(30 min) Walk `agentorg/state.py` field by field.**
    - `PlanResult` — planner output: `tasks: list[str]`
    - `DevResult` — developer output: `diff`, `files_changed`, `pr_url`
-   - `ReviewResult` — reviewer output: `verdict` (`approved` / `changes_requested`), `comments`
+   - `ReviewResult` — reviewer output: `verdict` (`approve` / `changes_requested`), `comments`
    - `Finding` — one security finding: `severity`, `tool`, `description`
-   - `SecurityResult` — `findings: list[Finding]`, `verdict` (`pass` / `block`), `blocking_findings`
+   - `SecurityResult` — `findings: list[Finding]`, `verdict` (`pass` / `block`), `blocking`
    - `SLOCheck`, `SREResult` — SRE gate output
    - `HumanDecision` — recorded at each of the 3 gates
    - `RunState` — the whole run: ticket, plan, dev, review, security, sre, status, gate decisions
