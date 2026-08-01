@@ -1,0 +1,9 @@
+{
+  "branch": "feat/login-rate-limit",
+  "diff": "--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1,5 +1,21 @@\n+import os\n+\n from flask import request, jsonify\n+import redis\n+\n+_rate_store = redis.Redis.from_url(os.environ[\"REDIS_URL\"])\n+\n+\n+def _rate_limited(ip):\n+    key = \"login:\" + ip\n+    hits = _rate_store.incr(key)\n+    if hits == 1:\n+        _rate_store.expire(key, 60)\n+    return hits > 5\n \n \n def login():\n+    if _rate_limited(request.remote_addr):\n+        return jsonify({\"error\": \"too many attempts\"}), 429\n     user = authenticate(request.form[\"username\"], request.form[\"password\"])\n",
+  "summary": "Adds a per-IP rate limit of five login attempts per minute. Redis connection now read from REDIS_URL.",
+  "files_changed": [
+    "app/auth.py"
+  ],
+  "pr_url": "https://github.com/quorum/demo-app/pull/41"
+}

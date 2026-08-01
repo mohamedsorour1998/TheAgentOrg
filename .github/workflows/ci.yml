@@ -1,0 +1,31 @@
+# CI — runs on every PR. OWNER: Mariam.
+#
+# Day-1 job: install deps, regenerate fixtures (proves they still validate), run
+# the test suite (proves the stubbed pipeline runs end-to-end). Add lint,
+# scanner jobs, and the deploy job as those lanes come online.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Regenerate + validate fixtures
+        run: python make_fixtures.py
+
+      - name: Run tests
+        run: pytest -q

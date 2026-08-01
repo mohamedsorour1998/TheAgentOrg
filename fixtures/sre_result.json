@@ -1,0 +1,18 @@
+{
+  "verdict": "go",
+  "ci_status": "passing",
+  "slo_checks": [
+    {
+      "name": "unit tests",
+      "passed": true,
+      "detail": "42 passed"
+    },
+    {
+      "name": "error budget",
+      "passed": true,
+      "detail": "97% remaining"
+    }
+  ],
+  "estimated_cost_note": "No new infrastructure. Reuses the existing Redis instance.",
+  "notes": "Rollback is a revert of the single commit."
+}

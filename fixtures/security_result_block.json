@@ -1,0 +1,48 @@
+{
+  "verdict": "block",
+  "findings": [
+    {
+      "tool": "gitleaks",
+      "severity": "critical",
+      "rule": "aws-access-key-id",
+      "file": "app/auth.py",
+      "line": 4,
+      "description": "AWS access key id committed in source."
+    },
+    {
+      "tool": "gitleaks",
+      "severity": "critical",
+      "rule": "aws-secret-access-key",
+      "file": "app/auth.py",
+      "line": 5,
+      "description": "AWS secret access key committed in source."
+    },
+    {
+      "tool": "semgrep",
+      "severity": "low",
+      "rule": "python.flask.missing-timeout",
+      "file": "app/auth.py",
+      "line": 7,
+      "description": "Redis client created without a socket timeout."
+    }
+  ],
+  "blocking": [
+    {
+      "tool": "gitleaks",
+      "severity": "critical",
+      "rule": "aws-access-key-id",
+      "file": "app/auth.py",
+      "line": 4,
+      "description": "AWS access key id committed in source."
+    },
+    {
+      "tool": "gitleaks",
+      "severity": "critical",
+      "rule": "aws-secret-access-key",
+      "file": "app/auth.py",
+      "line": 5,
+      "description": "AWS secret access key committed in source."
+    }
+  ],
+  "explanation": "Two AWS credentials are hardcoded in app/auth.py. Move them to the environment and rotate the key before merging."
+}

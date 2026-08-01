@@ -1,0 +1,11 @@
+{
+  "verdict": "approve",
+  "comments": [
+    {
+      "file": "app/auth.py",
+      "line": 12,
+      "note": "Counter expiry looks right."
+    }
+  ],
+  "must_fix": []
+}

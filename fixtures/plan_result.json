@@ -1,0 +1,17 @@
+{
+  "tasks": [
+    "Add a Redis-backed counter keyed on client IP",
+    "Return HTTP 429 once the threshold is passed",
+    "Add tests for the under-limit and over-limit cases"
+  ],
+  "acceptance_criteria": [
+    "Six requests in one minute from one IP returns 429",
+    "Five requests in one minute still return 200",
+    "No credentials are committed to the repository"
+  ],
+  "target_files": [
+    "app/auth.py",
+    "tests/test_auth.py"
+  ],
+  "notes": "Redis connection details must come from the environment."
+}

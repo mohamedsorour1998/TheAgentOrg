@@ -1,0 +1,15 @@
+{
+  "verdict": "pass",
+  "findings": [
+    {
+      "tool": "semgrep",
+      "severity": "low",
+      "rule": "python.flask.missing-timeout",
+      "file": "app/auth.py",
+      "line": 7,
+      "description": "Redis client created without a socket timeout."
+    }
+  ],
+  "blocking": [],
+  "explanation": "One low-severity finding, below the block threshold."
+}
