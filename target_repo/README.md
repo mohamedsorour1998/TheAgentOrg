@@ -9,7 +9,7 @@ to touch and for the scanners to scan.
 You do NOT need to know Strands, AWS, or the pipeline to build this. It is a
 plain Python app plus two ticket files.
 
-## What to build (see docs/plan/reem.md)
+## What to build (see docs/plan/reem/)
 
 - `app/auth.py` — a minimal Flask login handler (a few lines).
 - `tests/test_auth.py` — one or two tests so CI has something to run.

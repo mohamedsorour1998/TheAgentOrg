@@ -85,9 +85,10 @@ the timeline is the UX the judges score.
 
 ---
 
-Your detailed day-level plan is in your own file:
-[`mohamed-sorour.md`](mohamed-sorour.md) ·
-[`mariam.md`](mariam.md) ·
-[`habiba.md`](habiba.md) ·
-[`reem.md`](reem.md) ·
-[`aya.md`](aya.md)
+Your detailed plan is in your own folder — a general overview plus a
+day-by-day spec for each week:
+[`sorour/`](sorour/README.md) ·
+[`mariam/`](mariam/README.md) ·
+[`habiba/`](habiba/README.md) ·
+[`reem/`](reem/README.md) ·
+[`aya/`](aya/README.md)

@@ -124,6 +124,7 @@ testing)**.
 
 ---
 
-*Your detailed day-by-day plan is in your own file in this folder
-(`mariam.md`, `habiba.md`, `reem.md`, `aya.md`). The repo runs right now —
+*Your detailed day-by-day plan is in your own folder here
+(`mariam/`, `habiba/`, `reem/`, `aya/` — each has a general README plus
+week1/week2/week3 specs). The repo runs right now —
 `python -m agentorg.graph --poisoned` shows the block live.*

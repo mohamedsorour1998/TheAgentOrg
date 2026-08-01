@@ -37,7 +37,7 @@ split so infra grows the same way the rest of our stack does.
   workflow uses it.
 
 The AgentCore **runtimes** themselves are created by the AgentCore CLI at deploy
-time (see `docs/plan/mariam.md`) once the images exist — Terraform lays down the
+time (see `docs/plan/mariam/week3.md`) once the images exist — Terraform lays down the
 registries and roles they stand on.
 
 ## First-time setup

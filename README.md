@@ -54,5 +54,6 @@ The one real cross-dependency: Reem's poisoned ticket → Habiba's scanners, due
 
 ## The plan
 
-Per-person, per-week plans are in [`docs/plan/`](docs/plan/). Start with
+Per-person plans are in [`docs/plan/`](docs/plan/) — one folder per person
+(general README + week1/week2/week3 specs). Start with
 [`00-timeline.md`](docs/plan/00-timeline.md).

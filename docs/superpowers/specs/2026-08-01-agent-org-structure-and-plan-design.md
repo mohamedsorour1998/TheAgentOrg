@@ -81,14 +81,21 @@ TheAgentOrg/
 ├── target_repo/  tickets/          # REEM
 ├── tests/                          # AYA
 ├── fixtures/  make_fixtures.py     # canonical, done
-└── docs/plan/ {00-timeline, mohamed-sorour, mariam, habiba, reem, aya}.md
+└── docs/plan/
+    ├── 00-timeline.md  OVERVIEW-for-meeting.md
+    └── {sorour, mariam, habiba, reem, aya}/
+        ├── README.md            # general plan for that person
+        └── week1.md  week2.md  week3.md   # detailed day-by-day spec per week
 ```
 
 ## Plan docs
 
-`docs/plan/` — one file per person plus `00-timeline.md`. Each person's file has
-**Week 1 / Week 2 / Week 3**; every task carries a **"done when"** line and an explicit
-**"unblocked because…"** note so the flow is natural. Calendar Aug 8 → Aug 27.
+`docs/plan/` — one **folder per person** plus `00-timeline.md` and
+`OVERVIEW-for-meeting.md`. Each person's folder has a `README.md` (general
+lane overview + links) and three detailed weekly specs
+(`week1.md`/`week2.md`/`week3.md`) broken down day by day. Every task carries
+a **"done when"** line and, where relevant, an explicit **"unblocked
+because…"** note so the flow is natural. Calendar Aug 8 → Aug 27.
 
 The one true cross-dependency — Reem's poisoned ticket → Habiba's scanners, due **Wed
 Aug 12** — is flagged in both files. Everything else is parallel-safe via fixtures.
