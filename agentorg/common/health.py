@@ -1,4 +1,4 @@
-"""Health probe wiring for FastMCP agent servers (mirrors astrolabe)."""
+"""Health probe wiring for FastMCP agent servers."""
 
 
 def register_health(mcp):

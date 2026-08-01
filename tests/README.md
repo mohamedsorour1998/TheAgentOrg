@@ -1,19 +1,31 @@
 # tests/ — pipeline test + metrics harness
 
-**Owner: Aya.**
+**Owners: Reem + Aya (the testing pair).** You split this folder evenly by
+**filename**, so you never edit the same file and never conflict on GitHub.
 
-You test the pipeline as a **black box**: you call `run_pipeline(...)` and assert
-on the final `RunState`. You do not need to know how any agent works internally.
+You both test the pipeline as a **black box**: call `run_pipeline(...)` and assert
+on the final `RunState`. Neither of you needs to know how an agent works inside.
 
-## What to build (see docs/plan/aya.md)
+## Who writes which files
 
-1. **Contract/shape tests** — run each agent stub and assert the output validates
-   against `state.py` (never drifts).
-2. **The block test** (most important) — the poisoned ticket must end
-   `status == "blocked"` with 2 blocking findings, every run.
-3. **No-checks baseline** — a one-agent "just write and merge, no gates" path, so
-   you can compare it against the full Agent Org.
-4. **Chaos** — hang a gate, loop the reviewer, kill a scanner mid-run; assert the
-   pipeline fails safe.
-5. **DORA batch** — run 10 tickets with no checks vs 10 through the Agent Org and
-   build the metrics table.
+| File(s) | Owner | What it checks |
+|---|---|---|
+| `test_functional_contract.py` | **Reem** | Each agent's output validates against `state.py` and the values are sane. |
+| `test_functional_flow.py` | **Reem** | Clean ticket → `promoted`; the revision loop fires on `changes_requested`. |
+| `test_baseline.py` | **Reem** | The "no-checks" path (one agent writes + merges, no gates) — the "before" for DORA. |
+| `test_block_determinism.py` | **Aya** | Poisoned ticket → `blocked` with 2 findings, across 20+ repeated runs. |
+| `test_chaos_*.py` | **Aya** | Hang a gate / loop the reviewer / kill a scanner → pipeline fails safe. |
+| `test_dora_*.py` | **Aya** | Metrics harness: run N tickets through baseline vs Agent Org, collect numbers. |
+| `test_pipeline_smoke.py` | shared (starter) | Already green — the pattern to copy. |
+
+## The one handoff between you
+
+Reem builds `test_baseline.py` (the no-checks path). Aya consumes it in
+`test_dora_*.py` to build the before/after table. Until Reem's baseline lands,
+Aya works against the smoke test — nobody is blocked.
+
+## Run everything
+
+```bash
+pytest -q
+```

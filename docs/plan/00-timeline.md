@@ -36,8 +36,11 @@ anybody.
 | **Sorour** | AWS + the graph (the senior/hard work) | `infra/`, `agentorg/common/`, `graph.py`, `gates.py`, `log.py`, `agents/` |
 | **Mariam** | Git/PR + CI + deploy (the integration seam) | `agentorg/github_ops.py`, `.github/workflows/` |
 | **Habiba** | Security scanners | `agentorg/security/` |
-| **Reem** | Target app + tickets | `target_repo/`, `tickets/` |
-| **Aya** | Tests + metrics | `tests/` |
+| **Reem** | Inputs + correctness tests | `target_repo/`, `tickets/`, `tests/test_functional_*`, `test_baseline` |
+| **Aya** | Resilience + metrics tests | `tests/test_block_*`, `test_chaos_*`, `test_dora_*` |
+
+*Reem and Aya share `tests/`, split by filename — same folder, different files,
+no conflicts.*
 
 ---
 

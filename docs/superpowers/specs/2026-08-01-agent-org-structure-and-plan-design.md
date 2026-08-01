@@ -16,18 +16,19 @@ credentials) is blocked every single run.
 The assessment window opens **Aug 23**. Target ready date **Aug 27**, assuming the team
 requests and receives an early-September slot from the organizers.
 
-## Conventions (mirrored from `/home/sorour/astrolabe`)
+## Conventions
 
-The existing astrolabe repo sets the patterns we copy verbatim so this feels like the same
+The stack follows a small set of fixed conventions so every lane looks like the same
 codebase:
 
 - **Strands agent = FastMCP server** exposing one `run()` tool, built with
   `Agent(model=create_model(), system_prompt=..., tools=[...])`, deployed on AgentCore.
 - **`create_model()`** returns a `BedrockModel` (Nova) via IAM role, with an
-  OpenAI-compatible fallback when `LLM_BASE_URL` is set. Copied into `agentorg/common/`.
-- **Terraform** per-service dirs (`main.tf`, `providers.tf`, `backend.tf`, `variables.tf`,
-  `outputs.tf`) with an **S3 backend**; ECR repos + an IAM role trusting
-  `bedrock-agentcore.amazonaws.com`.
+  OpenAI-compatible fallback when `LLM_BASE_URL` is set. Lives in `agentorg/common/`.
+- **Terraform** in a `modules/` + `environments/shared/` layout (`main.tf`,
+  `providers.tf`, `backend.tf`, `variables.tf`, `outputs.tf`) with an **S3 backend**,
+  `aws ~> 6.28`, and a `locals { name, region, tags }` block; ECR repos + an IAM role
+  trusting `bedrock-agentcore.amazonaws.com` + a GitHub OIDC CI role.
 - **`common/`** shared `model.py`, `config.py`, `health.py`, `validation.py`.
 
 ## The decoupling principle (why nobody blocks anybody)
@@ -48,8 +49,11 @@ Rule after week 1: you may **ADD** optional fields to the models. Never rename o
 | **Mohamed Sorour** (senior) | devops / fullstack / ai | `infra/` (all Terraform: ECR, IAM AgentCore role, AgentCore runtimes, S3 backend), `agentorg/common/`, `agentorg/graph.py`, `agentorg/gates.py`, `agentorg/log.py`, the agent stubs, AgentCore deploy |
 | **Mariam** | DevOps | `agentorg/github_ops.py`, `.github/workflows/` (CI), **co-owns AgentCore deploy with Sorour** — the integration/deploy seam that wires into the graph and AWS |
 | **Habiba** | DevOps | `agentorg/security/` (semgrep/gitleaks/trivy wrappers) |
-| **Reem** | testing | `target_repo/` (the app agents modify) + `tickets/` (clean + poisoned) |
-| **Aya** | testing | `tests/` (no-checks baseline, chaos, DORA metrics) |
+| **Reem** | testing | `target_repo/` (the app agents modify) + `tickets/` (clean + poisoned) + correctness tests (`tests/test_functional_*`) + the no-checks baseline (`tests/test_baseline.py`) |
+| **Aya** | testing | resilience + metrics tests: block determinism (`tests/test_block_*`), chaos (`tests/test_chaos_*`), DORA (`tests/test_dora_*`) |
+
+Reem and Aya are the testing pair; they share `tests/` split by filename (different files, no
+conflicts). Reem builds the no-checks baseline, Aya consumes it in the DORA metrics.
 
 **Sorour takes all AWS and all Terraform** — the senior, hard work. The other four lanes are
 self-contained and require no AWS. Mariam's lane is deliberately the *integration seam*:
@@ -63,11 +67,13 @@ dependency is one-directional and never stalls the graph.
 TheAgentOrg/
 ├── README.md  .gitignore  pyproject.toml  .env.example
 ├── infra/                          # SOROUR — Terraform, S3 backend
-│   ├── agentcore/ {main,providers,backend,variables,outputs}.tf
+│   ├── Terraform/
+│   │   ├── environments/shared/ {backend,providers,variables,main,outputs}.tf + terraform.tfvars
+│   │   └── modules/agentcore/ {main,variables,outputs}.tf
 │   └── README.md
 ├── agentorg/
 │   ├── state.py                    # the contract, unchanged
-│   ├── common/ {model,config,health,validation}.py   # SOROUR (from astrolabe)
+│   ├── common/ {model,config,health,validation}.py   # SOROUR
 │   ├── graph.py  gates.py  log.py  # SOROUR
 │   ├── github_ops.py               # MARIAM
 │   ├── agents/ {planner,developer,reviewer,security,sre}.py   # stubs, SOROUR

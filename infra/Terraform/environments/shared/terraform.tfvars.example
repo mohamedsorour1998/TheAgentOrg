@@ -1,0 +1,11 @@
+github_oidc_roles = [
+  {
+    name     = "github-actions-role"
+    subjects = ["repo:mohamedsorour1998/TheAgentOrg:*"]
+    policies = {
+      AmazonEC2ContainerRegistryFullAccess = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess"
+      AmazonBedrockFullAccess              = "arn:aws:iam::aws:policy/AmazonBedrockFullAccess"
+    }
+    tags = { Environment = "shared" }
+  }
+]

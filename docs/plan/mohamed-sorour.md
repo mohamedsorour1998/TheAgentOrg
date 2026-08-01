@@ -24,13 +24,14 @@ The scaffold is built and green. Week 1 is about locking it and standing up AWS.
   understood.
 
 - [ ] **Stand up the AWS state backend.**
-  `aws s3 mb s3://theagentorg-terraform-state` + enable versioning (see
-  `infra/agentcore/backend.tf`).
-  *Done when:* `cd infra/agentcore && terraform init` succeeds.
+  `aws s3 mb s3://theagentorg-shared-terraform-backend` + enable versioning (see
+  `infra/Terraform/environments/shared/backend.tf`).
+  *Done when:* `cd infra/Terraform/environments/shared && terraform init` succeeds.
 
-- [ ] **Apply the AgentCore infra.** `terraform apply` — creates the 5 ECR repos
-  and the `bedrock-agentcore` IAM role.
-  *Done when:* `terraform output` shows 5 ECR URLs and the role ARN.
+- [ ] **Apply the AgentCore infra.** `terraform apply` — creates the 5 ECR repos,
+  the `bedrock-agentcore` runtime role, and the GitHub OIDC CI role.
+  *Done when:* `terraform output` shows 5 ECR URLs, the runtime role ARN, and the
+  `github-actions-role` ARN.
   *You're unblocked because:* this depends on nobody. Start day 1.
 
 - [ ] **Prove Bedrock works.** One tiny script: `create_model()` + a one-line

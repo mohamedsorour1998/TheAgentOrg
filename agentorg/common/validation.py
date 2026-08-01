@@ -1,4 +1,4 @@
-"""Task input validation shared by agents (mirrors astrolabe)."""
+"""Task input validation shared by agents."""
 
 MAX_TASK_LEN = 4000
 

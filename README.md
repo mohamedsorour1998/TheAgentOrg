@@ -7,8 +7,7 @@ A multi-agent CI/CD pipeline. A ticket flows through five role agents —
 gates. A deterministic security **block rule** (pure code in `state.py`, not a
 prompt) halts any change carrying a high/critical finding.
 
-Built on **AWS Bedrock AgentCore** + **Strands** + **Terraform**, following the
-conventions of the astrolabe repo.
+Built on **AWS Bedrock AgentCore** + **Strands** + **Terraform**.
 
 > **The demo:** a poisoned ticket (hardcoded AWS credentials) is blocked on every
 > single run — because the verdict is computed by code, not guessed by a model.
@@ -38,8 +37,8 @@ frozen contract in `agentorg/state.py`.
 | `agentorg/common/`, `graph.py`, `gates.py`, `log.py`, `agents/` | **Sorour** | Model provider, the graph, human gates, decision log, agent stubs |
 | `agentorg/github_ops.py`, `.github/workflows/` | **Mariam** | Branch/PR/comments + CI; co-owns AgentCore deploy |
 | `agentorg/security/` | **Habiba** | semgrep / gitleaks / trivy wrappers |
-| `target_repo/`, `tickets/` | **Reem** | The app agents modify + the two tickets |
-| `tests/` | **Aya** | Baseline, chaos, DORA metrics |
+| `target_repo/`, `tickets/`, `tests/test_functional_*`, `test_baseline` | **Reem** | The app + tickets + correctness tests + the no-checks baseline |
+| `tests/test_block_*`, `test_chaos_*`, `test_dora_*` | **Aya** | Determinism, chaos, DORA metrics |
 
 ## How nobody blocks anybody
 

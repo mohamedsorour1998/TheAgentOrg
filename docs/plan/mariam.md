@@ -60,8 +60,10 @@ node. (Test: run `python -m agentorg.graph` with your code in place.)
 
 ## Week 3 — Aug 22 to 27: deploy + hand off
 
-- [ ] **AgentCore deploy, with Sorour.** Build the arm64 agent images, push to the
-  ECR repos his Terraform created, create the AgentCore runtimes.
+- [ ] **AgentCore deploy, with Sorour.** We already have a working AgentCore
+  deploy from another project — reuse it, don't reinvent. It's the
+  `bedrock-agentcore-starter-toolkit` CLI: `configure` once, then `launch` on
+  every push. See the reference commands + CI job below.
   *Done when:* the graph runs against AgentCore-hosted agents.
   *You're unblocked because:* Sorour's `terraform apply` (week 1) already made
   the ECR repos + IAM role; you're pushing into them.
@@ -71,6 +73,71 @@ node. (Test: run `python -m agentorg.graph` with your code in place.)
   *Done when:* both runs behave identically to online.
 
 - [ ] **After freeze (Tue Aug 25):** fix only what the dry runs find. No new work.
+
+### AgentCore CLI — the exact pattern we already run
+
+Install the CLI, configure the agent once (points it at the runtime IAM role
+Sorour's Terraform created), then launch:
+
+```bash
+pip install bedrock-agentcore-starter-toolkit
+
+cd agentorg/agents
+agentcore configure -e planner.py -n theagentorg_planner \
+  -er arn:aws:iam::<ACCOUNT_ID>:role/theagentorg-shared-agentcore-runtime-role \
+  -rf requirements.txt -r us-east-1 -ni
+
+agentcore launch --auto-update-on-conflict \
+  --env BEDROCK_MODEL=us.amazon.nova-2-lite-v1:0
+
+agentcore status                 # shows the runtime ARN
+agentcore invoke '{"task":"..."}' # smoke-test the deployed agent
+```
+
+`agentcore launch` builds the ARM64 image, pushes it to ECR, and creates/updates
+the AgentCore runtime — one command replaces a whole Docker + ECR + runtime dance.
+
+### CI deploy job — reuse of our existing `agent-deploy.yml`
+
+Add this to `.github/workflows/` (adapted from the workflow we already have
+working). It uses OIDC (no long-lived AWS keys) and only fires when an agent
+changes:
+
+```yaml
+name: Deploy AgentCore Agent
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["agentorg/agents/**"]
+
+env:
+  AWS_ACCOUNT_ID: "<ACCOUNT_ID>"
+  IAM_ROLE: github-actions-role      # OIDC deploy role (Sorour creates in Terraform)
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    defaults: { run: { working-directory: agentorg/agents } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.IAM_ROLE }}
+          aws-region: us-east-1
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install agentcore CLI
+        run: pip install bedrock-agentcore-starter-toolkit
+      - name: Deploy agent
+        run: agentcore launch --auto-update-on-conflict --env BEDROCK_MODEL=us.amazon.nova-2-lite-v1:0
+```
+
+**What you + Sorour split:** he owns the IAM roles (runtime role + the OIDC
+`github-actions-role`) in Terraform; you own this workflow and the `agentcore
+configure`/`launch` wiring. Pair on the ARNs — that's the one thing you both
+touch.
 
 ---
 

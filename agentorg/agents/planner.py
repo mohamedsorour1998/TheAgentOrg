@@ -2,9 +2,9 @@
 
 OWNER: Sorour.  Strands agent, deployed on AgentCore (see infra/agentcore/).
 
-Follows the astrolabe pattern: an Agent(create_model(), prompt, tools) exposed
-as a FastMCP `run` tool. Stubbed to return the fixture plan until the real
-prompt + tools are wired in week 2.
+An Agent(create_model(), prompt, tools) exposed as a FastMCP `run` tool.
+Stubbed to return the fixture plan until the real prompt + tools are wired in
+week 2.
 """
 
 from ..state import RunState, PlanResult

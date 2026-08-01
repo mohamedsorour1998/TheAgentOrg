@@ -68,8 +68,11 @@ that's the story the judges score.
 | **Sorour** | AWS + the pipeline brain | Sets up everything on AWS, wires the 5 agents and 3 gates together. The heavy/senior part. |
 | **Mariam** | Git + GitHub + deploy | Makes the pipeline open real pull requests, post comments, and run CI. Connects our code to AWS with Sorour. |
 | **Habiba** | Security scanners | Runs the tools that catch the hardcoded key. **Her part is what makes the block happen** — the star of the demo. |
-| **Reem** | The app + the tickets | Builds the little app the agents edit, and writes the two tickets (the clean one and the poisoned one). |
-| **Aya** | Testing + the numbers | Proves the block works every time, and builds the before/after table: "no checks ships bad code, Agent Org blocks it 10/10." |
+| **Reem** | Inputs + correctness testing | Builds the app the agents edit + the two tickets, then tests that every agent's output is **correct**, and builds the "no-checks" baseline. |
+| **Aya** | Resilience + metrics testing | Proves the block works **every time**, breaks the pipeline on purpose to prove it fails safe, and builds the before/after DORA table (blocks bad code 10/10). |
+
+*Reem and Aya are the testing pair — they split the test suite evenly and own the
+demo together.*
 
 ## How we work without stepping on each other
 

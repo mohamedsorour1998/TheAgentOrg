@@ -1,7 +1,6 @@
 """Shared configuration for The Agent Org.
 
-Mirrors astrolabe/agents/common/config.py. All AWS + LLM knobs live here so no
-agent hardcodes a model id or region.
+All AWS + LLM knobs live here so no agent hardcodes a model id or region.
 """
 
 import os

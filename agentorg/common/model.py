@@ -1,8 +1,7 @@
 """Shared LLM model provider for all agents.
 
-Copied from astrolabe/agents/common/model.py. Uses Bedrock directly via IAM
-role by default; falls back to an OpenAI-compatible endpoint only if
-LLM_BASE_URL is explicitly set.
+Uses Bedrock directly via IAM role by default; falls back to an
+OpenAI-compatible endpoint only if LLM_BASE_URL is explicitly set.
 """
 
 from . import config
