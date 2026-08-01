@@ -80,18 +80,14 @@ CI workflow's `role-to-assume`.
 
 ## Wed Aug 12 — prove Bedrock works
 
-**Task: one throwaway script (or under `scripts/` as a smoke test).**
-```python
-from agentorg.common.model import create_model
-from strands import Agent
-
-agent = Agent(model=create_model(), system_prompt="You are terse.")
-print(agent("say hi"))
+**Task: run the Bedrock smoke test.**
+```bash
+python scripts/bedrock_smoke_test.py
 ```
 If `AccessDenied`: attach `AmazonBedrockFullAccess` to your IAM user for the
 hackathon account (fine — not a shared/prod account).
 
-**Done when:** a real text completion comes back, not an exception.
+**Done when:** the script prints `OK: Bedrock is reachable.`
 
 **Task: check in on the poisoned-ticket handoff** (Reem → Habiba, due today).
 Not your task — a 2-minute ping if it hasn't landed in `tickets/poisoned.md`
