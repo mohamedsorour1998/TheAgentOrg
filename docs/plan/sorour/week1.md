@@ -59,15 +59,22 @@ terraform plan
 terraform apply
 ```
 Creates: 5 ECR repos (`theagentorg-shared-{planner,developer,reviewer,
-security,sre}-agent`, keep-last-5), the `theagentorg-shared-agentcore-
-runtime-role` (trusts `bedrock-agentcore.amazonaws.com`), the GitHub OIDC
-provider + `github-actions-role` (scoped to
-`repo:mohamedsorour1998/TheAgentOrg:*`).
+security,sre}-agent`, keep-last-5) and the `theagentorg-shared-agentcore-
+runtime-role` (trusts `bedrock-agentcore.amazonaws.com`).
+
+The `github-actions-role` and its GitHub OIDC provider ALREADY EXIST in the
+account (shared with other repos' CI) — Terraform looks them up through a `data`
+source and never manages them. The TheAgentOrg subject
+(`repo:mohamedsorour1998/TheAgentOrg:*`) and the ECR/Bedrock policies were added
+to that existing role once, via the AWS CLI, outside Terraform. So `apply`
+creates only the repos + runtime role; it must not try to (re)create the OIDC
+provider or the CI role.
 
 **Done when:** `terraform output` shows:
 - `ecr_repository_urls` — 5 entries
 - `agentcore_runtime_role_arn` — one ARN
-- `github_actions_role_arns` — `github-actions-role` ARN
+- `github_actions_role_arns` — the existing `github-actions-role` ARN, surfaced
+  for Mariam (not created here)
 
 **You're unblocked because:** depends on nobody — start the moment the
 backend bucket exists.
