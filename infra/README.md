@@ -12,9 +12,9 @@ infra/Terraform/
 │       ├── backend.tf          # S3 remote state
 │       ├── providers.tf        # aws ~> 6.28, region us-east-1
 │       ├── variables.tf
-│       ├── main.tf             # locals + GitHub OIDC + agentcore module
+│       ├── main.tf             # locals + GitHub OIDC role lookup + agentcore module
 │       ├── outputs.tf
-│       └── terraform.tfvars    # the github-actions-role definition
+│       └── terraform.tfvars    # currently empty (no variables required)
 └── modules/
     └── agentcore/              # 5 ECR repos + the AgentCore runtime role
         ├── main.tf
@@ -32,9 +32,13 @@ split so infra grows the same way the rest of our stack does.
 - **AgentCore runtime role** — `theagentorg-shared-agentcore-runtime-role`, trusted
   by `bedrock-agentcore.amazonaws.com`: log write, Bedrock foundation-model invoke,
   agent-to-agent runtime invoke, ECR pull. Pass its ARN to `agentcore configure -er`.
-- **GitHub OIDC provider + `github-actions-role`** — lets CI assume a role with no
-  static keys, scoped to `repo:mohamedsorour1998/TheAgentOrg:*`. Mariam's deploy
-  workflow uses it.
+- **GitHub OIDC role lookup** — the AWS account already had a shared
+  `github-actions-role` + OIDC provider trusted by other repos' CI. Rather than
+  let Terraform overwrite that trust policy, `TheAgentOrg`'s subject
+  (`repo:mohamedsorour1998/TheAgentOrg:*`) and the ECR/Bedrock policies were
+  added to the existing role via the AWS CLI, outside Terraform. `main.tf`
+  only reads the role's ARN via a data source for the `github_actions_role_arns`
+  output — Mariam's deploy workflow uses that ARN.
 
 The AgentCore **runtimes** themselves are created by the AgentCore CLI at deploy
 time (see `docs/plan/mariam/week3.md`) once the images exist — Terraform lays down the

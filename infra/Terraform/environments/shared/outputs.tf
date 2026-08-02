@@ -10,5 +10,5 @@ output "agentcore_runtime_role_arn" {
 
 output "github_actions_role_arns" {
   description = "GitHub OIDC role ARN per role name (used by CI)"
-  value       = { for k, m in module.iam_github_oidc_role : k => m.arn }
+  value       = { "github-actions-role" = data.aws_iam_role.github_actions.arn }
 }

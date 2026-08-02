@@ -15,25 +15,15 @@ locals {
 ################################################################################
 # GitHub OIDC provider + CI role
 #
-# Lets GitHub Actions assume a role with no static keys (see .github/workflows/).
-# Mariam's CI deploy step uses this role — subjects scope it to our repo only.
+# The account already has a shared `github-actions-role` + OIDC provider
+# trusted by other repos' CI. Rather than let Terraform overwrite that trust
+# policy (which would drop the other repos' subjects), this role is managed
+# outside Terraform: the TheAgentOrg subject and the ECR/Bedrock policies
+# were added to the existing role via the AWS CLI. This data source just
+# looks up its ARN for the output below — Terraform never writes to it.
 ################################################################################
-module "iam_github_oidc_provider" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-github-oidc-provider"
-  version = "5.55.0"
-}
-
-module "iam_github_oidc_role" {
-  for_each = { for r in var.github_oidc_roles : r.name => r }
-
-  source  = "terraform-aws-modules/iam/aws//modules/iam-github-oidc-role"
-  version = "5.55.0"
-
-  name     = each.value.name
-  subjects = each.value.subjects
-  policies = each.value.policies
-
-  tags = merge(local.tags, lookup(each.value, "tags", {}))
+data "aws_iam_role" "github_actions" {
+  name = "github-actions-role"
 }
 
 ################################################################################
