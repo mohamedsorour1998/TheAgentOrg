@@ -60,16 +60,21 @@ terraform apply
 ```
 Creates: 5 ECR repos (`theagentorg-shared-{planner,developer,reviewer,
 security,sre}-agent`, keep-last-5) and the `theagentorg-shared-agentcore-
-runtime-role` (trusts `bedrock-agentcore.amazonaws.com`). The
-`github-actions-role` already existed in the account (shared with other
-repos' CI) — it's looked up via a Terraform data source rather than
-created, and `repo:mohamedsorour1998/TheAgentOrg:*` plus the ECR/Bedrock
-policies were added to it via the AWS CLI (see `infra/README.md`).
+runtime-role` (trusts `bedrock-agentcore.amazonaws.com`).
+
+The `github-actions-role` and its GitHub OIDC provider ALREADY EXIST in the
+account (shared with other repos' CI) — Terraform looks them up through a `data`
+source and never manages them. The TheAgentOrg subject
+(`repo:mohamedsorour1998/TheAgentOrg:*`) and the ECR/Bedrock policies were added
+to that existing role once, via the AWS CLI, outside Terraform. So `apply`
+creates only the repos + runtime role; it must not try to (re)create the OIDC
+provider or the CI role.
 
 **Done when:** `terraform output` shows:
 - `ecr_repository_urls` — 5 entries
 - `agentcore_runtime_role_arn` — one ARN
-- `github_actions_role_arns` — `github-actions-role` ARN
+- `github_actions_role_arns` — the existing `github-actions-role` ARN, surfaced
+  for Mariam (not created here)
 
 **You're unblocked because:** depends on nobody — start the moment the
 backend bucket exists.
@@ -82,14 +87,18 @@ CI workflow's `role-to-assume`.
 
 ## Wed Aug 12 — prove Bedrock works
 
-**Task: run the Bedrock smoke test.**
-```bash
-python scripts/bedrock_smoke_test.py
+**Task: one throwaway script (or under `scripts/` as a smoke test).**
+```python
+from agentorg.common.model import create_model
+from strands import Agent
+
+agent = Agent(model=create_model(), system_prompt="You are terse.")
+print(agent("say hi"))
 ```
 If `AccessDenied`: attach `AmazonBedrockFullAccess` to your IAM user for the
 hackathon account (fine — not a shared/prod account).
 
-**Done when:** the script prints `OK: Bedrock is reachable.`
+**Done when:** a real text completion comes back, not an exception.
 
 **Task: check in on the poisoned-ticket handoff** (Reem → Habiba, due today).
 Not your task — a 2-minute ping if it hasn't landed in `tickets/poisoned.md`
