@@ -25,3 +25,7 @@ MAX_REVISION_LOOPS = int(os.environ.get("MAX_REVISION_LOOPS", "3"))
 # OFFLINE=true makes github_ops use plain local git instead of the GitHub API,
 # so the whole demo runs with the network off.
 OFFLINE = os.environ.get("OFFLINE", "false").lower() == "true"
+
+# GitHub seam (Mariam) ------------------------------------------------------
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # e.g. "you/demo-app"

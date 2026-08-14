@@ -20,25 +20,86 @@ Until you replace them, these stubs return the values from fixtures/ so every
 other lane runs green.
 """
 
+import hashlib
+
+from github import Github, GithubException
+
 from .state import RunState, DevResult, Finding
 from .common import config
 from . import fixtures_loader
 
 
-def open_pr(state: RunState) -> DevResult:
-    """Create a branch + PR for the developer's diff. Returns DevResult with pr_url set.
+def _short_sha(text: str) -> str:
+    """First 7 hex chars of sha1(text) — stable branch suffix per diff."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:7]
 
-    STUB: returns the fixture DevResult (already has a fake pr_url).
-    REAL: use PyGithub (online) or `git` subprocess (offline) to open the PR,
-          then set dev.pr_url on the returned result.
-    """
+
+def open_pr(state: RunState) -> DevResult:
+    """Create a branch + PR for the developer's diff. Returns DevResult with pr_url set."""
     dev = state.dev or fixtures_loader.dev()
+    branch = f"agent-org/{state.ticket_id}-{_short_sha(dev.diff)}"
+    dev.branch = branch
+
     if config.OFFLINE:
-        # TODO(Mariam): git checkout -b <branch>; apply diff; commit. No network.
-        dev.pr_url = f"local://{dev.branch}"
-    else:
-        # TODO(Mariam): PyGithub create_pull(...) and set the real URL.
-        dev.pr_url = dev.pr_url or "https://github.com/quorum/demo-app/pull/PENDING"
+        # Offline path implemented in week 2. Placeholder keeps the graph green.
+        dev.pr_url = f"local://{branch}"
+        return dev
+
+    gh = Github(config.GITHUB_TOKEN)
+    repo = gh.get_repo(config.GITHUB_REPO)
+
+    # 1. Branch off main at its current tip.
+    base = repo.get_branch("main")
+    ref = f"refs/heads/{branch}"
+    try:
+        repo.create_git_ref(ref=ref, sha=base.commit.sha)
+    except GithubException as e:
+        if e.status != 422:
+            raise
+
+    # 2. Commit the diff. Write the raw unified diff so the PR carries the
+    # change the scanners will read. One deterministic path per run.
+    path = f"changes/{state.ticket_id}.diff"
+    message = f"{state.ticket_id}: {dev.summary}"
+
+    try:
+        existing = repo.get_contents(path, ref=branch)
+        repo.update_file(
+            path,
+            message,
+            dev.diff,
+            existing.sha,
+            branch=branch,
+        )
+    except GithubException as e:
+        if e.status == 404:
+            repo.create_file(
+                path,
+                message,
+                dev.diff,
+                branch=branch,
+            )
+        else:
+            raise
+
+    # 3. Open the PR (reuse the open one if this branch already has it).
+    try:
+        pr = repo.create_pull(
+            title=message,
+            body=dev.summary,
+            head=branch,
+            base="main",
+        )
+    except GithubException as e:
+        if e.status == 422:
+            pr = repo.get_pulls(
+                state="open",
+                head=f"{repo.owner.login}:{branch}",
+            )[0]
+        else:
+            raise
+
+    dev.pr_url = pr.html_url
     return dev
 
 

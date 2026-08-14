@@ -9,7 +9,7 @@ dependencies = [
     # "strands-agents",        # the agent framework (Sorour)
     # "fastmcp",               # agent servers on AgentCore (Sorour)
     # "boto3",                 # AWS / Bedrock (Sorour)
-    # "PyGithub",              # github_ops (Mariam)
+    "PyGithub",               # github_ops (Mariam)
     # "flask",                 # target_repo app (Reem)
 ]
 
