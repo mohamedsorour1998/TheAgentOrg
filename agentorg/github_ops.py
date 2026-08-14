@@ -101,16 +101,38 @@ def open_pr(state: RunState) -> DevResult:
 
     dev.pr_url = pr.html_url
     return dev
-
-
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
-    """Post a comment on the PR (used by reviewer + security lanes). Returns comment ref.
+    """Post a comment on the PR (reviewer + security lanes). Returns comment ref (URL)."""
+    if finding is not None:
+        header = (
+            f"**[{finding.tool} · {finding.severity}] {finding.rule}** "
+            f"({finding.file}:{finding.line})\n\n"
+        )
+        body = header + body
 
-    STUB: returns a fake ref.
-    REAL: PyGithub issue/review comment (online) or append to a local NOTES file (offline).
-    """
-    # TODO(Mariam): real comment. finding is optional structured context.
-    return f"comment://{state.run_id}"
+    if config.OFFLINE:
+        # Offline path implemented in week 2.
+        return f"comment://{state.run_id}"
+
+    gh = Github(config.GITHUB_TOKEN)
+    repo = gh.get_repo(config.GITHUB_REPO)
+
+    branch = state.dev.branch if state.dev else ""
+
+    pulls = repo.get_pulls(
+        state="open",
+        head=f"{repo.owner.login}:{branch}",
+    )
+
+    if pulls.totalCount == 0:
+        raise RuntimeError(
+            f"no open PR for branch {branch!r} to comment on"
+        )
+
+    issue = repo.get_issue(pulls[0].number)
+    comment = issue.create_comment(body)
+
+    return comment.html_url
 
 
 def deploy_note() -> str:
