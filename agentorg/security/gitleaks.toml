@@ -1,0 +1,25 @@
+title = "The Agent Org Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "aws-access-key-id"
+description = "AWS access key ID"
+regex = '''(?i)AWS_ACCESS_KEY_ID\s*=\s*["'](AKIA[0-9A-Z]{16})["']'''
+secretGroup = 1
+keywords = ["AWS_ACCESS_KEY_ID"]
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS secret access key"
+regex = '''(?i)AWS_SECRET_ACCESS_KEY\s*=\s*["']([A-Za-z0-9/+=]{40})["']'''
+secretGroup = 1
+keywords = ["AWS_SECRET_ACCESS_KEY"]
+
+[[rules]]
+id = "aws-access-key-id-standalone"
+description = "AWS access key ID found in text"
+regex = '''\bAKIA[0-9A-Z]{16}\b'''
+secretGroup = 0
+keywords = ["AKIA"]
