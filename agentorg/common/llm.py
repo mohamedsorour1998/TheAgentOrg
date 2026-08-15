@@ -24,7 +24,11 @@ from pydantic import BaseModel, ValidationError
 from . import config
 from .model import create_model
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+# The language tag is optional AND arbitrary. A model asked for JSON still
+# fences its reply as ```python or ```JSON often enough that matching only the
+# literal "json" would hand back "python\n{...}" as the payload, fail to parse,
+# and show the fixture with no explanation.
+_FENCE = re.compile(r"```(?:\w+)?\s*(.*?)```", re.DOTALL)
 
 
 def available() -> bool:
@@ -79,6 +83,17 @@ def text(system_prompt: str, user_prompt: str) -> str | None:
         logging.getLogger(__name__).warning(
             "model call failed; the caller will fall back to its fixture",
             exc_info=True,
+        )
+        return None
+    if not isinstance(reply, str):
+        # `_complete` is the seam tests substitute, so it can return anything;
+        # returning None from it is the natural way to simulate "the model gave
+        # nothing". Degrade like any other failure instead of raising into the
+        # agent. This guard is also what makes the .strip() below unable to
+        # raise -- keep the strip on this side of it.
+        logging.getLogger(__name__).warning(
+            "model returned %s, not a string; the caller falls back to its fixture",
+            type(reply).__name__,
         )
         return None
     reply = reply.strip()
