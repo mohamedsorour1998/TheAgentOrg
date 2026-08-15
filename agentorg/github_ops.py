@@ -3,26 +3,25 @@
 OWNER: Mariam.  INTEGRATION SEAM with Sorour's graph.
 
 The graph calls these three functions and nothing else. Their signatures are
-frozen (they take/return the shapes in state.py), so Sorour's graph.py can call
-them from day 1 while they are still stubs. You fill in the real bodies on your
-own branch; the graph keeps working the whole time.
+frozen (they take/return the shapes in state.py), so the bodies could go from
+stub to real without graph.py changing a line — which is exactly what happened.
 
-Two modes, chosen by config.OFFLINE:
-    online  (default)     — real GitHub API via PyGithub / gh, opens real PRs
-    offline (OFFLINE=true) — plain local git, no network, for the live demo
+Two modes:
+    online  — real GitHub API via PyGithub; opens real PRs and posts real comments.
+              Needs GITHUB_TOKEN + DEMO_REPO (see agentorg/common/config.py).
+    local   — no network. Used when OFFLINE=true, and automatically whenever
+              those credentials are absent, so every other lane (and CI) can run
+              the pipeline without a token. Returns local:// and comment:// refs.
 
-WHAT TO BUILD (task by task — see docs/plan/mariam.md):
-    1. open_pr:      create a branch, commit the diff, open a PR, return its URL
-    2. post_comment: add a review/security comment to the PR
-    3. offline mode: the same three operations against a local git repo
-
-Until you replace them, these stubs return the values from fixtures/ so every
-other lane runs green.
+Still to build:
+    - real local-git offline mode, branch + commit + NOTES  (week2.md)
+    - deploy_note(), co-owned with Sorour                   (week3.md)
+  see docs/plan/mariam/.
 """
 
 import hashlib
 
-from github import Github, GithubException
+from github import Auth, Github, GithubException
 
 from .state import RunState, DevResult, Finding
 from .common import config
@@ -34,19 +33,34 @@ def _short_sha(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:7]
 
 
+def _use_local() -> bool:
+    """True when we must not touch the GitHub API.
+
+    Either OFFLINE was requested, or no credentials are configured. The second
+    case matters: PyGithub raises on an empty token, so without this guard every
+    other lane's `python -m agentorg.graph` — and CI, which has no secrets —
+    dies inside the PR node. Nobody needs a token to run the pipeline.
+    """
+    return config.OFFLINE or not (config.GITHUB_TOKEN and config.GITHUB_REPO)
+
+
+def _repo():
+    """Authenticated handle on the target demo repo."""
+    return Github(auth=Auth.Token(config.GITHUB_TOKEN)).get_repo(config.GITHUB_REPO)
+
+
 def open_pr(state: RunState) -> DevResult:
     """Create a branch + PR for the developer's diff. Returns DevResult with pr_url set."""
     dev = state.dev or fixtures_loader.dev()
     branch = f"agent-org/{state.ticket_id}-{_short_sha(dev.diff)}"
     dev.branch = branch
 
-    if config.OFFLINE:
-        # Offline path implemented in week 2. Placeholder keeps the graph green.
+    if _use_local():
+        # No network (or no credentials): keep the graph green with a local ref.
         dev.pr_url = f"local://{branch}"
         return dev
 
-    gh = Github(config.GITHUB_TOKEN)
-    repo = gh.get_repo(config.GITHUB_REPO)
+    repo = _repo()
 
     # 1. Branch off main at its current tip.
     base = repo.get_branch("main")
@@ -101,6 +115,8 @@ def open_pr(state: RunState) -> DevResult:
 
     dev.pr_url = pr.html_url
     return dev
+
+
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
     """Post a comment on the PR (reviewer + security lanes). Returns comment ref (URL)."""
     if finding is not None:
@@ -110,12 +126,11 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         )
         body = header + body
 
-    if config.OFFLINE:
-        # Offline path implemented in week 2.
+    if _use_local():
+        # No network (or no credentials): hand back a local ref, same as open_pr.
         return f"comment://{state.run_id}"
 
-    gh = Github(config.GITHUB_TOKEN)
-    repo = gh.get_repo(config.GITHUB_REPO)
+    repo = _repo()
 
     branch = state.dev.branch if state.dev else ""
 
