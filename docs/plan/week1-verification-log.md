@@ -1,4 +1,10 @@
-# Week 1 Verification Log — Sorour
+# Week 1 Verification Log
+
+Per-engineer record of what week 1 actually delivered, and how it was checked.
+
+---
+
+# Sorour
 
 **Date:** 2026-08-01
 
@@ -43,3 +49,50 @@
 Sent her the AgentCore runtime role ARN and the `github-actions-role` ARN
 (both above) — she needs them for `agentcore configure -er ...` and her CI
 workflow's `role-to-assume` (see `docs/plan/mariam/week3.md`).
+
+---
+
+# Mariam
+
+**Date:** 2026-08-15 · PR #2 `feature/github-ops` · plan: `docs/plan/mariam/week1.md`
+
+## Delivered
+
+- [x] `open_pr(state)` — real PyGithub: branches off `main`, commits the diff to
+      `changes/<ticket_id>.diff`, opens the PR, sets `dev.pr_url`. Re-runs are
+      idempotent (422 on an existing ref/PR is caught and reused).
+- [x] `post_comment(state, body, finding=None)` — real PyGithub issue comment,
+      returns the comment `html_url`. A `Finding` renders as a bold
+      `[tool · severity] rule (file:line)` header above the body.
+- [x] `PyGithub` moved into `pyproject.toml` dependencies.
+- [x] `GITHUB_TOKEN` / `GITHUB_REPO` added to `agentorg/common/config.py`
+      (add-only — no existing field renamed, contract intact).
+
+## Verified here (no credentials needed)
+
+- [x] `pytest -q` → 3 passed
+- [x] `python -m agentorg.graph` → status=promoted
+- [x] `python -m agentorg.graph --poisoned` → status=blocked, blocking=2
+- [x] Branch convention `agent-org/<ticket_id>-<short_sha>`; `short_sha` is
+      stable per diff (re-runs reuse the branch) and changes when the diff does.
+
+## Fixed during review (commit `d7f3c37`)
+
+`open_pr`/`post_comment` constructed a PyGithub client unconditionally on the
+online path, and `OFFLINE` defaults to `false`. PyGithub asserts on an empty
+token, so **every run without credentials died inside the PR node** — CI went
+3-failed, and so would any other lane's `python -m agentorg.graph`. The plan's
+own sample code had this flaw, so it was inherited, not introduced.
+
+`_use_local()` now takes the local path when `OFFLINE` is set **or** the
+credentials are missing. With credentials present the real GitHub path is
+unchanged. Also switched to `Auth.Token` (drops the PyGithub deprecation
+warning) and fixed PEP8/EOF nits.
+
+## Not verified here
+
+The **online path** (real PR + real comment on `demo-app`) needs Mariam's
+`GITHUB_TOKEN` and her `demo-app` sandbox; neither exists on Sorour's machine.
+Code-reviewed against the plan and matches it. Mariam to confirm the two
+one-liners in `week1.md` (Tue–Wed and Thu–Fri) print a real `pull/N` URL and an
+`#issuecomment-` URL.
