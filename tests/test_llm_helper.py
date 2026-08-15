@@ -46,6 +46,20 @@ def test_extract_json_from_an_uppercase_json_fence():
     assert llm.extract_json(raw) == '{"a": 1}'
 
 
+def test_extract_json_falls_through_a_fence_that_holds_no_object():
+    # The first fence is a code block and the JSON follows it. Trusting the
+    # first fence unconditionally returns the code, never parses, and puts
+    # fixture data on screen while the run looks live.
+    raw = 'Here is the code:\n```python\nx = 1\n```\nAnd the plan: {"a": 1}'
+    assert llm.extract_json(raw) == '{"a": 1}'
+
+
+def test_extract_json_from_an_unclosed_fence():
+    # No closing fence, so the regex cannot match and the brace scan carries it.
+    raw = '```json\n{"a": 1}'
+    assert llm.extract_json(raw) == '{"a": 1}'
+
+
 def test_available_is_false_when_disabled(monkeypatch):
     monkeypatch.setattr(llm.config, "LLM_DISABLED", True)
     assert llm.available() is False
@@ -124,6 +138,15 @@ def test_structured_returns_none_when_the_model_returns_a_non_string(monkeypatch
     monkeypatch.setattr(llm.config, "LLM_DISABLED", False)
     monkeypatch.setattr(llm, "available", lambda: True)
     monkeypatch.setattr(llm, "_complete", lambda s, u: None)
+    assert llm.structured(PlanResult, "sys", "user") is None
+
+
+def test_structured_returns_none_for_an_empty_fence(monkeypatch):
+    # A fence with nothing in it must still degrade, not become a parse attempt
+    # on the raw reply that somehow succeeds.
+    monkeypatch.setattr(llm.config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", lambda s, u: "```\n\n```")
     assert llm.structured(PlanResult, "sys", "user") is None
 
 

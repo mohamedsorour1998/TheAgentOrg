@@ -56,7 +56,13 @@ def extract_json(text_in: str) -> str:
     text_in = text_in.strip()
     fenced = _FENCE.search(text_in)
     if fenced:
-        return fenced.group(1).strip()
+        body = fenced.group(1).strip()
+        # Only trust the fence if it actually holds an object. A reply that
+        # opens with a ```python block and puts the JSON after it would
+        # otherwise hand back the code, fail to parse, and show the fixture
+        # with nothing on screen to say so. Fall through to the brace scan.
+        if "{" in body:
+            return body
     start, end = text_in.find("{"), text_in.rfind("}")
     if start != -1 and end != -1 and end > start:
         return text_in[start : end + 1]
