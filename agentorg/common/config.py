@@ -29,3 +29,8 @@ OFFLINE = os.environ.get("OFFLINE", "false").lower() == "true"
 # GitHub seam (Mariam) ------------------------------------------------------
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # the shared target repo, "owner/name"
+
+# LLM availability (Sorour) -------------------------------------------------
+# Set true to force every agent onto its fixture without attempting a model
+# call. CI sets this so the suite never needs AWS credentials.
+LLM_DISABLED = os.environ.get("LLM_DISABLED", "false").lower() == "true"
