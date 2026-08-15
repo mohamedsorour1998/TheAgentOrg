@@ -7,8 +7,8 @@ show both the clean run (passes) and the poisoned run (blocked). In the real
 agent this decision goes away — the model writes whatever the ticket asks for.
 """
 
-from ..state import RunState, DevResult
 from .. import fixtures_loader
+from ..state import DevResult, RunState
 
 SYSTEM_PROMPT = """You are the Developer. Given the plan, produce a unified diff
 that implements it, a short summary, and the list of files changed. Output must

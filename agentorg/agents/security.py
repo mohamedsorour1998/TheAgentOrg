@@ -7,10 +7,10 @@ explanation. The verdict comes from compute_security_verdict() in state.py, whic
 is pure code. That is what makes the poisoned ticket block every single run.
 """
 
-from ..state import RunState, SecurityResult, compute_security_verdict
-from ..common import config
 from .. import fixtures_loader
+from ..common import config
 from ..security import run_all_scanners
+from ..state import RunState, SecurityResult, compute_security_verdict
 
 SYSTEM_PROMPT = """You are the Security explainer. You are given findings and a
 verdict already computed by code. Write a short, clear explanation of why the

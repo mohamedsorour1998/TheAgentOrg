@@ -7,8 +7,8 @@ Stubbed to return the fixture plan until the real prompt + tools are wired in
 week 2.
 """
 
-from ..state import RunState, PlanResult
 from .. import fixtures_loader
+from ..state import PlanResult, RunState
 
 SYSTEM_PROMPT = """You are the Planner. Read the ticket and produce:
 - concrete tasks, acceptance criteria, and the files likely to change.

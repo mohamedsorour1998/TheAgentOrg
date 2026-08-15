@@ -17,8 +17,8 @@ need a live process babysitting them.
 import json
 import pathlib
 
-from .state import RunState, HumanDecision, LogEvent
 from . import log
+from .state import HumanDecision, LogEvent, RunState
 
 _STATE_DIR = pathlib.Path(__file__).resolve().parent.parent / "runs"
 

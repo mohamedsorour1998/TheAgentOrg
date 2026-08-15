@@ -21,12 +21,14 @@ Run it:
 
 from __future__ import annotations
 
-from .state import (
-    RunState, HumanDecision, LogEvent, compute_security_verdict,
-)
+from . import gates, github_ops, log
+from .agents import developer, planner, reviewer, security, sre
 from .common import config
-from . import log, gates, github_ops
-from .agents import planner, developer, reviewer, security, sre
+from .state import (
+    HumanDecision,
+    LogEvent,
+    RunState,
+)
 
 
 def _log(state: RunState, actor, stage, action, verdict="", summary=""):

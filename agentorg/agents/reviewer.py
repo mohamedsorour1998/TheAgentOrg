@@ -6,8 +6,8 @@ When the verdict is changes_requested, the graph loops back to the developer
 (capped by config.MAX_REVISION_LOOPS). That loop is wired in graph.py.
 """
 
-from ..state import RunState, ReviewResult
 from .. import fixtures_loader
+from ..state import ReviewResult, RunState
 
 SYSTEM_PROMPT = """You are the Reviewer. Read the diff and either approve it or
 request changes with specific, actionable notes. Output must match the

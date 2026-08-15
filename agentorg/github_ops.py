@@ -23,9 +23,9 @@ import hashlib
 
 from github import Auth, Github, GithubException
 
-from .state import RunState, DevResult, Finding
-from .common import config
 from . import fixtures_loader
+from .common import config
+from .state import DevResult, Finding, RunState
 
 
 def _short_sha(text: str) -> str:

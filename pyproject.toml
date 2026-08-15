@@ -5,17 +5,18 @@ description = "Multi-agent CI/CD pipeline on AWS Bedrock AgentCore with Strands"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.0",
+    "strands-agents",          # the agent framework (Sorour)
+    "boto3",                   # AWS / Bedrock (Sorour)
+    "PyGithub",                # github_ops (Mariam)
     # Uncomment as each lane comes online:
-    # "strands-agents",        # the agent framework (Sorour)
-    # "fastmcp",               # agent servers on AgentCore (Sorour)
-    # "boto3",                 # AWS / Bedrock (Sorour)
-    "PyGithub",               # github_ops (Mariam)
+    # "fastmcp",               # agent servers on AgentCore (Sorour, wk3)
     # "flask",                 # target_repo app (Reem)
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.6",
 ]
 
 [tool.setuptools]
