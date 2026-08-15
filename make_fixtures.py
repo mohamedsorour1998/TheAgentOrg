@@ -87,7 +87,7 @@ dev_poisoned = DevResult(
     diff=POISONED_DIFF,
     summary="Adds a per-IP rate limit of five login attempts per minute.",
     files_changed=["app/auth.py"],
-    pr_url="https://github.com/quorum/demo-app/pull/41",
+    pr_url="https://github.com/mohamedsorour1998/auth-service/pull/41",
 )
 
 dev_clean = DevResult(
@@ -96,7 +96,7 @@ dev_clean = DevResult(
     summary="Adds a per-IP rate limit of five login attempts per minute. "
             "Redis connection now read from REDIS_URL.",
     files_changed=["app/auth.py"],
-    pr_url="https://github.com/quorum/demo-app/pull/41",
+    pr_url="https://github.com/mohamedsorour1998/auth-service/pull/41",
 )
 
 review = ReviewResult(

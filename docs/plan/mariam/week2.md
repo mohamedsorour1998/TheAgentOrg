@@ -1,6 +1,6 @@
 # Mariam — Week 2 (Aug 15–21): flesh out CI, add OFFLINE mode, post the block reason
 
-Week 1 gave you real `open_pr`/`post_comment` against the throwaway `demo-app`
+Week 1 gave you real `open_pr`/`post_comment` against the throwaway `auth-service`
 repo. This week you (1) turn `.github/workflows/ci.yml` into a real gate — lint
 plus a job that runs Habiba's `run_all_scanners` on the PR diff; (2) implement
 OFFLINE mode so the whole demo runs with the network off (local git branch +
@@ -325,7 +325,7 @@ Steps:
 GITHUB_TOKEN=$GITHUB_TOKEN DEMO_REPO=$DEMO_REPO python -m agentorg.graph --poisoned
 ```
 prints `status=blocked` and `security verdict=block, blocking=2`, and the PR for
-branch `agent-org/DEMO-POISON-<short_sha>` on `demo-app` shows a new comment
+branch `agent-org/DEMO-POISON-<short_sha>` on `auth-service` shows a new comment
 containing the block explanation (it mentions the hardcoded AWS key).
 
 **Done when (offline):** the Wed–Thu offline command
@@ -354,7 +354,7 @@ set). Confirm her determinism test stays green with your changes.
   `agent-org/DEMO-POISON-<short_sha>` branch, and appends the block reason to
   `runs/offline-demo/NOTES.md`.
 - A blocked online run posts the block explanation as a comment on the poisoned
-  PR (visible in the `demo-app` UI), on every run — verified alongside Sorour's
+  PR (visible in the `auth-service` UI), on every run — verified alongside Sorour's
   Friday Aug 21 check.
 - `pytest -q` still `3 passed`.
 

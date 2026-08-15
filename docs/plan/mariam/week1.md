@@ -1,15 +1,19 @@
-# Mariam — Week 1 (Aug 8–14): make the Git/GitHub seam real on a throwaway repo
+# Mariam — Week 1 (Aug 8–14): make the Git/GitHub seam real
+
+> **STATUS: complete.** Merged in PR #2. The target repo now exists as the
+> shared, public **`mohamedsorour1998/auth-service`** — you do not create your
+> own; everyone points at that one. See the verification log for what was
+> confirmed against it: `docs/plan/week1-verification-log.md`.
 
 You own the integration seam between the pipeline graph and GitHub:
 `agentorg/github_ops.py` and everything under `.github/workflows/`. This week you
 replace two stub functions (`open_pr`, `post_comment`) with real PyGithub code
-that opens actual PRs against a throwaway GitHub repo named `demo-app`, then run
-the whole pipeline so the graph exercises your real code instead of the fixtures.
+that opens actual PRs against `auth-service`, then run the whole pipeline so the
+graph exercises your real code instead of the fixtures.
 
-No AWS is needed this week — just a GitHub account, a personal access token, and
-local git. The graph (`agentorg/graph.py`, owned by Sorour) already calls your
-functions; their signatures are frozen, so it keeps working the entire time you
-swap the bodies.
+No AWS is needed this week — just a GitHub account, a token, and local git. The
+graph (`agentorg/graph.py`, owned by Sorour) already calls your functions; their
+signatures are frozen, so it keeps working the entire time you swap the bodies.
 
 **The one rule (applies to everyone):** `agentorg/state.py` is the frozen data
 contract. You may ADD optional fields to a model, but NEVER rename or remove one
@@ -70,44 +74,50 @@ pytest -q
 
 ---
 
-## Sun–Mon Aug 9–10 — throwaway `demo-app` repo + token + a manual dry run
+## Sun–Mon Aug 9–10 — target repo access + token
 
-**Task: create the throwaway `demo-app` GitHub repo and prove the manual flow.**
-This is the target your code will open PRs against. Do by hand exactly what your
-code will automate, so you know the sequence works before you script it.
+**The target repo already exists:** <https://github.com/mohamedsorour1998/auth-service>
+— public, seeded with the Flask app the agents modify (`app/auth.py`,
+`tests/test_auth.py`). It is **shared by the whole team**, not a per-person
+sandbox, and it is what the judges see on Aug 25.
 
 Steps:
-1. Create an empty repo named `demo-app` under your own GitHub account with a
-   `main` branch (initialize it with a README so `main` exists):
+1. Make sure you have **write access** (ask Sorour to add you as a collaborator
+   if `git push` is refused). Write access is required: `open_pr` creates a
+   branch inside the repo, so a fork is not enough.
    ```bash
-   gh repo create demo-app --private --add-readme
-   git clone https://github.com/<your-gh-username>/demo-app.git
-   cd demo-app
+   git clone https://github.com/mohamedsorour1998/auth-service.git
+   cd auth-service
    ```
-2. Do a manual dry run of what `open_pr` will do:
+2. Do a manual dry run of what `open_pr` will do, so you know the sequence works
+   before you script it:
    ```bash
-   git checkout -b agent-org/DEMO-CLEAN-abc1234
-   printf 'print("hello from the agent org")\n' > app/hello.py
-   mkdir -p app && git add app/hello.py
-   git commit -m "DEMO-CLEAN: manual dry run"
-   git push -u origin agent-org/DEMO-CLEAN-abc1234
-   gh pr create --title "DEMO-CLEAN: manual dry run" --body "manual test" --base main
+   git checkout -b agent-org/DRYRUN-abc1234
+   mkdir -p app && printf 'print("hello from the agent org")\n' > app/hello.py
+   git add app/hello.py
+   git commit -m "DRYRUN: manual dry run"
+   git push -u origin agent-org/DRYRUN-abc1234
+   gh pr create --title "DRYRUN: manual dry run" --body "manual test" --base main
    ```
-3. Create a **classic Personal Access Token** with `repo` scope
-   (GitHub → Settings → Developer settings → Personal access tokens). Export it
-   and the target repo full name so your code can read them:
+3. Get a token with `repo` scope. Either a **classic Personal Access Token**
+   (GitHub → Settings → Developer settings → Personal access tokens), or simply
+   reuse the GitHub CLI's own token. Put both values in a local `.env`
+   (already gitignored — never commit it):
    ```bash
-   export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-   export DEMO_REPO=<your-gh-username>/demo-app
+   cp .env.example .env
+   # then in .env:
+   #   GITHUB_TOKEN=$(gh auth token)     # or your ghp_... PAT
+   #   DEMO_REPO=mohamedsorour1998/auth-service
    ```
-   Add both to a local `.env` you keep out of git.
+   If **either** value is missing, `github_ops` quietly falls back to `local://`
+   refs and opens no PR — the pipeline still runs green, so a silent no-op here
+   means "check your .env", not "the code is broken".
 
-**Done when:** a PR you created by hand is visible at
-`https://github.com/<your-gh-username>/demo-app/pull/1`, and
+**Done when:** your manual PR is visible on `auth-service`, and
 `echo "$GITHUB_TOKEN $DEMO_REPO"` prints both non-empty values.
 
-**Blocks / Hands off to:** nobody depends on this repo; it's your private
-sandbox. Keep the branch you pushed — you'll delete stale branches as you test.
+**Blocks / Hands off to:** everyone shares this repo, so delete your stale
+`agent-org/*` branches as you test — keep it presentable for the demo.
 
 ---
 
@@ -148,7 +158,7 @@ Steps:
    ```python
    # GitHub seam (Mariam) ----------------------------------------------------
    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-   GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # e.g. "you/demo-app"
+   GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # e.g. "you/auth-service"
    ```
 3. Replace the `open_pr` body. The branch name convention is
    **`agent-org/<ticket_id>-<short_sha>`**, where `<short_sha>` is the first 7
@@ -232,7 +242,7 @@ print(github_ops.open_pr(s).pr_url)
 "
 ```
 Expected output: a line like
-`https://github.com/<your-gh-username>/demo-app/pull/2`, and that PR is visible
+`https://github.com/mohamedsorour1998/auth-service/pull/2`, and that PR is visible
 in the GitHub UI with a `changes/DEMO-CLEAN.diff` file on branch
 `agent-org/DEMO-CLEAN-<short_sha>`. The returned `DevResult.pr_url` equals that
 URL.
@@ -305,7 +315,7 @@ print(github_ops.post_comment(s, 'hello from post_comment'))
 "
 ```
 Expected output: a URL like
-`https://github.com/<your-gh-username>/demo-app/pull/2#issuecomment-123456789`,
+`https://github.com/mohamedsorour1998/auth-service/pull/2#issuecomment-123456789`,
 and the comment "hello from post_comment" is visible on that PR.
 
 **Task: run Sorour's graph so it drives your real code.**
@@ -316,8 +326,8 @@ env exported, run the clean path:
 GITHUB_TOKEN=$GITHUB_TOKEN DEMO_REPO=$DEMO_REPO python -m agentorg.graph
 ```
 **Done when:** the command prints `status=promoted`, and a new PR appears on
-`demo-app` (opened by your `open_pr`, not the fixture stub). The printed
-`pr_url` on the run is a real `https://github.com/.../demo-app/pull/N` URL.
+`auth-service` (opened by your `open_pr`, not the fixture stub). The printed
+`pr_url` on the run is a real `https://github.com/.../auth-service/pull/N` URL.
 
 **You're unblocked because:** the graph and its fixtures already exist and run
 green on stubs; you are only swapping the two seam functions it calls.
@@ -326,7 +336,7 @@ green on stubs; you are only swapping the two seam functions it calls.
 
 ## End of week 1 — done when
 
-- `open_pr(state)` opens a real PR on `demo-app`, commits `state.dev.diff`, uses
+- `open_pr(state)` opens a real PR on `auth-service`, commits `state.dev.diff`, uses
   branch `agent-org/<ticket_id>-<short_sha>`, and sets `state.dev.pr_url` to the
   real URL. Verify: the one-liner in Tue–Wed prints a real `pull/N` URL.
 - `post_comment(state, body, finding=None)` posts a real comment and returns its

@@ -68,13 +68,43 @@ workflow's `role-to-assume` (see `docs/plan/mariam/week3.md`).
 - [x] `GITHUB_TOKEN` / `GITHUB_REPO` added to `agentorg/common/config.py`
       (add-only — no existing field renamed, contract intact).
 
-## Verified here (no credentials needed)
+## Target repo
+
+Created and seeded on 2026-08-15: **<https://github.com/mohamedsorour1998/auth-service>**
+— public, `main` default branch, holding the Flask app the agents modify
+(`app/auth.py`, `tests/test_auth.py`, `requirements.txt`), seeded from
+`target_repo/`. Shared by the whole team; this is the repo shown to the judges.
+Opening PRs against it needs **write access**, so every engineer must be a
+collaborator — a fork is not enough (`open_pr` creates a branch in the repo).
+
+## Verified without credentials
 
 - [x] `pytest -q` → 3 passed
 - [x] `python -m agentorg.graph` → status=promoted
 - [x] `python -m agentorg.graph --poisoned` → status=blocked, blocking=2
 - [x] Branch convention `agent-org/<ticket_id>-<short_sha>`; `short_sha` is
       stable per diff (re-runs reuse the branch) and changes when the diff does.
+
+## Verified against the live repo
+
+With `GITHUB_TOKEN` + `DEMO_REPO` set, on `auth-service`:
+
+- [x] `open_pr` → real PR
+      <https://github.com/mohamedsorour1998/auth-service/pull/1>
+      on branch `agent-org/DEMO-CLEAN-2add769`
+- [x] `post_comment` → real comment, returns its `html_url`
+      (`.../pull/1#issuecomment-5303845179`); the `Finding` variant renders the
+      `[gitleaks · critical] aws-access-key-id (app/auth.py:4)` header
+- [x] **clean** run → `status=promoted`, real PR
+      <https://github.com/mohamedsorour1998/auth-service/pull/2>
+- [x] **poisoned** run → `status=blocked`, real PR
+      <https://github.com/mohamedsorour1998/auth-service/pull/3>,
+      2 critical gitleaks findings (`aws-access-key-id` app/auth.py:4,
+      `aws-secret-access-key` app/auth.py:5), and the block explanation posted
+      back onto the PR as a comment
+
+That last one is the whole demo, running against real GitHub: the pipeline
+opened the PR, scanned it, blocked it, and explained why on the PR itself.
 
 ## Fixed during review (commit `d7f3c37`)
 
@@ -89,10 +119,7 @@ credentials are missing. With credentials present the real GitHub path is
 unchanged. Also switched to `Auth.Token` (drops the PyGithub deprecation
 warning) and fixed PEP8/EOF nits.
 
-## Not verified here
+## Week 1 status
 
-The **online path** (real PR + real comment on `demo-app`) needs Mariam's
-`GITHUB_TOKEN` and her `demo-app` sandbox; neither exists on Sorour's machine.
-Code-reviewed against the plan and matches it. Mariam to confirm the two
-one-liners in `week1.md` (Tue–Wed and Thu–Fri) print a real `pull/N` URL and an
-`#issuecomment-` URL.
+**Complete.** Every acceptance criterion in `docs/plan/mariam/week1.md` is met
+and verified against real GitHub, not fixtures.

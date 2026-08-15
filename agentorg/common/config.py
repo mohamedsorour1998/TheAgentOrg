@@ -28,4 +28,4 @@ OFFLINE = os.environ.get("OFFLINE", "false").lower() == "true"
 
 # GitHub seam (Mariam) ------------------------------------------------------
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # e.g. "you/demo-app"
+GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # the shared target repo, "owner/name"
