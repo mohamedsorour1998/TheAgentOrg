@@ -373,6 +373,31 @@ def test_a_chatty_scanner_failure_stays_one_short_warning_line(monkeypatch, capl
 # unreachable. These tests cover the verdict itself and the loop it activates.
 # --------------------------------------------------------------------------
 
+# Deliberately unlike anything in fixtures/plan_result.json, whose closest task
+# reads "Return HTTP 429 once the threshold is passed". If _prompt ever sourced
+# its tasks from the fixture rather than from the state it was handed, this
+# string would not appear and the assertion below would catch it.
+_PLAN_TASK = "Return HTTP 429 once the per-IP threshold is passed"
+
+
+def _reviewable_state() -> RunState:
+    """A state the reviewer can actually judge: BOTH halves of _prompt populated.
+
+    `_poisoned_dev_state()` carries a DevResult but no plan, so a prompt
+    assertion made against it can only ever pin the diff half -- and asserting
+    that an empty task list "reaches" the prompt would be exactly the vacuous
+    assertion this suite has had to remove several times already. graph.py
+    always plans before it reviews, so this is also the shape the reviewer
+    really sees in a run.
+    """
+    state = _poisoned_dev_state()
+    state.plan = PlanResult(
+        tasks=[_PLAN_TASK],
+        acceptance_criteria=["Six requests in one minute from one IP returns 429"],
+        target_files=["app/auth.py"],
+    )
+    return state
+
 
 def test_reviewer_falls_back_to_fixture_without_a_model(monkeypatch):
     """No model available -> the fixture verdict, unchanged.
@@ -400,17 +425,21 @@ def test_reviewer_can_request_changes(monkeypatch):
     monkeypatch.setattr(config, "LLM_DISABLED", False)
     monkeypatch.setattr(llm, "available", lambda: True)
     monkeypatch.setattr(llm, "_complete", capture)
-    result = reviewer.run(_poisoned_dev_state())
+    result = reviewer.run(_reviewable_state())
     assert result.verdict == "changes_requested"
     assert result.must_fix == ["no 429 branch"]
 
-    # The reviewer must actually be shown the diff it is judging. Nothing else
-    # in the suite pins this: the loop test matches the literal "DIFF UNDER
-    # REVIEW" marker, which _prompt's f-string emits whether or not the diff is
-    # interpolated after it. Rebinding _prompt's `diff` to "" therefore left the
-    # whole suite green while the reviewer judged an empty string. Asserting on
-    # the diff CONTENT, not the header, is what closes that.
+    # The reviewer must actually be shown BOTH things it is judging: the diff,
+    # and the plan it is judging the diff against. Nothing else in the suite
+    # pins either. The loop test matches the literal "DIFF UNDER REVIEW" and
+    # "PLAN TASKS" markers, which _prompt's f-string emits whether or not the
+    # state is interpolated after them -- so rebinding _prompt's `diff` to ""
+    # left all 43 tests green while the reviewer judged an empty string, and
+    # rebinding `tasks` to "" did the same while it judged against no plan at
+    # all. Both were measured, not assumed. Asserting on the CONTENT rather
+    # than on the headers is what closes them.
     assert _POISONED_DIFF in seen["prompt"], "the reviewer must see the diff"
+    assert _PLAN_TASK in seen["prompt"], "the reviewer must see the plan"
 
 
 def test_changes_requested_always_carries_something_to_fix(monkeypatch):
