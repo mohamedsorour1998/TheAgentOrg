@@ -17,6 +17,19 @@ def _state() -> RunState:
     return RunState(ticket_id="CLEAN-1", ticket_text="Add a per-IP login rate limit.")
 
 
+def test_the_suite_reaches_no_model_by_default():
+    """The autouse fixture in conftest.py keeps the suite off the network.
+
+    Asserts the default state rather than any agent's behaviour, so it fails if
+    that fixture is ever removed -- and it fails on a credentialed laptop, which
+    is the only place the cost of removing it shows up. Without it, CI stays
+    green while every engineer's `pytest -q` bills a live Bedrock call per agent.
+    """
+    from agentorg.common import llm
+
+    assert llm.available() is False
+
+
 def test_planner_falls_back_to_fixture_without_a_model(monkeypatch):
     monkeypatch.setattr(config, "LLM_DISABLED", True)
     result = planner.run(_state())
