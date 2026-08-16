@@ -1,6 +1,13 @@
 """Suite-wide defaults. Owner: Sorour.
 
-The suite is hermetic: no test reaches a live model unless it asks to.
+The suite is hermetic on TWO external seams: no test reaches a live model, and
+no test reaches the GitHub API, unless it asks to. Both guards have the same
+shape -- force the offline path, then put a loud raiser on the seam underneath
+it -- and both exist because the failure they prevent is silent and expensive.
+
+=========================================================================
+SEAM 1 -- the model (Bedrock)
+=========================================================================
 
 `llm.available()` returns True on any machine with AWS credentials, and each
 agent calls the model whenever it does. Without the fixture below, `pytest -q`
@@ -42,12 +49,61 @@ read it through the module: `config.LLM_DISABLED`.
 
 Do not delete this fixture. Nothing turns red if you do -- the suite just goes
 back to billing the team on every run.
+
+=========================================================================
+SEAM 2 -- GitHub (branch, commit, pull request)
+=========================================================================
+
+Same bug, different seam, and this one WRITES. `github_ops._use_local()` asks
+only whether credentials exist -- `config.OFFLINE or not (GITHUB_TOKEN and
+GITHUB_REPO)` -- never whether we are under test. So on any machine where a
+token is exported, every test that drives `run_pipeline` walks into the online
+branch of `open_pr` and performs real `create_git_ref` / `create_file` /
+`create_pull` calls against DEMO_REPO. Not reads: writes, to a real repository,
+several times per `pytest -q`.
+
+Measured before this fixture existed, with a token in the environment and a
+socket-level recorder: FOUR outbound connections to api.github.com per run --
+three from tests/test_pipeline_smoke.py and one from
+test_the_revision_loop_terminates. CI never caught it for exactly the reason CI
+never caught the Bedrock bug: CI has no token, so `_use_local()` was True there
+and the online branch was silently skipped.
+
+The guard mirrors seam 1 deliberately, so there is one pattern to learn:
+
+  * `config.OFFLINE = True` is the policy layer, the counterpart of
+    `LLM_DISABLED`. `_use_local()` is its only reader and reads it through the
+    module at call time, so the fixture reaches it whatever the credentials say.
+  * `github_ops._repo` is the seam layer, the counterpart of `llm._complete`.
+    It is the single point where a `Github` client is constructed, and both
+    call sites (`open_pr`, `post_comment`) invoke it OUTSIDE their try blocks,
+    so a raiser there escapes rather than being folded into a `GithubException`
+    branch. It uses `pytest.fail` for the same BaseException reason as above.
+
+A test that genuinely wants the online path opts in, in its own body. The
+`_repo` line is the load-bearing one -- it is what keeps the test off the
+network -- and the other three only matter on a machine whose environment does
+not already supply them:
+
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "GITHUB_TOKEN", "t")
+    monkeypatch.setattr(config, "GITHUB_REPO", "owner/name")
+    monkeypatch.setattr(github_ops, "_repo", lambda: <a fake repo object>)
+
+Both credentials are needed to leave local mode, since `_use_local()` reads
+`not (GITHUB_TOKEN and GITHUB_REPO)`. Opting in WITHOUT the `_repo` line
+reproduces the exact bug this fixture closes, so it fails the test by name
+instead -- verified against both call sites, `open_pr` and `post_comment`.
+
+Do not delete this fixture either. Nothing turns red if you do -- the suite
+just goes back to opening pull requests on a real repository.
 """
 
 from typing import NoReturn
 
 import pytest
 
+from agentorg import github_ops
 from agentorg.common import config, llm
 
 
@@ -67,3 +123,22 @@ def _model_disabled_by_default(monkeypatch):
     """Start every test with the model off and the network seam blocked."""
     monkeypatch.setattr(config, "LLM_DISABLED", True)
     monkeypatch.setattr(llm, "_complete", _unpatched_complete)
+
+
+def _unpatched_repo() -> NoReturn:
+    """Stand-in for the GitHub API seam. Fails the test that reached it."""
+    pytest.fail(
+        "This test reached the real github_ops._repo, which with a token in "
+        "the environment performs live branch, commit and pull-request WRITES "
+        "against DEMO_REPO. It patched config.OFFLINE and/or the credentials "
+        "but NOT github_ops._repo. A test that wants the online path must "
+        "replace all three -- see tests/conftest.py.",
+        pytrace=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _github_offline_by_default(monkeypatch):
+    """Start every test in local mode with the GitHub API seam blocked."""
+    monkeypatch.setattr(config, "OFFLINE", True)
+    monkeypatch.setattr(github_ops, "_repo", _unpatched_repo)

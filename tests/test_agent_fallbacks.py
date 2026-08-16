@@ -390,15 +390,27 @@ def test_reviewer_falls_back_to_fixture_without_a_model(monkeypatch):
 def test_reviewer_can_request_changes(monkeypatch):
     from agentorg.common import llm
 
+    seen = {}
+
+    def capture(system_prompt, user_prompt):
+        seen["prompt"] = user_prompt
+        return ('{"verdict": "changes_requested", "comments": [], '
+                '"must_fix": ["no 429 branch"]}')
+
     monkeypatch.setattr(config, "LLM_DISABLED", False)
     monkeypatch.setattr(llm, "available", lambda: True)
-    monkeypatch.setattr(llm, "_complete", lambda s, u: (
-        '{"verdict": "changes_requested", "comments": [], '
-        '"must_fix": ["no 429 branch"]}'
-    ))
+    monkeypatch.setattr(llm, "_complete", capture)
     result = reviewer.run(_poisoned_dev_state())
     assert result.verdict == "changes_requested"
     assert result.must_fix == ["no 429 branch"]
+
+    # The reviewer must actually be shown the diff it is judging. Nothing else
+    # in the suite pins this: the loop test matches the literal "DIFF UNDER
+    # REVIEW" marker, which _prompt's f-string emits whether or not the diff is
+    # interpolated after it. Rebinding _prompt's `diff` to "" therefore left the
+    # whole suite green while the reviewer judged an empty string. Asserting on
+    # the diff CONTENT, not the header, is what closes that.
+    assert _POISONED_DIFF in seen["prompt"], "the reviewer must see the diff"
 
 
 def test_changes_requested_always_carries_something_to_fix(monkeypatch):
