@@ -13,8 +13,8 @@ CLIs. It never imports the graph, so you can build and test it in isolation.
 """
 
 from ..state import DevResult, Finding
-from .semgrep_tool import scan as _semgrep
 from .gitleaks_tool import scan as _gitleaks
+from .semgrep_tool import scan as _semgrep
 from .trivy_tool import scan as _trivy
 
 
