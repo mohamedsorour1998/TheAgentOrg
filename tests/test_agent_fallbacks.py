@@ -12,7 +12,7 @@ import re
 
 from agentorg.agents import developer, planner
 from agentorg.common import config
-from agentorg.state import PlanResult, RunState
+from agentorg.state import DevResult, PlanResult, RunState
 
 _AWS_KEY_RE = re.compile(r"AKIA[0-9A-Z]{16}")
 
@@ -131,4 +131,40 @@ def test_reviewer_feedback_reaches_the_prompt(monkeypatch):
     monkeypatch.setattr(llm, "available", lambda: True)
     monkeypatch.setattr(llm, "_complete", capture)
     developer.run(state)
+    assert "handle the 429 branch" in seen["prompt"]
+
+
+def test_the_previous_diff_reaches_the_prompt_on_a_revision(monkeypatch):
+    """A revision must show the model the diff it is being asked to fix.
+
+    graph.py re-calls developer.run() before it overwrites state.dev, so the
+    previous DevResult is still in the state. Without it the model is asked to
+    fix problems in a diff it cannot see, and "revise" degrades into "regenerate
+    from the ticket with a hint". Invisible today only because the reviewer
+    still returns the approve fixture and the loop never runs a second time.
+    """
+    from agentorg.common import llm
+    from agentorg.state import ReviewResult
+
+    seen = {}
+
+    def capture(system_prompt, user_prompt):
+        seen["prompt"] = user_prompt
+        return ('{"branch": "", "diff": "second attempt", "summary": "s", '
+                '"files_changed": ["app/auth.py"]}')
+
+    state = _planned_state()
+    state.dev = DevResult(
+        branch="agent-org/POISON-1",
+        diff="--- a/app/auth.py\n+++ b/app/auth.py\n+first attempt\n",
+        summary="first attempt",
+        files_changed=["app/auth.py"],
+    )
+    state.review = ReviewResult(verdict="changes_requested",
+                                must_fix=["handle the 429 branch"])
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", capture)
+    developer.run(state)
+    assert "+first attempt" in seen["prompt"], "the revision must see its own diff"
     assert "handle the 429 branch" in seen["prompt"]
