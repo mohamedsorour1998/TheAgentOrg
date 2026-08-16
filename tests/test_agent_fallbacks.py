@@ -11,8 +11,10 @@ laptop with ~/.aws/credentials and fail on a credential-free runner.
 import logging
 import re
 
-from agentorg.agents import developer, planner, security
+from agentorg import fixtures_loader
+from agentorg.agents import developer, planner, reviewer, security
 from agentorg.common import config
+from agentorg.graph import run_pipeline
 from agentorg.state import DevResult, Finding, PlanResult, RunState
 
 _AWS_KEY_RE = re.compile(r"AKIA[0-9A-Z]{16}")
@@ -361,3 +363,125 @@ def test_a_chatty_scanner_failure_stays_one_short_warning_line(monkeypatch, capl
     rendered = logging.Formatter().format(debugs[0])
     assert noise.strip() in rendered, "the full stderr must survive at DEBUG"
     assert len(rendered) > len(noise)
+
+
+# --------------------------------------------------------------------------
+# Reviewer: the verdict that drives the developer<->reviewer revision loop.
+#
+# Until this agent called a model it always returned the approving fixture, so
+# the loop in graph.py -- and the revision half of developer._prompt -- were
+# unreachable. These tests cover the verdict itself and the loop it activates.
+# --------------------------------------------------------------------------
+
+
+def test_reviewer_falls_back_to_fixture_without_a_model(monkeypatch):
+    """No model available -> the fixture verdict, unchanged.
+
+    Compared against the fixture rather than asserted to be one of the two
+    legal verdicts: `verdict in ("approve", "changes_requested")` cannot fail,
+    because the Literal on ReviewResult already rejects everything else, so a
+    reviewer that stopped falling back entirely would still pass it.
+    """
+    monkeypatch.setattr(config, "LLM_DISABLED", True)
+    result = reviewer.run(_poisoned_dev_state())
+    assert result == fixtures_loader.review()
+
+
+def test_reviewer_can_request_changes(monkeypatch):
+    from agentorg.common import llm
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", lambda s, u: (
+        '{"verdict": "changes_requested", "comments": [], '
+        '"must_fix": ["no 429 branch"]}'
+    ))
+    result = reviewer.run(_poisoned_dev_state())
+    assert result.verdict == "changes_requested"
+    assert result.must_fix == ["no 429 branch"]
+
+
+def test_changes_requested_always_carries_something_to_fix(monkeypatch):
+    """changes_requested with an empty must_fix must never reach the developer.
+
+    developer._prompt attaches the previous diff and the reviewer's notes only
+    when `state.review.must_fix` is non-empty. A changes_requested carrying an
+    empty must_fix therefore hands the developer a plain FIRST-PASS prompt: it
+    regenerates from the ticket instead of revising the diff that was objected
+    to, the run burns all three revisions doing it, and nothing anywhere goes
+    red. That is a silent failure, so it is closed here in the reviewer rather
+    than left to the developer's guard.
+
+    SYSTEM_PROMPT already tells the model to list each issue in must_fix. An
+    instruction to a model is not a guarantee, which is the whole reason this
+    test exists.
+    """
+    from agentorg.common import llm
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+
+    # Nothing at all to go on. A fixed line still keeps the developer on the
+    # revision path, so it sees the diff it is being asked to fix.
+    monkeypatch.setattr(llm, "_complete", lambda s, u: (
+        '{"verdict": "changes_requested", "comments": [], "must_fix": []}'
+    ))
+    bare = reviewer.run(_poisoned_dev_state())
+    assert bare.verdict == "changes_requested", "the verdict itself is never rewritten"
+    assert bare.must_fix, "changes_requested must always carry a must_fix entry"
+
+    # Comments but no must_fix: prefer the model's own words to the fixed line.
+    monkeypatch.setattr(llm, "_complete", lambda s, u: (
+        '{"verdict": "changes_requested", "comments": '
+        '[{"file": "app/auth.py", "line": 12, "note": "no 429 branch"}], '
+        '"must_fix": []}'
+    ))
+    from_comments = reviewer.run(_poisoned_dev_state())
+    assert from_comments.must_fix == ["app/auth.py:12 no 429 branch"]
+
+    # An approve with an empty must_fix is the ordinary case. Leave it alone --
+    # inventing work for an approved diff would restart the loop for nothing.
+    monkeypatch.setattr(llm, "_complete", lambda s, u: (
+        '{"verdict": "approve", "comments": [], "must_fix": []}'
+    ))
+    assert reviewer.run(_poisoned_dev_state()).must_fix == []
+
+
+def test_the_revision_loop_terminates(monkeypatch):
+    """A reviewer that never approves must still stop at MAX_REVISION_LOOPS."""
+    from agentorg.common import llm
+
+    prompts = []
+
+    def fake_model(system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        if "DIFF UNDER REVIEW" in user_prompt:
+            return ('{"verdict": "changes_requested", "comments": [], '
+                    '"must_fix": ["again"]}')
+        return ('{"branch": "", "diff": "d", "summary": "s", '
+                '"files_changed": ["app/auth.py"]}')
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", fake_model)
+    state = run_pipeline("CLEAN-1", "Add a per-IP login rate limit.")
+
+    # Equality, not `<=`. `<=` also passes when revision_count is 0 -- when the
+    # reviewer approved on the first pass and the loop never ran at all. That is
+    # exactly what a mis-discriminating fake model produces: if "DIFF UNDER
+    # REVIEW" ever stopped matching the reviewer's prompt, the reviewer would be
+    # handed the DevResult JSON above, fail to parse it into a ReviewResult,
+    # fall back to the approving fixture, and this test would pass green having
+    # exercised no loop at all.
+    assert state.revision_count == config.MAX_REVISION_LOOPS
+
+    # The discrimination itself, measured rather than assumed: one reviewer
+    # prompt per pass, and no other agent's prompt carries the marker.
+    reviewed = [p for p in prompts if "DIFF UNDER REVIEW" in p]
+    assert len(reviewed) == config.MAX_REVISION_LOOPS + 1
+
+    # And the loop is a real revision loop rather than four first passes. This
+    # is the code path Task 6 activates: developer._prompt's revision branch was
+    # unreachable for as long as the reviewer always approved.
+    assert any("YOUR PREVIOUS DIFF" in p for p in prompts)
+    assert any("REVIEWER REQUESTED CHANGES" in p and "again" in p for p in prompts)
