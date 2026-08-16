@@ -1,0 +1,7 @@
+rules:
+  - id: python.flask.missing-timeout
+    languages:
+      - python
+    message: Redis client created without a socket timeout.
+    severity: INFO
+    pattern: redis.Redis(...)
