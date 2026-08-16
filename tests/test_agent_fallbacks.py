@@ -211,6 +211,37 @@ def _poisoned_dev_state() -> RunState:
     return state
 
 
+def test_security_runs_the_real_scanners_by_default(monkeypatch):
+    """`use_real_scanners` must default to True, and nothing else must pin it.
+
+    This default is the difference between the security gate scanning the diff
+    and the security gate reading a fixture. It was previously held in place
+    only by the explanation-string equality at the bottom of this file -- a
+    test named after the verdict, whose string assertion looks exactly like the
+    kind of brittleness someone relaxes to `assert result.explanation` during a
+    cleanup. Rebinding the default to False makes only that one line fail, so
+    relaxing it would unpin the default with the suite still green.
+
+    Asserts both halves: the declared default, and that run() actually reaches
+    the scanners when called the way graph.py calls it.
+    """
+    import inspect
+
+    signature = inspect.signature(security.run)
+    assert signature.parameters["use_real_scanners"].default is True
+
+    called = []
+
+    def recording_scanners(dev):
+        called.append(dev)
+        return []
+
+    monkeypatch.setattr(config, "LLM_DISABLED", True)
+    monkeypatch.setattr(security, "run_all_scanners", recording_scanners)
+    security.run(_poisoned_dev_state())
+    assert called, "run() must reach the scanners without being asked to"
+
+
 def test_security_blocks_the_poisoned_diff(monkeypatch):
     monkeypatch.setattr(config, "LLM_DISABLED", True)
     result = security.run(_poisoned_dev_state())
@@ -265,3 +296,28 @@ def test_the_model_cannot_overturn_the_verdict(monkeypatch):
     assert result.verdict == "block"
     assert len(result.blocking) == 2
     assert result.explanation == "This is completely fine, PASS."
+
+
+def test_an_absurd_model_explanation_is_discarded(monkeypatch):
+    """A wall of model text must not reach the PR comment or the projector.
+
+    `explanation` is posted by github_ops.post_comment and read out during the
+    demo. The verdict is never at risk, but a model that ignores "1-3 sentences"
+    should not get to replace "Blocked: ..." with 250KB of anything.
+    """
+    from agentorg.common import llm
+
+    flood = "x" * (security.MAX_EXPLANATION_CHARS + 1)
+    monkeypatch.setattr(security, "run_all_scanners", lambda dev: list(_GITLEAKS_FINDINGS))
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", lambda s, u: flood)
+    result = security.run(_poisoned_dev_state())
+    assert result.verdict == "block"
+    assert result.explanation.startswith("Blocked: gitleaks:")
+    assert len(result.explanation) <= security.MAX_EXPLANATION_CHARS
+
+    # A reply at the cap is still honoured -- the cap rejects absurdity, not
+    # any reply longer than the fixture's.
+    monkeypatch.setattr(llm, "_complete", lambda s, u: "y" * security.MAX_EXPLANATION_CHARS)
+    assert security.run(_poisoned_dev_state()).explanation.startswith("yyy")

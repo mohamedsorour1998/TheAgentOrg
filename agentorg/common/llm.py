@@ -9,9 +9,20 @@ Both handlers below catch `Exception` on purpose. The failure set spans boto3,
 botocore, strands and the network, and any one of them escaping would take the
 run down — the exact outcome this module exists to prevent. They log instead of
 swallowing silently, so a run that quietly used its fixture can still be
-explained afterwards. The logger is fetched inline rather than bound to a
-module-level `_log`: ruff's BLE001 only recognises the `logging.getLogger(...)`
-form at the call site, and a module-level alias turns `ruff check agentorg` red.
+explained afterwards.
+
+The logger is fetched inline rather than bound to a module-level `_log`, and
+the precise reason matters because an earlier version of this note got it
+wrong. BLE001 is satisfied when the handler contains a logging call ruff can
+statically resolve to the logging module AND that call carries the traceback --
+`exc_info=True`, or `.exception()`. The LEVEL is irrelevant: `.debug(...,
+exc_info=True)` alone is accepted. What ruff cannot resolve is a module-level
+alias, so `_log.exception(...)` turns `ruff check agentorg` red while a
+handler-local `log = logging.getLogger(__name__)` is fine. Two consequences
+worth knowing: a warning with no `exc_info` still fires the rule, and narrowing
+the `except` clause satisfies it with no logging at all -- so lint will bless a
+narrow clause that silently drops the failure, which is the worse option here.
+Measured across 12 ruff variants, not inferred.
 """
 
 from __future__ import annotations
