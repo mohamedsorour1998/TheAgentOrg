@@ -90,15 +90,23 @@ def scan(dev: DevResult) -> list[Finding]:
                 f"{result.stderr.strip()}"
             )
 
+        # Fail loudly rather than reporting "no findings": an empty list is
+        # indistinguishable from a clean scan, and compute_security_verdict([])
+        # returns PASS.
         if not report_path.exists():
-            return []
+            raise RuntimeError(
+                f"Trivy wrote no report to {report_path}. "
+                f"stderr: {result.stderr.strip()}"
+            )
 
         try:
             data = json.loads(
                 report_path.read_text(encoding="utf-8")
             )
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Trivy report at {report_path} is not valid JSON: {exc}"
+            ) from exc
 
     findings: list[Finding] = []
 

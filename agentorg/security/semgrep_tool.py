@@ -116,8 +116,14 @@ def scan(dev: DevResult) -> list[Finding]:
                 f"{result.stderr.strip()}"
             )
 
+        # Fail loudly rather than reporting "no findings": an empty list is
+        # indistinguishable from a clean scan, and compute_security_verdict([])
+        # returns PASS.
         if not report_path.exists():
-            return []
+            raise RuntimeError(
+                f"Semgrep wrote no report to {report_path}. "
+                f"stderr: {result.stderr.strip()}"
+            )
 
         try:
             data = json.loads(

@@ -1,14 +1,20 @@
 title = "The Agent Org Gitleaks Configuration"
 
+# Why custom rules at all: gitleaks' own AWS rule does NOT flag
+# AKIAIOSFODNN7EXAMPLE. That is AWS's documented example key and gitleaks
+# allowlists it — which is exactly the key the poisoned demo ticket uses.
+# Verified: with the rule below removed, a bare AKIA yields ZERO findings even
+# with useDefault = true. So useDefault is not a backstop here.
 [extend]
 useDefault = true
 
-[[rules]]
-id = "aws-access-key-id"
-description = "AWS access key ID"
-regex = '''(?i)AWS_ACCESS_KEY_ID\s*=\s*["'](AKIA[0-9A-Z]{16})["']'''
-secretGroup = 1
-keywords = ["AWS_ACCESS_KEY_ID"]
+# Deliberately TWO rules, producing exactly two findings on the poisoned diff:
+# one for the key id, one for the secret. There was previously a third rule,
+# `aws-access-key-id`, matching AWS_ACCESS_KEY_ID = "AKIA...". It was removed
+# because the standalone rule below already matches that same string, so both
+# fired on the same line and the poisoned run reported 3 findings instead of 2.
+# If you add a rule that can match an AKIA string, check it does not overlap
+# this one — the demo asserts exactly two blocking findings.
 
 [[rules]]
 id = "aws-secret-access-key"
@@ -17,9 +23,11 @@ regex = '''(?i)AWS_SECRET_ACCESS_KEY\s*=\s*["']([A-Za-z0-9/+=]{40})["']'''
 secretGroup = 1
 keywords = ["AWS_SECRET_ACCESS_KEY"]
 
+# Matches an AKIA key anywhere, assigned or bare. Subsumes the removed
+# keyed rule.
 [[rules]]
-id = "aws-access-key-id-standalone"
-description = "AWS access key ID found in text"
+id = "aws-access-key-id"
+description = "AWS access key ID"
 regex = '''\bAKIA[0-9A-Z]{16}\b'''
 secretGroup = 0
 keywords = ["AKIA"]

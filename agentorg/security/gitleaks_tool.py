@@ -6,16 +6,30 @@ Runs the real gitleaks CLI and converts its JSON report into Finding objects.
 """
 
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
 from ..state import DevResult, Finding
 
-
 CONFIG_PATH = (
     Path(__file__).resolve().parent / "gitleaks.toml"
 )
+
+
+def _repo_relative(path: str, temp_dir: str) -> str:
+    """Strip the scratch directory so findings name the repo path.
+
+    Scanners run against a temp copy of the diff, so their reports carry paths
+    like /var/folders/../agentorg-gitleaks-ab12/app/auth.py. That string ends up
+    in the PR comment and on screen during the demo; `app/auth.py` is what a
+    reviewer needs to see.
+    """
+    try:
+        return os.path.relpath(path, temp_dir)
+    except ValueError:
+        return path
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
@@ -98,8 +112,16 @@ def scan(dev: DevResult) -> list[Finding]:
                 f"{result.stderr.strip()}"
             )
 
+        # A scanner that cannot report must fail loudly. Returning [] here
+        # would mean "no secrets found", and compute_security_verdict([])
+        # returns PASS -- a poisoned change would sail through while every
+        # test stayed green. Raise; the security agent catches it and falls
+        # back to the fixture verdict.
         if not report_path.exists():
-            return []
+            raise RuntimeError(
+                f"Gitleaks wrote no report to {report_path}. "
+                f"stderr: {result.stderr.strip()}"
+            )
 
         try:
             data = json.loads(
@@ -107,8 +129,10 @@ def scan(dev: DevResult) -> list[Finding]:
                     encoding="utf-8"
                 )
             )
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Gitleaks report at {report_path} is not valid JSON: {exc}"
+            ) from exc
 
     findings: list[Finding] = []
 
@@ -123,9 +147,9 @@ def scan(dev: DevResult) -> list[Finding]:
                 tool="gitleaks",
                 severity="critical",
                 rule=rule_id,
-                file=leak.get(
-                    "File",
-                    "unknown",
+                file=_repo_relative(
+                    leak.get("File", "unknown"),
+                    temp_dir,
                 ),
                 line=int(
                     leak.get(
