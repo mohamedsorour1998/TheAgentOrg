@@ -8,6 +8,7 @@ Every test that drives the model path patches BOTH `llm.available` and
 laptop with ~/.aws/credentials and fail on a credential-free runner.
 """
 
+import logging
 import re
 
 from agentorg.agents import developer, planner, security
@@ -317,7 +318,46 @@ def test_an_absurd_model_explanation_is_discarded(monkeypatch):
     assert result.explanation.startswith("Blocked: gitleaks:")
     assert len(result.explanation) <= security.MAX_EXPLANATION_CHARS
 
-    # A reply at the cap is still honoured -- the cap rejects absurdity, not
-    # any reply longer than the fixture's.
-    monkeypatch.setattr(llm, "_complete", lambda s, u: "y" * security.MAX_EXPLANATION_CHARS)
-    assert security.run(_poisoned_dev_state()).explanation.startswith("yyy")
+    # A reply at exactly the cap is honoured WHOLE -- the cap rejects absurdity,
+    # not any reply longer than the fixture's. Equality, not startswith: a
+    # regression that truncated to 500 chars would still start with "yyy".
+    at_cap = "y" * security.MAX_EXPLANATION_CHARS
+    monkeypatch.setattr(llm, "_complete", lambda s, u: at_cap)
+    assert security.run(_poisoned_dev_state()).explanation == at_cap
+
+
+def test_a_chatty_scanner_failure_stays_one_short_warning_line(monkeypatch, caplog):
+    """The fallback WARNING must stay one bounded line, whatever the CLI said.
+
+    The scanner wrappers interpolate raw subprocess stderr into their exception
+    messages, so `str(exc)` is only as bounded as the tool is talkative. That
+    matters in exactly the configuration the demo is heading for: the scanners
+    installed, one of them exiting non-zero on stage. Asserted on the captured
+    log record rather than by reading stderr, so a regression fails the suite.
+    """
+    noise = "semgrep: unable to parse rule; skipping\n" * 1300  # ~51KB, 1300 lines
+
+    def boom(dev):
+        raise RuntimeError(f"Semgrep failed with exit code 2: {noise}")
+
+    monkeypatch.setattr(config, "LLM_DISABLED", True)
+    monkeypatch.setattr(security, "run_all_scanners", boom)
+    with caplog.at_level(logging.DEBUG, logger="agentorg.agents.security"):
+        result = security.run(_poisoned_dev_state())
+
+    assert result.verdict == "block", "the verdict must be untouched by logging"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    line = warnings[0].getMessage()
+    assert "\n" not in line, "a multi-line WARNING is not one projector line"
+    assert len(line) < 400, f"WARNING was {len(line)} chars: {line[:120]}..."
+    assert "RuntimeError" in line, "the line must still name the cause"
+    assert "chars total" in line, "truncation must be marked, not silent"
+
+    # Demote, don't drop: the DEBUG record still carries the whole message.
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debugs) == 1
+    rendered = logging.Formatter().format(debugs[0])
+    assert noise.strip() in rendered, "the full stderr must survive at DEBUG"
+    assert len(rendered) > len(noise)

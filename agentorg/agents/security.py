@@ -44,6 +44,29 @@ rules. You may NOT change the verdict. Return plain text, no JSON."""
 # than truncated, since half a wall of text is still a wall of text.
 MAX_EXPLANATION_CHARS = 2000
 
+# Longest exception text interpolated into the one-line WARNING below. The
+# scanner wrappers embed raw subprocess stderr in their messages -- semgrep_tool
+# raises f"Semgrep failed with exit code {rc}: {result.stderr.strip()}" -- so
+# str(exc) is only as bounded as the CLI is talkative. A chatty 50KB stderr
+# renders a 50,000-character, 2,500-line "one line". 200 chars is enough to
+# carry the exit code and the first sentence of the real error, which is what
+# tells you which scanner broke and roughly why; the rest is at DEBUG.
+MAX_LOG_DETAIL_CHARS = 200
+
+
+def _one_line(text: str, limit: int = MAX_LOG_DETAIL_CHARS) -> str:
+    """Collapse to a single bounded line, marking any truncation.
+
+    Both halves are load-bearing. Capping length alone does not guarantee one
+    line -- stderr can put newlines inside the first 200 characters -- and
+    collapsing newlines alone does not bound length. The marker names the full
+    size so nobody mistakes a truncated message for the whole error.
+    """
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    return f"{flat[:limit]}... [{len(text)} chars total, full text at DEBUG]"
+
 
 def _looks_poisoned(state: RunState) -> bool:
     """Does the diff carry an AWS access key id? Pure string check, no model."""
@@ -102,14 +125,17 @@ def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
         # with no logging at all is BLE001-clean, so lint silently blesses the
         # more dangerous option.
         #
-        # One line at WARNING naming the cause, traceback at DEBUG. During the
-        # demo this is a projector line, and 26 lines of traceback immediately
-        # above `status=blocked` reads as a crash. Nothing here can reach the
-        # verdict: logging level cannot affect control flow.
+        # One bounded line at WARNING naming the cause, everything else at
+        # DEBUG. During the demo this is a projector line, and a wall of text
+        # immediately above `status=blocked` reads as a crash. The exception
+        # text is passed through _one_line because str(exc) is unbounded -- see
+        # MAX_LOG_DETAIL_CHARS. The DEBUG record keeps the full message: it is
+        # rendered from exc_info, so nothing is dropped, only demoted. Nothing
+        # here can reach the verdict; logging cannot affect control flow.
         logging.getLogger(__name__).warning(
             "scanners failed (%s: %s); falling back to the fixture verdict",
             type(exc).__name__,
-            exc,
+            _one_line(str(exc)),
         )
         logging.getLogger(__name__).debug("scanner failure traceback", exc_info=True)
         # Fall back to the FIXTURE, never to an empty findings list -- see the
