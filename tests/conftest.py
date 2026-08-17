@@ -1,9 +1,10 @@
 """Suite-wide defaults. Owner: Sorour.
 
-The suite is hermetic on TWO external seams: no test reaches a live model, and
-no test reaches the GitHub API, unless it asks to. Both guards have the same
-shape -- force the offline path, then put a loud raiser on the seam underneath
-it -- and both exist because the failure they prevent is silent and expensive.
+The suite is hermetic on THREE external seams: no test reaches a live model, no
+test reaches the GitHub API, and no test reaches the terminal, unless it asks
+to. All three guards have the same shape -- force the offline path, then put a
+loud raiser on the seam underneath it -- and all three exist because the failure
+they prevent is silent, expensive, or both.
 
 =========================================================================
 SEAM 1 -- the model (Bedrock)
@@ -97,8 +98,37 @@ instead -- verified against both call sites, `open_pr` and `post_comment`.
 
 Do not delete this fixture either. Nothing turns red if you do -- the suite
 just goes back to opening pull requests on a real repository.
+
+=========================================================================
+SEAM 3 -- the terminal (stdin)
+=========================================================================
+
+Same shape again, and this one does not cost money -- it costs the whole run.
+`graph._cli_gate` calls `input()` three times per pipeline, once per human gate.
+A test that drives `run_pipeline(auto_approve=False)` without replacing `input`
+therefore reads stdin. Under pytest's default capture that raises OSError, which
+is survivable; under `pytest -s`, which is what anyone debugging a gate actually
+types, it BLOCKS on the terminal forever. A hung suite reports no failing test
+and names no file -- in CI it is a job timeout with nothing to read.
+
+So the default is a raiser, and a test that wants the interactive path opts in
+in its own body, exactly as with the other two seams:
+
+    monkeypatch.setattr(builtins, "input", <a finite script of answers>)
+
+FINITE is the load-bearing word. `lambda *a: "a"` answers every prompt forever,
+so a gate that starts asking twice, or a fourth gate nobody meant to add, is
+answered silently rather than caught -- the test passes while pinning less than
+it claims. Scripts in tests/test_gates_cli.py hand back a fixed list of answers
+and raise when it runs out, so "asked more often than expected" fails by name
+instead of looping. Between the two, no code path can block the suite on stdin:
+unpatched reads fail here, over-eager reads fail there.
+
+One consequence worth knowing: `pytest --pdb` also wants stdin, so drop this
+fixture for the run if you need the debugger inside a gate test.
 """
 
+import builtins
 from typing import NoReturn
 
 import pytest
@@ -142,3 +172,21 @@ def _github_offline_by_default(monkeypatch):
     """Start every test in local mode with the GitHub API seam blocked."""
     monkeypatch.setattr(config, "OFFLINE", True)
     monkeypatch.setattr(github_ops, "_repo", _unpatched_repo)
+
+
+def _unpatched_input(prompt: str = "") -> NoReturn:
+    """Stand-in for the terminal. Fails the test that reached it."""
+    pytest.fail(
+        f"This test reached the real builtins.input (prompt: {prompt!r}), which "
+        "reads stdin. Under `pytest -s` that blocks the whole suite with no "
+        "failing test to point at. A test that wants the interactive gate must "
+        "replace builtins.input with a finite script of answers -- see "
+        "tests/conftest.py.",
+        pytrace=False,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _terminal_blocked_by_default(monkeypatch):
+    """Start every test with the terminal blocked, so nothing can hang."""
+    monkeypatch.setattr(builtins, "input", _unpatched_input)
