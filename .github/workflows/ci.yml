@@ -25,6 +25,9 @@ permissions:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    # Nothing here should take a minute. The cap exists so a wedged pip install
+    # cannot sit on a runner for the default six hours.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -39,11 +42,18 @@ jobs:
       # section, so this runs ruff's own defaults — the same rules a developer
       # gets locally, which is what makes a red check here reproducible. Do not
       # add per-file ignores or noqa comments to turn this green.
+      #
+      # All three Python roots, not just agentorg. scripts/scan_gate.py is the
+      # scan job's whole assertion and tests/ is what the test job runs; both
+      # were already clean when this widened, so it cost nothing to close the
+      # gap before either drifts.
       - name: Ruff lint
-        run: ruff check agentorg
+        run: ruff check agentorg scripts tests
 
   test:
     runs-on: ubuntu-latest
+    # The suite itself runs in well under a second; this caps the install.
+    timeout-minutes: 10
     env:
       # JOB level, not step level. Without it every agent tries Bedrock and the
       # runner has no credentials. tests/conftest.py closes the same seam from
@@ -75,6 +85,11 @@ jobs:
 
   scan:
     runs-on: ubuntu-latest
+    # Budget: three binary installs, a ~108 MB database, and two scans. The
+    # cap has to clear the warm-up step's own worst case — 3 attempts x the 5m
+    # trivy timeout, plus 1m of backoff — with room for the rest, or the job
+    # would be killed mid-retry rather than reporting why it failed.
+    timeout-minutes: 25
     env:
       # Pinned on purpose. An unpinned scanner that changes its rules turns this
       # check red on code nobody touched. Bump a version deliberately, then
@@ -147,7 +162,7 @@ jobs:
       - name: Warm the trivy vulnerability database
         run: |
           for attempt in 1 2 3; do
-            if trivy fs --download-db-only --timeout 10m .; then
+            if trivy fs --download-db-only --timeout 5m .; then
               exit 0
             fi
             echo "trivy database download failed (attempt ${attempt}/3)"
