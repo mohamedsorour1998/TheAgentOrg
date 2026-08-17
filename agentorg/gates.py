@@ -28,10 +28,22 @@ def _state_path(run_id: str) -> pathlib.Path:
     return _STATE_DIR / f"{run_id}.state.json"
 
 
-def pause(state: RunState, gate: str) -> pathlib.Path:
-    """Persist state at a gate and return the path a human/UI reads."""
+def _save(state: RunState) -> pathlib.Path:
+    """The one place a RunState is serialized. Both pause() and resume() use it.
+
+    One writer rather than two on purpose: the file is the handoff between a
+    graph that has stopped and a human who has not decided yet, so a second
+    copy of this line is a second chance for the two halves to disagree about
+    the format.
+    """
     path = _state_path(state.run_id)
     path.write_text(json.dumps(state.model_dump(), indent=2))
+    return path
+
+
+def pause(state: RunState, gate: str) -> pathlib.Path:
+    """Persist state at a gate and return the path a human/UI reads."""
+    path = _save(state)
     log.append(LogEvent(
         run_id=state.run_id, ticket_id=state.ticket_id,
         actor="system", stage=gate, action="opened",
@@ -41,7 +53,16 @@ def pause(state: RunState, gate: str) -> pathlib.Path:
 
 
 def resume(run_id: str, decision: HumanDecision) -> RunState:
-    """Reload paused state, record the decision, and hand it back to the graph."""
+    """Reload paused state, record the decision, and hand it back to the graph.
+
+    The decision is written back before returning, so the next call reads a
+    state that includes it. That matters because a UI decides one gate per
+    click: without the write-back, resume() reloaded the same untouched file
+    every time and each decision silently replaced the one before it — measured
+    as two sequential approvals returning only the second, with the file on disk
+    still holding none. The log kept the history, but nothing could be RESUMED
+    from it, which is the one job this file has.
+    """
     path = _state_path(run_id)
     state = RunState.model_validate_json(path.read_text())
     state.decisions.append(decision)
@@ -53,4 +74,5 @@ def resume(run_id: str, decision: HumanDecision) -> RunState:
     ))
     if decision.decision == "rejected":
         state.status = "rejected"
+    _save(state)
     return state

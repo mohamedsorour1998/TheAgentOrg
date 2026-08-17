@@ -16,13 +16,18 @@ auto_approve=False asks a real human on the terminal, and agentorg/gates_cli.py
 records the same decision out of band for anyone who walked away.
 
 A run reaches the end of this file only by being approved at every step. There
-are four ways it does not:
+are four ways it does not, and they are checked in this order:
     security verdict "block"      -> status "blocked"   (deterministic rule)
     reviewer never approved       -> status "failed"    (revision budget spent)
     sre verdict "no_go"           -> status "failed"
     a human said no at any gate   -> status "rejected"
 "rejected" is reserved for the human ones. An agent's refusal is a "failed" run,
 because nobody was asked.
+
+The order is load-bearing: the deterministic block is evaluated on every run
+that produced a diff and wins over every other stop, because "the poisoned
+ticket blocks" is a claim about code, not about what a model thought of the
+diff. See the comment at step 5b.
 
 Run it:
     python -m agentorg.graph            # clean ticket  -> promoted
@@ -126,20 +131,6 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
         _log(state, "reviewer", "review", "reviewed", verdict="changes_requested",
              summary=f"revision {state.revision_count}")
 
-    # 3b. THE REVIEWER'S VERDICT IS TERMINAL --------------------------------
-    # Reached only by the cap exit above: the budget is spent and the reviewer
-    # is still asking for changes, so nobody has approved this change. Promoting
-    # it would claim an approval that never happened, and opening a PR would
-    # publish a diff its own reviewer objected to — three times. Treated exactly
-    # as sre.verdict == "no_go" is below, and "failed" rather than "rejected"
-    # because no human was asked; see the module docstring.
-    if state.review.verdict != "approve":
-        state.status = "failed"
-        _log(state, "system", "review", "blocked", verdict=state.review.verdict,
-             summary=f"not promoting: {state.revision_count} revisions spent and "
-                     f"the reviewer never approved")
-        return state
-
     # 4. OPEN PR (Mariam's seam) -------------------------------------------
     state.dev = github_ops.open_pr(state)
     _log(state, "system", "develop", "opened", summary=f"PR {state.dev.pr_url}",
@@ -153,6 +144,32 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
         state.status = "blocked"
         github_ops.post_comment(state, state.security.explanation)
         _log(state, "system", "security", "blocked", summary="pipeline halted by block rule")
+        return state
+
+    # 5b. THE REVIEWER'S VERDICT IS TERMINAL --------------------------------
+    # Reached only by the cap exit from the loop above: the revision budget is
+    # spent and the reviewer is still asking for changes, so nobody has approved
+    # this change and it must not promote. Treated as sre.verdict == "no_go" is
+    # below, and "failed" rather than "rejected" because no human was asked.
+    #
+    # Placed AFTER the security stage, deliberately. The block rule is
+    # deterministic code, and the whole premise of this pipeline is that the
+    # block is not a model's judgement — so it must be evaluated on every run
+    # that produced a diff, whatever the reviewer thought of that diff. Stopping
+    # here first would invert that: on the poisoned ticket a competent reviewer
+    # SHOULD object to the hardcoded credentials, the developer's safety net
+    # re-inserts the key on every revision, so the cap would reliably exhaust
+    # and the run would end "failed" without the scanners ever running. That
+    # quietly downgrades "the poisoned ticket blocks every single time" into
+    # "it fails at review", which is a different and weaker claim.
+    #
+    # So a block wins above and returns; only a run the scanners CLEARED can be
+    # stopped here for never having been approved.
+    if state.review.verdict != "approve":
+        state.status = "failed"
+        _log(state, "system", "review", "blocked", verdict=state.review.verdict,
+             summary=f"scanners passed, but the reviewer never approved after "
+                     f"{state.revision_count} revisions; not promoting")
         return state
 
     # 6. GATE 2 -------------------------------------------------------------

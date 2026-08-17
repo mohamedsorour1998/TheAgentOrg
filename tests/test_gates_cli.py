@@ -11,6 +11,11 @@ being promoted:
     "failed". No human is involved in that one, which is why it is not
     "rejected": in this contract "rejected" denotes a human decision.
 
+The third one is checked AFTER the security stage, and two tests here exist to
+hold it there: a poisoned diff must still reach the deterministic block rule and
+end "blocked" even when the reviewer refused it on every pass. The block is code,
+not a model's judgement, so nothing a model decided may skip it.
+
 On patching builtins.input: every script below is FINITE and records what it
 was asked. conftest's autouse fixture makes an unpatched read fail loudly, and
 these scripts make an over-eager read fail loudly, so neither a gate that stops
@@ -24,7 +29,7 @@ import sys
 import pytest
 
 from agentorg import gates, gates_cli, github_ops, graph, log
-from agentorg.agents import reviewer
+from agentorg.agents import reviewer, security
 from agentorg.common import config
 from agentorg.state import HumanDecision, PlanResult, ReviewResult, RunState
 
@@ -175,13 +180,16 @@ def test_the_cli_records_a_decision_against_a_paused_run(monkeypatch, capsys):
     gates_cli.main()
 
     assert f"run_id={state.run_id}" in capsys.readouterr().out
-    # The decision the CLI took must reach the append-only log, which is the
-    # only durable record of it -- resume() hands the RunState back to its
-    # caller and this process is about to exit.
+    # The decision the CLI took must outlive the process, in BOTH records: the
+    # append-only log, which is what the timeline renders, and the state file,
+    # which is what the next decision resumes from.
     human = [e for e in log.read(state.run_id) if e.actor == "human"]
     assert [(e.stage, e.verdict, e.summary) for e in human] == [
         ("gate1", "rejected", "the plan targets the wrong handler"),
     ]
+    on_disk = RunState.model_validate_json(gates._state_path(state.run_id).read_text())
+    assert on_disk.status == "rejected"
+    assert [d.reason for d in on_disk.decisions] == ["the plan targets the wrong handler"]
 
 
 def test_the_cli_lists_a_paused_run_by_id(monkeypatch, capsys):
@@ -214,17 +222,15 @@ def test_a_change_the_reviewer_never_approved_is_not_promoted(monkeypatch):
     assert state.review.verdict == "changes_requested"
     assert state.revision_count == config.MAX_REVISION_LOOPS
 
-    # No PR for a change nobody approved. The witness is dev.branch: open_pr
-    # rewrites it to "agent-org/<ticket>-<sha>" before it does anything else,
-    # so the developer's own branch name surviving means open_pr never ran.
-    # dev.pr_url is NOT a witness -- fixtures/dev_result_clean.json ships with a
-    # real pull-request URL already in it, so `pr_url is None` fails on a
-    # correct implementation and `is not None` passes on a broken one.
-    assert state.dev is not None, "the developer did produce a diff"
-    assert not state.dev.branch.startswith("agent-org/"), \
-        "no PR may be opened for a change the reviewer never approved"
-    assert state.security is None, "the run must stop at the review, not at the scanners"
-    assert state.sre is None
+    # The scanners DID run and they cleared it -- that is what makes this run
+    # stoppable here rather than at the block rule, and the security stage is
+    # never skipped on the strength of a reviewer's opinion. See the poisoned
+    # counterpart below for the case where the block rule wins instead.
+    assert state.security is not None and state.security.verdict == "pass"
+
+    # Everything downstream of the security gate is what the missing approval
+    # stops: no SRE assessment, no gate 2 or 3, and above all no promotion.
+    assert state.sre is None, "the run must stop before the SRE agent"
 
     # And "failed" is not "rejected": no human was asked, so none is recorded
     # beyond gate 1, which came before the loop.
@@ -245,7 +251,7 @@ def test_a_never_approved_change_stops_even_when_a_human_approved_gate1(monkeypa
     assert state.status == "failed"
     assert _decided(state) == [("gate1", "approved")]
     assert len(asked) == 1, "gates 2 and 3 are downstream of a stop and must not ask"
-    assert not state.dev.branch.startswith("agent-org/"), "open_pr must not run"
+    assert state.sre is None
 
 
 def test_the_log_tells_the_two_review_exits_apart(monkeypatch):
@@ -315,17 +321,46 @@ def test_the_gate_writes_a_state_file_a_human_can_pick_up(monkeypatch):
     )
 
 
-def test_open_pr_is_never_reached_for_an_unapproved_change(monkeypatch):
-    """Belt and braces on the pr_url assertion above, from the other side.
+def test_a_poisoned_diff_blocks_even_when_the_reviewer_never_approves(monkeypatch):
+    """The deterministic block rule outranks the reviewer, and must.
 
-    pr_url being None proves open_pr did not SET it; this proves open_pr was
-    not CALLED, which is the property that matters once Task 9 makes the
-    offline branch do real local git work.
+    This is the scenario that decides where the review-exhaustion halt goes. A
+    competent reviewer SHOULD object to the poisoned diff -- it hardcodes AWS
+    credentials -- and developer.run re-inserts that key on every revision, so
+    a live poisoned run plausibly exhausts the cap on every pass. Stopping such
+    a run at the review would mean the scanners never ran, and the demo's whole
+    claim -- "the poisoned ticket blocks every single time" -- would quietly
+    become "it fails at review", which is a claim about a model's judgement
+    rather than about code.
     """
-    calls: list[str] = []
+    _never_approves(monkeypatch)
+    state = graph.run_pipeline("POISON-1", TICKET, poisoned=True)
+
+    assert state.status == "blocked", "the block rule wins over an unapproved review"
+    assert state.security.verdict == "block"
+    assert len(state.security.blocking) == 2
+    # ...and the reviewer really did refuse throughout, so this is the collision
+    # of the two stops rather than a run that quietly approved itself.
+    assert state.review.verdict == "changes_requested"
+    assert state.revision_count == config.MAX_REVISION_LOOPS
+
+
+def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
+    """The scanners are never skipped on the strength of a reviewer's opinion.
+
+    Measured from the call side rather than from the result: open_pr and the
+    security stage are both REACHED on an unapproved run, which is what keeps
+    the block rule's coverage independent of what the reviewer decided.
+    """
+    opened: list[str] = []
+    scanned: list[str] = []
     real_open_pr = github_ops.open_pr
+    real_security = security.run
     monkeypatch.setattr(github_ops, "open_pr", lambda state: (
-        calls.append(state.ticket_id) or real_open_pr(state)
+        opened.append(state.ticket_id) or real_open_pr(state)
+    ))
+    monkeypatch.setattr(security, "run", lambda state: (
+        scanned.append(state.ticket_id) or real_security(state)
     ))
 
     # Toggled rather than undone: monkeypatch.undo() would also revert the
@@ -338,10 +373,80 @@ def test_open_pr_is_never_reached_for_an_unapproved_change(monkeypatch):
     ))
 
     assert graph.run_pipeline("CLEAN-1", TICKET).status == "failed"
-    assert calls == []
+    assert opened == ["CLEAN-1"], "the diff is published for the scanners to read"
+    assert scanned == ["CLEAN-1"], "the block rule is evaluated on every diff"
 
-    # The recorder is live rather than vacuously empty: with the same patch in
-    # place, an approving reviewer still carries the run through open_pr.
+    # The recorders are live rather than vacuously equal: the approving path
+    # goes through the same two patches and reaches the same two stages.
     approving["now"] = True
     assert graph.run_pipeline("CLEAN-2", TICKET).status == "promoted"
-    assert calls == ["CLEAN-2"]
+    assert opened == ["CLEAN-1", "CLEAN-2"]
+    assert scanned == ["CLEAN-1", "CLEAN-2"]
+
+
+# --------------------------------------------------------------------------
+# resume() writes back, so a UI deciding one gate per click does not lose the
+# clicks before it.
+# --------------------------------------------------------------------------
+
+def test_two_sequential_resumes_both_survive():
+    """A human approves gate 1, then gate 2, in two separate calls.
+
+    Before the write-back, resume() reloaded the same untouched file every time
+    and each decision silently replaced the one before it: measured as a second
+    resume returning gates=['gate2'] alone, with decisions=0 still on disk. The
+    log kept the history, but nothing could be RESUMED from it.
+    """
+    state = RunState(ticket_id="CLEAN-1", ticket_text=TICKET)
+    path = gates.pause(state, "gate1")
+
+    first = gates.resume(state.run_id, HumanDecision(
+        gate="gate1", decision="approved", by="sorour", reason="plan is right"))
+    second = gates.resume(state.run_id, HumanDecision(
+        gate="gate2", decision="approved", by="mariam", reason="scanners clean"))
+
+    expected = [("gate1", "approved", "sorour"), ("gate2", "approved", "mariam")]
+    assert [(d.gate, d.decision, d.by) for d in first.decisions] == expected[:1]
+    assert [(d.gate, d.decision, d.by) for d in second.decisions] == expected
+    on_disk = RunState.model_validate_json(path.read_text())
+    assert [(d.gate, d.decision, d.by) for d in on_disk.decisions] == expected
+
+
+def test_a_resumed_rejection_persists_to_disk():
+    """The status a rejection sets must outlive the process that set it."""
+    state = RunState(ticket_id="CLEAN-1", ticket_text=TICKET)
+    path = gates.pause(state, "gate1")
+    assert RunState.model_validate_json(path.read_text()).status == "running"
+
+    gates.resume(state.run_id, HumanDecision(
+        gate="gate1", decision="rejected", by="sorour", reason="wrong plan"))
+
+    on_disk = RunState.model_validate_json(path.read_text())
+    assert on_disk.status == "rejected"
+    assert [(d.decision, d.reason) for d in on_disk.decisions] == [
+        ("rejected", "wrong plan"),
+    ]
+
+
+def test_resume_preserves_the_work_it_did_not_touch():
+    """Writing the state back must not cost anything already in it.
+
+    A round trip through resume() is a full deserialize/serialize of the run,
+    so it is also the place a field silently stops surviving. Asserted against
+    a real pipeline state rather than a hand-built one, so every populated
+    field of the contract is in play.
+    """
+    original = graph.run_pipeline("CLEAN-1", TICKET)
+    gates.pause(original, "gate3")
+
+    resumed = gates.resume(original.run_id, HumanDecision(
+        gate="gate3", decision="overridden", by="sorour", reason="accepted the risk"))
+
+    assert resumed.plan == original.plan
+    assert resumed.dev == original.dev
+    assert resumed.review == original.review
+    assert resumed.security == original.security
+    assert resumed.sre == original.sre
+    assert resumed.decisions[:-1] == original.decisions
+    assert RunState.model_validate_json(
+        gates._state_path(original.run_id).read_text()) == resumed
