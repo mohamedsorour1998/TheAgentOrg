@@ -62,12 +62,19 @@ def _auto_gate(state: RunState, gate: str) -> HumanDecision:
     return HumanDecision(gate=gate, decision="approved", by="auto", reason="demo auto-approve")
 
 
+# Exact words, not a prefix. A prefix match on "a" made "abort" — the most
+# natural way to bail out of a prompt you did not mean to be at — mean APPROVE,
+# on the three prompts in this system where being misread is most expensive.
+# Everything not in this set rejects, so bare Enter still fails closed.
+APPROVAL_WORDS = frozenset({"a", "approve", "approved", "y", "yes"})
+
+
 def _cli_gate(state: RunState, gate: str) -> HumanDecision:
     """Real gate: pause, ask a human on the terminal, record their decision."""
     path = gates.pause(state, gate)
     print(f"\n[{gate}] paused. state saved -> {path}")
-    answer = input(f"[{gate}] approve / reject? ").strip().lower()
-    decision = "approved" if answer.startswith("a") else "rejected"
+    answer = input(f"[{gate}] approve / reject? [a = approve, anything else rejects] ")
+    decision = "approved" if answer.strip().lower() in APPROVAL_WORDS else "rejected"
     return HumanDecision(gate=gate, decision=decision,
                          by=os.environ.get("USER", "human"))
 
@@ -96,9 +103,29 @@ def _decide(state: RunState, gate: str, ask: Callable[[RunState, str], HumanDeci
 
 def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
                  auto_approve: bool = True) -> RunState:
-    """Walk one ticket through the whole pipeline. Returns the final RunState."""
+    """Walk one ticket through the whole pipeline. Returns the final RunState.
+
+    The walk itself is _walk; this wrapper exists only to guarantee the ending
+    is written down. _walk has six exits and every one of them sets a terminal
+    status, so a `gates.save` before each `return` would be six chances to
+    forget one — and the seventh exit somebody adds next month would be wrong by
+    default. A finally clause is wrong by default in the safe direction instead:
+    it also persists a run that died on an exception, which is exactly the run
+    someone needs to inspect afterwards.
+
+    state is built here rather than in _walk so the finally clause has something
+    to save even if _walk raises on its first line.
+    """
     state = RunState(ticket_id=ticket_id, ticket_text=ticket_text)
-    _log(state, "system", "plan", "opened", summary=f"run started for {ticket_id}")
+    try:
+        return _walk(state, poisoned=poisoned, auto_approve=auto_approve)
+    finally:
+        gates.save(state)
+
+
+def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
+    """The pipeline itself. Always call through run_pipeline, never directly."""
+    _log(state, "system", "plan", "opened", summary=f"run started for {state.ticket_id}")
     ask = _auto_gate if auto_approve else _cli_gate
 
     # 1. PLAN ---------------------------------------------------------------

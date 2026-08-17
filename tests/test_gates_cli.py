@@ -64,6 +64,11 @@ def _decided(state: RunState) -> list[tuple[str, str]]:
     return [(d.gate, d.decision) for d in state.decisions]
 
 
+def _on_disk(state: RunState) -> RunState:
+    """The run as the next process would find it — the CLI's whole input."""
+    return RunState.model_validate_json(gates._state_path(state.run_id).read_text())
+
+
 def _never_approves(monkeypatch) -> None:
     """A reviewer that objects on every pass, with a real objection attached."""
     monkeypatch.setattr(reviewer, "run", lambda state: ReviewResult(
@@ -301,24 +306,41 @@ def test_a_rejected_gate_is_recorded_in_the_log(monkeypatch):
     ]
 
 
-def test_the_gate_writes_a_state_file_a_human_can_pick_up(monkeypatch):
-    """Every gate pauses to disk BEFORE asking, so a walk-away is resumable.
+def test_a_run_abandoned_at_a_gate_is_left_resumable(monkeypatch):
+    """Walking away mid-prompt must leave a state another human can pick up.
 
-    This is the whole reason pause() and the CLI are the same seam: whoever
-    abandons the terminal at gate 2 leaves behind a state another human can
-    decide on later with `gates_cli resume`.
+    Ctrl-D at the terminal raises EOFError out of input(), which is the literal
+    "walked away" gesture and the reason pause() writes before asking rather
+    than after. The run never completes, so nothing may invent a terminal status
+    for it -- but everything done up to the prompt has to survive, or the async
+    CLI has nothing to resume and the two halves of the gate stop being the same
+    seam.
     """
-    _answer_gates(monkeypatch, ["a", "r"])
-    state = graph.run_pipeline("CLEAN-1", TICKET, auto_approve=False)
+    scripted = iter(["a"])
 
-    saved = RunState.model_validate_json(
-        gates._state_path(state.run_id).read_text()
-    )
-    assert saved.run_id == state.run_id
-    assert saved.security is not None, "gate 2 saved what the human was looking at"
-    assert [d.gate for d in saved.decisions] == ["gate1"], (
-        "the file is written before the pending decision, never after it"
-    )
+    def _walk_away(prompt: str = "") -> str:
+        try:
+            return next(scripted)
+        except StopIteration:
+            raise EOFError("user pressed ctrl-D") from None
+
+    monkeypatch.setattr(builtins, "input", _walk_away)
+    # gates.pause is handed the live RunState, which is the only way to learn
+    # the run_id of a run whose exception means it never returned one.
+    paused: list[RunState] = []
+    real_pause = gates.pause
+    monkeypatch.setattr(gates, "pause", lambda state, gate: (
+        paused.append(state) or real_pause(state, gate)
+    ))
+
+    with pytest.raises(EOFError):
+        graph.run_pipeline("CLEAN-1", TICKET, auto_approve=False)
+
+    assert [d.gate for d in paused[-1].decisions] == ["gate1"], "abandoned at gate 2"
+    on_disk = _on_disk(paused[-1])
+    assert on_disk.status == "running", "an abandoned run has no ending to record yet"
+    assert [(d.gate, d.decision) for d in on_disk.decisions] == [("gate1", "approved")]
+    assert on_disk.security is not None, "the work up to gate 2 survived the walk-away"
 
 
 def test_a_poisoned_diff_blocks_even_when_the_reviewer_never_approves(monkeypatch):
@@ -351,16 +373,27 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     Measured from the call side rather than from the result: open_pr and the
     security stage are both REACHED on an unapproved run, which is what keeps
     the block rule's coverage independent of what the reviewer decided.
+
+    post_comment is recorded too, and it is the sharpest of the three: it is
+    reachable ONLY from inside the block branch, so it distinguishes "the
+    scanners ran" from "the block rule actually fired". A halt placed between
+    security.run and that branch leaves the first two recorders satisfied and
+    only this one empty.
     """
     opened: list[str] = []
     scanned: list[str] = []
+    commented: list[str] = []
     real_open_pr = github_ops.open_pr
     real_security = security.run
+    real_post_comment = github_ops.post_comment
     monkeypatch.setattr(github_ops, "open_pr", lambda state: (
         opened.append(state.ticket_id) or real_open_pr(state)
     ))
     monkeypatch.setattr(security, "run", lambda state: (
         scanned.append(state.ticket_id) or real_security(state)
+    ))
+    monkeypatch.setattr(github_ops, "post_comment", lambda state, body, finding=None: (
+        commented.append(state.ticket_id) or real_post_comment(state, body, finding)
     ))
 
     # Toggled rather than undone: monkeypatch.undo() would also revert the
@@ -375,13 +408,22 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     assert graph.run_pipeline("CLEAN-1", TICKET).status == "failed"
     assert opened == ["CLEAN-1"], "the diff is published for the scanners to read"
     assert scanned == ["CLEAN-1"], "the block rule is evaluated on every diff"
+    assert commented == [], "a clean diff has nothing to explain"
+
+    # The same run on the poisoned ticket, still with a reviewer that never
+    # approves: the block branch must be entered, not merely approached.
+    assert graph.run_pipeline("POISON-1", TICKET, poisoned=True).status == "blocked"
+    assert opened == ["CLEAN-1", "POISON-1"]
+    assert scanned == ["CLEAN-1", "POISON-1"]
+    assert commented == ["POISON-1"], "the block reason is posted from inside the block"
 
     # The recorders are live rather than vacuously equal: the approving path
-    # goes through the same two patches and reaches the same two stages.
+    # goes through the same patches and reaches the same stages.
     approving["now"] = True
     assert graph.run_pipeline("CLEAN-2", TICKET).status == "promoted"
-    assert opened == ["CLEAN-1", "CLEAN-2"]
-    assert scanned == ["CLEAN-1", "CLEAN-2"]
+    assert opened == ["CLEAN-1", "POISON-1", "CLEAN-2"]
+    assert scanned == ["CLEAN-1", "POISON-1", "CLEAN-2"]
+    assert commented == ["POISON-1"]
 
 
 # --------------------------------------------------------------------------
@@ -448,5 +490,99 @@ def test_resume_preserves_the_work_it_did_not_touch():
     assert resumed.security == original.security
     assert resumed.sre == original.sre
     assert resumed.decisions[:-1] == original.decisions
-    assert RunState.model_validate_json(
-        gates._state_path(original.run_id).read_text()) == resumed
+    assert _on_disk(original) == resumed
+
+
+# --------------------------------------------------------------------------
+# The graph writes the ENDING, not only the pauses. Without this the file was
+# a record of the last question asked rather than of how the run turned out.
+# --------------------------------------------------------------------------
+
+def test_every_completed_run_writes_its_ending_to_disk(monkeypatch):
+    """On-disk state must match the returned state for every terminal outcome.
+
+    gates.pause always runs BEFORE the decision it is pausing for, so until the
+    graph wrote its own ending every finished run -- promoted, blocked and
+    rejected alike -- was left on disk reading status="running" with its last
+    decision missing. The file is what the CLI and the week-3 UI read, so that
+    made the authoritative record disagree with the run that produced it.
+    """
+    promoted = graph.run_pipeline("CLEAN-1", TICKET)
+    blocked = graph.run_pipeline("POISON-1", TICKET, poisoned=True)
+
+    _answer_gates(monkeypatch, ["a", "r"])
+    rejected = graph.run_pipeline("CLEAN-2", TICKET, auto_approve=False)
+
+    _never_approves(monkeypatch)
+    failed = graph.run_pipeline("CLEAN-3", TICKET)
+
+    # Distinct outcomes, so the loop below is comparing four different endings
+    # rather than four copies of one.
+    assert [s.status for s in (promoted, blocked, rejected, failed)] == [
+        "promoted", "blocked", "rejected", "failed",
+    ]
+    assert [len(s.decisions) for s in (promoted, blocked, rejected, failed)] == [3, 1, 2, 1]
+
+    for state in (promoted, blocked, rejected, failed):
+        on_disk = _on_disk(state)
+        assert on_disk.status == state.status, f"{state.ticket_id}: status not persisted"
+        assert len(on_disk.decisions) == len(state.decisions), (
+            f"{state.ticket_id}: decision count not persisted"
+        )
+        assert on_disk == state, f"{state.ticket_id}: on-disk run differs from the real one"
+
+
+def test_a_rejected_run_cannot_be_talked_out_of_its_rejection(monkeypatch):
+    """The sharp end of persisting the ending.
+
+    A run the graph rejected at gate 2 used to be left on disk as
+    running/['gate1'], so `gates_cli resume <id> --gate gate2 --decision
+    approved` succeeded and produced running/[gate1 approved, gate2 approved] --
+    a completed, rejected run talked out of its own rejection by someone who
+    came along afterwards.
+    """
+    _answer_gates(monkeypatch, ["a", "r"])
+    state = graph.run_pipeline("CLEAN-1", TICKET, auto_approve=False)
+    assert state.status == "rejected"
+    assert _on_disk(state).status == "rejected", "the rejection is on disk to begin with"
+
+    resumed = gates.resume(state.run_id, HumanDecision(
+        gate="gate2", decision="approved", by="someone-else", reason="on reflection"))
+
+    assert resumed.status == "rejected", "a later approval cannot undo the rejection"
+    assert _on_disk(state).status == "rejected"
+    # The attempt is not hidden -- it is appended, like every other decision.
+    assert [(d.gate, d.decision) for d in resumed.decisions] == [
+        ("gate1", "approved"), ("gate2", "rejected"), ("gate2", "approved"),
+    ]
+
+
+# --------------------------------------------------------------------------
+# The approval token itself.
+# --------------------------------------------------------------------------
+
+def test_only_an_explicit_approval_approves(monkeypatch):
+    """Typing "abort" at a gate must not approve it.
+
+    The gate fails closed on anything it does not recognise, which is right. But
+    a PREFIX match on "a" made the most natural way to bail out of a prompt you
+    did not mean to be at -- "abort" -- the same keystroke as consent, on the
+    three prompts in this system where being misread costs the most.
+    """
+    state = RunState(ticket_id="CLEAN-1", ticket_text=TICKET)
+    cases = {
+        "a": "approved", "approve": "approved", "approved": "approved",
+        "y": "approved", "yes": "approved", "  A  ": "approved", "YES": "approved",
+        "abort": "rejected", "actually no": "rejected", "away": "rejected",
+        "r": "rejected", "reject": "rejected", "no": "rejected", "n": "rejected",
+        "": "rejected", "   ": "rejected", "stop": "rejected", "quit": "rejected",
+    }
+    for answer, expected in cases.items():
+        monkeypatch.setattr(builtins, "input", lambda prompt="", a=answer: a)
+        assert graph._cli_gate(state, "gate1").decision == expected, (
+            f"answering {answer!r} at a gate must be {expected}"
+        )
+
+    # The two halves of the guarantee, stated rather than implied by the table.
+    assert "abort" not in graph.APPROVAL_WORDS
+    assert "" not in graph.APPROVAL_WORDS, "bare Enter must fail closed"
