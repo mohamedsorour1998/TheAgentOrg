@@ -29,7 +29,7 @@ import sys
 import pytest
 
 from agentorg import gates, gates_cli, github_ops, graph, log
-from agentorg.agents import reviewer, security
+from agentorg.agents import reviewer, security, sre
 from agentorg.common import config
 from agentorg.state import HumanDecision, PlanResult, ReviewResult, RunState
 
@@ -67,6 +67,25 @@ def _decided(state: RunState) -> list[tuple[str, str]]:
 def _on_disk(state: RunState) -> RunState:
     """The run as the next process would find it — the CLI's whole input."""
     return RunState.model_validate_json(gates._state_path(state.run_id).read_text())
+
+
+def _explode(state: RunState) -> RunState:
+    """Stand-in for any stage dying mid-run. Must not be a lambda: it raises."""
+    raise RuntimeError("ci runner exploded mid-run")
+
+
+def _capture_run(monkeypatch) -> list[RunState]:
+    """Record the live RunState, for runs that raise instead of returning one.
+
+    Hooks gates.pause rather than gates.save, so a test about what save() wrote
+    is not reading its answer out of the thing under test.
+    """
+    captured: list[RunState] = []
+    real_pause = gates.pause
+    monkeypatch.setattr(gates, "pause", lambda state, gate: (
+        captured.append(state) or real_pause(state, gate)
+    ))
+    return captured
 
 
 def _never_approves(monkeypatch) -> None:
@@ -315,6 +334,13 @@ def test_a_run_abandoned_at_a_gate_is_left_resumable(monkeypatch):
     for it -- but everything done up to the prompt has to survive, or the async
     CLI has nothing to resume and the two halves of the gate stop being the same
     seam.
+
+    Scope, stated because it is easy to overclaim: this pins that an unfinished
+    run keeps "running" and stays resumable. It does NOT pin the finally clause
+    in run_pipeline -- pause() wrote these exact bytes just before the prompt,
+    so this test passes with or without the terminal save. The finally is pinned
+    by test_a_crash_mid_run_still_leaves_the_decisions_already_taken, which
+    crashes AFTER a decision instead of at one.
     """
     scripted = iter(["a"])
 
@@ -325,19 +351,13 @@ def test_a_run_abandoned_at_a_gate_is_left_resumable(monkeypatch):
             raise EOFError("user pressed ctrl-D") from None
 
     monkeypatch.setattr(builtins, "input", _walk_away)
-    # gates.pause is handed the live RunState, which is the only way to learn
-    # the run_id of a run whose exception means it never returned one.
-    paused: list[RunState] = []
-    real_pause = gates.pause
-    monkeypatch.setattr(gates, "pause", lambda state, gate: (
-        paused.append(state) or real_pause(state, gate)
-    ))
+    captured = _capture_run(monkeypatch)
 
     with pytest.raises(EOFError):
         graph.run_pipeline("CLEAN-1", TICKET, auto_approve=False)
 
-    assert [d.gate for d in paused[-1].decisions] == ["gate1"], "abandoned at gate 2"
-    on_disk = _on_disk(paused[-1])
+    assert [d.gate for d in captured[-1].decisions] == ["gate1"], "abandoned at gate 2"
+    on_disk = _on_disk(captured[-1])
     assert on_disk.status == "running", "an abandoned run has no ending to record yet"
     assert [(d.gate, d.decision) for d in on_disk.decisions] == [("gate1", "approved")]
     assert on_disk.security is not None, "the work up to gate 2 survived the walk-away"
@@ -530,6 +550,37 @@ def test_every_completed_run_writes_its_ending_to_disk(monkeypatch):
             f"{state.ticket_id}: decision count not persisted"
         )
         assert on_disk == state, f"{state.ticket_id}: on-disk run differs from the real one"
+
+
+def test_a_crash_mid_run_still_leaves_the_decisions_already_taken(monkeypatch):
+    """The `finally` itself, pinned — not merely the saves on the return paths.
+
+    This is deliberately NOT the abandonment test. That one raises at a gate
+    prompt, where the pause() write immediately above it happens to leave the
+    same bytes a terminal save would, so it passes just as happily against a
+    save-on-normal-return-only wrapper and pins nothing about the finally.
+
+    The discriminating case needs a crash AFTER a gate decision, because pause()
+    always writes BEFORE the decision it is pausing for. So: approve gate 2,
+    then have the next stage die. With the finally, both decisions are on disk.
+    Without it, the newest write on disk is gate 2's pause — taken before gate 2
+    was answered — and the gate-2 approval is simply gone, in the run someone is
+    most likely to come back and inspect.
+    """
+    monkeypatch.setattr(sre, "run", _explode)
+    captured = _capture_run(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="exploded"):
+        graph.run_pipeline("CLEAN-1", TICKET)
+
+    on_disk = _on_disk(captured[-1])
+    assert [(d.gate, d.decision) for d in on_disk.decisions] == [
+        ("gate1", "approved"), ("gate2", "approved"),
+    ], "a crash must not lose a decision that was already taken"
+    # Still "running": the run did not end, it stopped. Nothing may promote,
+    # reject or fail a run on its behalf just because it raised.
+    assert on_disk.status == "running"
+    assert on_disk.security is not None, "the work up to the crash survived too"
 
 
 def test_a_rejected_run_cannot_be_talked_out_of_its_rejection(monkeypatch):

@@ -106,12 +106,12 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
     """Walk one ticket through the whole pipeline. Returns the final RunState.
 
     The walk itself is _walk; this wrapper exists only to guarantee the ending
-    is written down. _walk has six exits and every one of them sets a terminal
-    status, so a `gates.save` before each `return` would be six chances to
-    forget one — and the seventh exit somebody adds next month would be wrong by
-    default. A finally clause is wrong by default in the safe direction instead:
-    it also persists a run that died on an exception, which is exactly the run
-    someone needs to inspect afterwards.
+    is written down. _walk has seven `return state` exits, so a `gates.save`
+    before each one would be seven chances to forget one — and the eighth exit
+    somebody adds next month would be wrong by default. A finally clause is
+    wrong by default in the safe direction instead: it also persists a run that
+    died on an exception, which is exactly the run someone needs to inspect
+    afterwards, and which no `return`-site save can reach at all.
 
     state is built here rather than in _walk so the finally clause has something
     to save even if _walk raises on its first line.
