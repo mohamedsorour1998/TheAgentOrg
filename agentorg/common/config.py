@@ -34,3 +34,11 @@ GITHUB_REPO = os.environ.get("DEMO_REPO", "")   # the shared target repo, "owner
 # Set true to force every agent onto its fixture without attempting a model
 # call. CI sets this so the suite never needs AWS credentials.
 LLM_DISABLED = os.environ.get("LLM_DISABLED", "false").lower() == "true"
+
+# Offline demo workspace (Mariam) -------------------------------------------
+# Where the offline path does its real git work, and where blocked-run reasons
+# are recorded instead of being posted as PR comments. Both default under runs/,
+# which is gitignored, so a demo run never dirties this repository. The suite
+# redirects them at a per-test tmp_path -- see tests/conftest.py, seam 2.
+OFFLINE_REPO = os.environ.get("OFFLINE_REPO", "runs/offline-demo")
+OFFLINE_NOTES = os.environ.get("OFFLINE_NOTES", "runs/offline-demo/NOTES.md")

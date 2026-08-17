@@ -99,6 +99,36 @@ instead -- verified against both call sites, `open_pr` and `post_comment`.
 Do not delete this fixture either. Nothing turns red if you do -- the suite
 just goes back to opening pull requests on a real repository.
 
+-------------------------------------------------------------------------
+SEAM 2, PART TWO -- where the local path WRITES
+-------------------------------------------------------------------------
+
+Forcing `OFFLINE = True` above sends every test down `open_pr`'s local branch,
+and that branch is no longer a stub that returns a `local://` string: it runs
+real `git init` / `checkout -B` / `add` / `commit` in `config.OFFLINE_REPO` and
+appends to `config.OFFLINE_NOTES`. Both default under `runs/`, INSIDE this
+repository. So the guard that keeps the suite off GitHub is also what points it
+at the working tree.
+
+Measured with a `subprocess.Popen` recorder, `pytest -q` at the repository root,
+before this fixture existed: 169 `git` child processes, 105 of them with
+cwd=`<repo>/runs/offline-demo`, from 19 tests that never mention git -- the
+pipeline tests in test_pipeline_smoke.py, test_gates_cli.py and
+test_agent_fallbacks.py, which reach `open_pr` through `run_pipeline`. They left
+a real nested repository behind with five `agent-org/*` branches and a NOTES.md.
+`runs/` is gitignored, so `git status` stayed clean and nothing pointed at it.
+
+Two things were wrong with that, beyond the litter. It is SHARED MUTABLE STATE:
+one repo, one NOTES file, every test appending to both, so a test can pass on
+what an earlier test committed and the suite becomes order-dependent. And it is
+a real repository sitting inside another one, one `.git` deletion away from
+`git checkout -B agent-org/...` finding the OUTER repo instead.
+
+So both knobs are redirected at pytest's per-test `tmp_path`. Same shape as the
+guards above -- override the module attribute the code reads at call time -- and
+the same opt-out: a test that wants its own workspace sets them in its own
+fixture, as tests/test_offline_mode.py does.
+
 =========================================================================
 SEAM 3 -- the terminal (stdin)
 =========================================================================
@@ -172,6 +202,19 @@ def _github_offline_by_default(monkeypatch):
     """Start every test in local mode with the GitHub API seam blocked."""
     monkeypatch.setattr(config, "OFFLINE", True)
     monkeypatch.setattr(github_ops, "_repo", _unpatched_repo)
+
+
+@pytest.fixture(autouse=True)
+def _offline_workspace_is_temporary(tmp_path, monkeypatch):
+    """Keep the local path's real git work out of the working tree.
+
+    The other half of the fixture above: OFFLINE=True makes every test do local
+    git, and the shipped defaults for both knobs live under runs/ in this repo.
+    See "SEAM 2, PART TWO" at the top of this file for what that measured out to.
+    """
+    workspace = tmp_path / "offline-demo"
+    monkeypatch.setattr(config, "OFFLINE_REPO", str(workspace))
+    monkeypatch.setattr(config, "OFFLINE_NOTES", str(workspace / "NOTES.md"))
 
 
 def _unpatched_input(prompt: str = "") -> NoReturn:

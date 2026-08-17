@@ -11,15 +11,22 @@ Two modes:
               Needs GITHUB_TOKEN + DEMO_REPO (see agentorg/common/config.py).
     local   — no network. Used when OFFLINE=true, and automatically whenever
               those credentials are absent, so every other lane (and CI) can run
-              the pipeline without a token. Returns local:// and comment:// refs.
+              the pipeline without a token. Not a stub: it does the same work
+              against a plain git repo at config.OFFLINE_REPO — real branch,
+              real commit of the diff — and records what would have been a PR
+              comment in config.OFFLINE_NOTES. Returns local:// refs.
+
+The local path is the demo's insurance policy: `OFFLINE=true LLM_DISABLED=true`
+walks the whole pipeline, poisoned ticket included, with the network unplugged.
 
 Still to build:
-    - real local-git offline mode, branch + commit + NOTES  (week2.md)
     - deploy_note(), co-owned with Sorour                   (week3.md)
   see docs/plan/mariam/.
 """
 
 import hashlib
+import os
+import subprocess
 
 from github import Auth, Github, GithubException
 
@@ -49,6 +56,39 @@ def _repo():
     return Github(auth=Auth.Token(config.GITHUB_TOKEN)).get_repo(config.GITHUB_REPO)
 
 
+def _git(*args: str, cwd: str) -> None:
+    """Run a git command in cwd, raising on failure."""
+    subprocess.run(["git", *args], cwd=cwd, check=True,
+                   capture_output=True, text=True)
+
+
+def _ensure_offline_repo() -> str:
+    """Create the offline demo repo with a main branch if it doesn't exist.
+
+    user.email/user.name are set LOCALLY here rather than inherited from the
+    machine, because a CI container has no global identity. Git only *usually*
+    covers for that: with none configured it guesses from username+hostname
+    (measured on a laptop: `Mohamed Sorour <sorour@192.168.1.9>`, commit exit 0,
+    with a warning). It refuses when it cannot build a plausible address, and
+    refuses outright under user.useConfigOnly. Deleting these two lines and
+    running the suite with that set fails 25 tests; with them, 74 pass.
+
+    -b main is likewise explicit rather than trusting init.defaultBranch, since
+    `open_pr` checks out "main" by name on every subsequent run.
+    """
+    path = config.OFFLINE_REPO
+    os.makedirs(path, exist_ok=True)
+    if not os.path.isdir(os.path.join(path, ".git")):
+        _git("init", "-b", "main", cwd=path)
+        _git("config", "user.email", "agentorg@example.com", cwd=path)
+        _git("config", "user.name", "Agent Org", cwd=path)
+        with open(os.path.join(path, "README.md"), "w") as fh:
+            fh.write("# offline demo\n")
+        _git("add", "README.md", cwd=path)
+        _git("commit", "-m", "init offline demo repo", cwd=path)
+    return path
+
+
 def open_pr(state: RunState) -> DevResult:
     """Create a branch + PR for the developer's diff. Returns DevResult with pr_url set."""
     dev = state.dev or fixtures_loader.dev()
@@ -56,7 +96,17 @@ def open_pr(state: RunState) -> DevResult:
     dev.branch = branch
 
     if _use_local():
-        # No network (or no credentials): keep the graph green with a local ref.
+        # No network (or no credentials): do the same work against a local repo.
+        path = _ensure_offline_repo()
+        _git("checkout", "main", cwd=path)
+        # -B resets the branch if a prior run created it, so re-runs are safe.
+        _git("checkout", "-B", branch, cwd=path)
+        os.makedirs(os.path.join(path, "changes"), exist_ok=True)
+        diff_file = os.path.join("changes", f"{state.ticket_id}.diff")
+        with open(os.path.join(path, diff_file), "w") as fh:
+            fh.write(dev.diff)
+        _git("add", diff_file, cwd=path)
+        _git("commit", "-m", f"{state.ticket_id}: {dev.summary}", cwd=path)
         dev.pr_url = f"local://{branch}"
         return dev
 
@@ -127,8 +177,12 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         body = header + body
 
     if _use_local():
-        # No network (or no credentials): hand back a local ref, same as open_pr.
-        return f"comment://{state.run_id}"
+        # No network (or no credentials): append the reason to a local NOTES file.
+        # `or "."` because dirname("NOTES.md") is "", and makedirs("") raises.
+        os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
+        with open(config.OFFLINE_NOTES, "a") as fh:
+            fh.write(f"\n## {state.ticket_id} ({state.run_id})\n{body}\n")
+        return f"local://{config.OFFLINE_NOTES}"
 
     repo = _repo()
 
