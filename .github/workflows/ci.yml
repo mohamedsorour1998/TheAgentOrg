@@ -77,9 +77,12 @@ jobs:
       # agents/security.py: with nothing on PATH, run_all_scanners raises
       # FileNotFoundError and the agent falls back. Install gitleaks/semgrep/
       # trivy here and those five silently switch to the real-scanner path.
-      # Measured: the suite still passes 65/65 either way, but the run goes from
-      # 0.16s to 33.9s and starts pulling a ~108 MB trivy database on every
-      # push. The real binaries belong in `scan`, which is about them.
+      # Re-measured after offline mode became real git: the suite still passes
+      # 73/73 either way, but the run goes from 3.6s to 37.6s and starts pulling
+      # a ~108 MB trivy database on every push. (The 3.6s floor is itself new —
+      # it was 0.16s while open_pr's local branch was a stub. Every pipeline test
+      # now does a real `git init` + commit in its own tmp_path.) The real
+      # binaries belong in `scan`, which is about them.
       - name: Run tests
         run: pytest -q
 
