@@ -16,12 +16,13 @@ offline path only *looks* like it worked:
     tell `open(..., "a")` from `open(..., "w")`, and "appends" is the claim.
 """
 
+import logging
 import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from agentorg import github_ops
+from agentorg import github_ops, log
 from agentorg.common import config
 from agentorg.state import DevResult, RunState
 
@@ -317,16 +318,17 @@ class _FakeRepo:
     cannot witness that.
     """
 
-    def __init__(self, *, open_prs: int = 1, failing: str = ""):
+    def __init__(self, *, open_prs: int = 1, failing: str = "", boom: str = GITHUB_BOOM):
         self.calls: list[tuple[str, object]] = []
         self.open_prs = open_prs
         self.failing = failing
+        self.boom = boom
         self.owner = SimpleNamespace(login="someone")
 
     def record(self, name: str, arg) -> None:
         self.calls.append((name, arg))
         if self.failing == name:
-            raise RuntimeError(GITHUB_BOOM)
+            raise RuntimeError(self.boom)
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -390,10 +392,12 @@ def test_post_comment_never_raises_without_a_pr(monkeypatch, capsys):
     assert BLOCK_REASON in out
     assert BRANCH in out
     # It RECOGNISED there was no PR rather than tripping over one that is not
-    # there. Both endings return a ref and print the reason, so neither the
-    # return value nor the presence of the body can tell them apart: the
-    # witnesses are that get_issue was never reached, and that this is not the
-    # wording the exception handler uses.
+    # there. Note where that is actually caught: deleting the totalCount check
+    # is caught by the REF assertion above, because _FakePulls has __getitem__,
+    # so the mutant runs on through get_issue to create_comment and returns
+    # COMMENT_URL instead of the fallback ref. The two witnesses below are the
+    # independent ones -- GitHub was asked exactly once and never written to,
+    # and this is not the wording the exception handler uses.
     assert repo.names() == ["get_pulls"]
     assert "could not comment on the PR" not in out
 
@@ -479,3 +483,137 @@ def test_the_blind_except_does_not_swallow_the_conftest_github_guard(monkeypatch
 
     with pytest.raises(pytest.fail.Exception, match="github_ops._repo"):
         github_ops.post_comment(state, BLOCK_REASON)
+
+
+def test_a_chatty_github_failure_stays_one_short_warning_line(monkeypatch, caplog,
+                                                              capsys):
+    """The delivery-failure WARNING must stay one bounded projector line.
+
+    A real GithubException carries the whole JSON response body in its message,
+    and this fires immediately above `status=blocked` during the demo -- where
+    a wall of text reads as a crash rather than as the block working. Same
+    shape, and the same reason, as security.run's scanner fallback; the
+    analogue is test_a_chatty_scanner_failure_stays_one_short_warning_line in
+    tests/test_agent_fallbacks.py.
+
+    This test exists because lint cannot do its job: BLE001 forces a logging
+    call carrying exc_info to EXIST, but it has nothing to say about that
+    call's LEVEL, wording or length. A handler that dumped 60KB at WARNING is
+    BLE001-clean.
+    """
+    body = '{"message": "Validation Failed", "documentation_url": "..."}, '
+    noise = body * 1000                                       # ~60KB, one line
+    repo = _FakeRepo(failing="get_pulls",
+                     boom=f"502 Bad Gateway from api.github.com: {noise}")
+    _online(monkeypatch, lambda: repo)
+
+    state = _state()
+    state.dev.branch = BRANCH
+    with caplog.at_level(logging.DEBUG, logger="agentorg.github_ops"):
+        ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    assert ref == f"comment://{state.run_id}", "the block must still be reported back"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "one line on the projector, not none and not three"
+    line = warnings[0].getMessage()
+    assert "\n" not in line, "a multi-line WARNING is not one projector line"
+    assert len(line) < 400, f"WARNING was {len(line)} chars: {line[:120]}..."
+    assert "RuntimeError" in line, "the line must still name the cause"
+    assert "chars total" in line, "truncation must be marked, not silent"
+    # The crux: a WARNING carrying exc_info renders the whole traceback through
+    # whatever handler is attached, which is the wall of text this exists to
+    # prevent. getMessage() would not show that, so assert on the record.
+    assert warnings[0].exc_info is None, "the traceback must not ride the projector line"
+
+    # Demote, don't drop: the DEBUG record still carries the whole thing.
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debugs) == 1
+    assert debugs[0].exc_info is not None, "demoted, not discarded"
+    rendered = logging.Formatter().format(debugs[0])
+    assert noise.strip() in rendered, "the full response body must survive at DEBUG"
+
+    # And stdout is the projector too -- it is where the block reason goes when
+    # the PR is unreachable, so it is bounded on the same terms.
+    out = capsys.readouterr().out
+    assert BLOCK_REASON in out, "the reason itself is never what gets truncated"
+    assert len(out) < 1000, f"stdout was {len(out)} chars"
+    assert "chars total" in out
+
+
+# =========================================================================
+# The block reason's fate has to reach the RUN'S OWN ARTIFACT, not just
+# Python's stderr. These live here rather than with the pipeline tests because
+# they need the fake GitHub above; what they exercise is graph.py + log.py.
+# =========================================================================
+
+def _poisoned_run_with_only_the_comment_online(monkeypatch, repo_factory):
+    """Run the poisoned pipeline with the block comment as its ONLY online call.
+
+    open_pr is pinned to the local git path on purpose. If the PR failed too,
+    a run could end blocked-and-unreported for either reason, and the log row
+    under test would no longer be about the comment.
+    """
+    from agentorg.graph import run_pipeline
+
+    real_open_pr = github_ops.open_pr
+
+    def local_open_pr(state):
+        config.OFFLINE = True
+        try:
+            return real_open_pr(state)
+        finally:
+            config.OFFLINE = False
+
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "GITHUB_TOKEN", "x")
+    monkeypatch.setattr(config, "GITHUB_REPO", "someone/auth-service")
+    monkeypatch.setattr(github_ops, "_repo", repo_factory)
+    monkeypatch.setattr(github_ops, "open_pr", local_open_pr)
+    return run_pipeline("DEMO-POISON", "Add a per-IP login rate limit.", poisoned=True)
+
+
+def _block_row(state):
+    """The single system/security/blocked row out of runs/<run_id>.jsonl."""
+    rows = [e for e in log.read(state.run_id)
+            if (e.actor, e.stage, e.action) == ("system", "security", "blocked")]
+    assert len(rows) == 1, f"expected one block row, got {len(rows)}"
+    return rows[0]
+
+
+def test_the_decision_log_distinguishes_a_delivered_comment_from_a_lost_one(
+        monkeypatch):
+    """The run's own artifact must tell a posted block reason from a lost one.
+
+    log.py calls runs/<run_id>.jsonl the source of truth the timeline UI renders
+    and the judges score. post_comment cannot raise any more, which is the whole
+    point -- but that means a failed delivery is INVISIBLE unless it is written
+    down, and before this the file was byte-identical whether the reason landed
+    on the PR or evaporated into a 502. The only trace was a stderr log line,
+    which is not the audit trail.
+
+    Read back through log.read rather than off the returned RunState: the claim
+    is about the artifact on disk, and the in-memory object is not it.
+
+    Both halves are run, because either alone proves nothing. A graph that
+    logged the ref only on success passes a delivered-only test; a graph that
+    logged any constant passes either one on its own. The claim is that the two
+    rows carry the two DIFFERENT refs and are not equal.
+    """
+    delivered = _poisoned_run_with_only_the_comment_online(
+        monkeypatch, lambda: _FakeRepo(open_prs=1))
+
+    def _explode():
+        raise RuntimeError(GITHUB_BOOM)
+
+    lost = _poisoned_run_with_only_the_comment_online(monkeypatch, _explode)
+
+    assert delivered.status == "blocked", "both runs must still be blocked runs"
+    assert lost.status == "blocked", "a lost comment must not change the verdict"
+
+    delivered_row = _block_row(delivered)
+    lost_row = _block_row(lost)
+
+    assert COMMENT_URL in delivered_row.summary, "the posted comment's URL"
+    assert f"comment://{lost.run_id}" in lost_row.summary, "the fallback ref"
+    assert delivered_row.summary != lost_row.summary

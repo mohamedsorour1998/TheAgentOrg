@@ -32,6 +32,7 @@ import subprocess
 from github import Auth, Github, GithubException
 
 from . import fixtures_loader
+from .agents.security import _one_line
 from .common import config
 from .state import DevResult, Finding, RunState
 
@@ -235,8 +236,8 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
       * the API call itself fails -- rate limit, 502, an expired token, a
         locked conversation. Caught broadly ON PURPOSE: the caller has already
         decided to block, and there is no failure from this API worth losing
-        that decision over. The traceback still reaches the logger with
-        exc_info, so nothing is silently discarded.
+        that decision over. One bounded line at WARNING and the traceback
+        demoted to DEBUG, for the reason spelled out on the handler itself.
 
     `_repo()` is inside that try too, and the conftest guard that keeps the
     suite off the live API survives it only because `pytest.fail` raises
@@ -274,12 +275,31 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
             return ref
         return repo.get_issue(pulls[0].number).create_comment(body).html_url
     except Exception as exc:
+        # One bounded line at WARNING, the traceback demoted to DEBUG. This is
+        # the same shape as security.run's scanner fallback and it is here for
+        # the same reason: during the demo this prints on the projector
+        # immediately above `status=blocked`, and a wall of text there reads as
+        # a crash rather than as the block working.
+        #
+        # A real GithubException repr embeds the entire JSON response body, so
+        # both the log line and the stdout line go through _one_line -- IMPORTED
+        # from security rather than copied, so the two cannot drift. The DEBUG
+        # record keeps everything, because it renders from exc_info: nothing is
+        # dropped, only demoted.
+        #
+        # BLE001 can force a logging call carrying exc_info to EXIST. It cannot
+        # force its level, its wording or its length, so those are pinned by a
+        # caplog test rather than by lint -- see
+        # test_a_chatty_github_failure_stays_one_short_warning_line. Nothing
+        # here can reach the return value; logging cannot affect control flow.
+        detail = f"{type(exc).__name__}: {_one_line(str(exc))}"
         logging.getLogger(__name__).warning(
-            "post_comment could not reach the PR for branch %r; the reason "
-            "goes to stdout instead of being lost with the run", branch,
-            exc_info=True,
+            "could not comment on the PR for branch %r (%s); the block reason "
+            "goes to stdout instead of being lost with the run",
+            _one_line(branch), detail,
         )
-        print(f"[post_comment] could not comment on the PR ({exc!r}); reason: {body}")
+        logging.getLogger(__name__).debug("post_comment failure traceback", exc_info=True)
+        print(f"[post_comment] could not comment on the PR ({detail}); reason: {body}")
         return ref
 
 

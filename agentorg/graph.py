@@ -169,8 +169,16 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
          verdict=state.security.verdict, summary=f"{len(state.security.blocking)} blocking")
     if state.security.verdict == "block":
         state.status = "blocked"
-        github_ops.post_comment(state, state.security.explanation)
-        _log(state, "system", "security", "blocked", summary="pipeline halted by block rule")
+        # The ref is written down rather than dropped on the floor. post_comment
+        # cannot raise, so a delivery failure leaves no trace unless it is
+        # recorded: it returns the comment's https:// URL when the reason
+        # reached the PR, and comment://<run_id> when it did not. This log row
+        # is the artifact -- runs/<run_id>.jsonl is what log.py calls the source
+        # of truth the timeline UI renders -- and without the ref that file is
+        # byte-identical whether the block was reported or evaporated into a 502.
+        ref = github_ops.post_comment(state, state.security.explanation)
+        _log(state, "system", "security", "blocked",
+             summary=f"pipeline halted by block rule; block reason {ref}")
         return state
 
     # 5b. THE REVIEWER'S VERDICT IS TERMINAL --------------------------------
