@@ -36,7 +36,7 @@ def offline(tmp_path, monkeypatch):
 
 
 def _git(*args: str, cwd) -> str:
-    """Read-only git in the offline repo, for assertions."""
+    """git in a scratch repo -- inspecting one for assertions, or building one."""
     return subprocess.run(
         ["git", *args], cwd=cwd, capture_output=True, text=True, check=True,
     ).stdout
@@ -149,3 +149,60 @@ def test_the_whole_poisoned_pipeline_runs_offline(offline):
     assert final.run_id in notes
     # The note carries the scanners' own words, not a generic placeholder.
     assert final.security.explanation in notes
+
+
+def _make_foreign_repo(path):
+    """A git repo somebody else made: distinct default branch, one commit.
+
+    Identity is set locally rather than inherited, for the same reason
+    _ensure_offline_repo sets it: a machine enforcing user.useConfigOnly has no
+    identity to inherit, and this test must not depend on the one this laptop
+    happens to have.
+    """
+    path.mkdir(parents=True)
+    _git("init", "-b", "trunk", cwd=path)
+    _git("config", "user.email", "someone@example.com", cwd=path)
+    _git("config", "user.name", "Someone Else", cwd=path)
+    (path / "their_work.txt").write_text("do not touch\n")
+    _git("add", "their_work.txt", cwd=path)
+    _git("commit", "-m", "their commit", cwd=path)
+    return path
+
+
+def test_open_pr_refuses_a_repository_it_did_not_create(tmp_path, monkeypatch):
+    """OFFLINE_REPO=. would branch and switch THIS checkout, mid-pipeline.
+
+    _ensure_offline_repo skips `init` when a .git is already there, and open_pr
+    then runs `git checkout -B agent-org/<ticket>` in whatever that repository
+    is. The witness is not only that it raises: it is that the victim's HEAD and
+    branch list are byte-identical afterwards, since a guard placed one line too
+    late would raise having already moved them.
+    """
+    victim = _make_foreign_repo(tmp_path / "someone-elses-checkout")
+    head_before = _git("rev-parse", "HEAD", cwd=victim)
+    branches_before = _git("branch", "--list", cwd=victim)
+
+    monkeypatch.setattr(config, "OFFLINE", True)
+    monkeypatch.setattr(config, "OFFLINE_REPO", str(victim))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        github_ops.open_pr(_state())
+
+    assert str(victim) in str(excinfo.value)
+    assert _git("rev-parse", "HEAD", cwd=victim) == head_before
+    assert _git("branch", "--list", cwd=victim) == branches_before
+    assert "agent-org" not in _git("branch", "--list", cwd=victim)
+    assert (victim / "their_work.txt").read_text() == "do not touch\n"
+
+
+def test_a_repo_offline_mode_created_is_reused_not_refused(offline):
+    """The guard must not fire on our own workspace -- including a second run.
+
+    Paired with the test above on purpose: a guard that refuses everything would
+    pass that one. This is the half that says the marker is actually written.
+    """
+    first = github_ops.open_pr(_state())
+    assert (offline / ".git" / "agent-org-offline").exists()
+
+    second = github_ops.open_pr(_state())
+    assert first.branch == second.branch

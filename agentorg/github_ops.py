@@ -62,6 +62,13 @@ def _git(*args: str, cwd: str) -> None:
                    capture_output=True, text=True)
 
 
+# Written into .git/ when we create the offline repo, and required to be there
+# before we will reuse one. Inside .git deliberately: open_pr switches branches
+# on every run, so a marker in the working tree could be checked out from under
+# us, and one that was committed would turn up in the demo's own diffs.
+_OFFLINE_MARKER = "agent-org-offline"
+
+
 def _ensure_offline_repo() -> str:
     """Create the offline demo repo with a main branch if it doesn't exist.
 
@@ -75,9 +82,18 @@ def _ensure_offline_repo() -> str:
 
     -b main is likewise explicit rather than trusting init.defaultBranch, since
     `open_pr` checks out "main" by name on every subsequent run.
+
+    Refuses a repository it did not create. Without that check, an OFFLINE_REPO
+    that already holds a .git skips init, and open_pr goes on to run
+    `git checkout -B agent-org/<ticket>` THERE -- creating or resetting a branch
+    and switching that checkout onto it, as a side effect of opening a PR. With
+    OFFLINE_REPO=. that is this repository and the user's own working tree. The
+    test is a marker file init writes, not a guess from branch names or remotes:
+    the question is "did we make this?", and only a marker answers it.
     """
     path = config.OFFLINE_REPO
     os.makedirs(path, exist_ok=True)
+    marker = os.path.join(path, ".git", _OFFLINE_MARKER)
     if not os.path.isdir(os.path.join(path, ".git")):
         _git("init", "-b", "main", cwd=path)
         _git("config", "user.email", "agentorg@example.com", cwd=path)
@@ -86,6 +102,19 @@ def _ensure_offline_repo() -> str:
             fh.write("# offline demo\n")
         _git("add", "README.md", cwd=path)
         _git("commit", "-m", "init offline demo repo", cwd=path)
+        with open(marker, "w") as fh:
+            fh.write("Created by agentorg.github_ops offline mode.\n")
+    elif not os.path.exists(marker):
+        raise RuntimeError(
+            f"OFFLINE_REPO is a git repository that offline mode did not "
+            f"create: {os.path.abspath(path)}\n"
+            f"Refusing to touch it. open_pr would run `git checkout -B "
+            f"agent-org/<ticket>` there, creating or resetting a branch and "
+            f"switching that checkout onto it, as a side effect of opening a "
+            f"pull request. Point OFFLINE_REPO at a new or empty directory "
+            f"(the default is runs/offline-demo), or delete that one if it is "
+            f"a stale offline workspace from before this check existed."
+        )
     return path
 
 
