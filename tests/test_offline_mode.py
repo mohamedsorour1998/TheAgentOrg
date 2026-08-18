@@ -17,6 +17,7 @@ offline path only *looks* like it worked:
 """
 
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -265,3 +266,216 @@ def test_a_repo_offline_mode_created_is_reused_not_refused(offline):
 
     second = github_ops.open_pr(_state())
     assert first.branch == second.branch
+
+
+# =========================================================================
+# The ONLINE branch of post_comment -- it lives in this file because it is the
+# other half of the same function, and because what it does when it cannot
+# deliver is: fall back, the way the offline path already does.
+#
+# graph.py sets status="blocked" and calls post_comment on the very next line,
+# so a raise there turns a correctly-blocked run into a traceback. The claim is
+# that post_comment RETURNS in every case. Every test below opts into the
+# online path with all four lines conftest.py demands.
+#
+# The load-bearing one is test_post_comment_posts_on_the_open_pr_when_there_is_one.
+# Without it, a post_comment that always fell back -- one that never contacted
+# GitHub at all -- would pass every other test in this section, and "never
+# raises" would have been bought by deleting the feature.
+# =========================================================================
+
+COMMENT_URL = "https://github.com/someone/auth-service/pull/41#issuecomment-9001"
+GITHUB_BOOM = "GitHub returned 502 Bad Gateway"
+BLOCK_REASON = "Blocked: hardcoded AWS key."
+BRANCH = "agent-org/POISON-1-abc1234"
+
+
+class _FakePulls:
+    def __init__(self, total: int):
+        self.totalCount = total
+
+    def __getitem__(self, index):
+        return SimpleNamespace(number=41)
+
+
+class _FakeIssue:
+    def __init__(self, repo):
+        self.repo = repo
+
+    def create_comment(self, body):
+        self.repo.record("create_comment", body)
+        return SimpleNamespace(html_url=COMMENT_URL)
+
+
+class _FakeRepo:
+    """Stand-in for the PyGithub repo handle, recording every call it takes.
+
+    `failing` names the ONE call that raises, so each step of the online path
+    can be broken on its own; `open_prs` is how many open PRs the branch has.
+    Recording matters as much as returning here: several of the claims below
+    are about a call that must NOT happen, and a fake that only returns values
+    cannot witness that.
+    """
+
+    def __init__(self, *, open_prs: int = 1, failing: str = ""):
+        self.calls: list[tuple[str, object]] = []
+        self.open_prs = open_prs
+        self.failing = failing
+        self.owner = SimpleNamespace(login="someone")
+
+    def record(self, name: str, arg) -> None:
+        self.calls.append((name, arg))
+        if self.failing == name:
+            raise RuntimeError(GITHUB_BOOM)
+
+    def names(self) -> list[str]:
+        return [name for name, _ in self.calls]
+
+    def get_pulls(self, **kwargs):
+        self.record("get_pulls", kwargs)
+        return _FakePulls(self.open_prs)
+
+    def get_issue(self, number):
+        self.record("get_issue", number)
+        return _FakeIssue(self)
+
+
+def _online(monkeypatch, repo_factory) -> None:
+    """Opt this test into the online path -- all four lines, per conftest.py."""
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "GITHUB_TOKEN", "x")
+    monkeypatch.setattr(config, "GITHUB_REPO", "someone/auth-service")
+    monkeypatch.setattr(github_ops, "_repo", repo_factory)
+
+
+def test_post_comment_posts_on_the_open_pr_when_there_is_one(monkeypatch, capsys):
+    """The control for everything below: the delivery path still delivers.
+
+    Asserted on what FLOWS, not on structure. The returned ref has to be the
+    comment's own html_url; the issue number has to come from the PR the head
+    filter found; the body has to arrive at create_comment unaltered; and the
+    head filter has to be built from the repo owner and this branch. A
+    post_comment that skipped GitHub entirely and returned `comment://...`
+    would satisfy every other test in this section and fail this one.
+    """
+    repo = _FakeRepo(open_prs=1)
+    _online(monkeypatch, lambda: repo)
+
+    state = _state()
+    state.dev.branch = BRANCH
+    ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    assert ref == COMMENT_URL
+    assert repo.calls == [
+        ("get_pulls", {"state": "open", "head": f"someone:{BRANCH}"}),
+        ("get_issue", 41),
+        ("create_comment", BLOCK_REASON),
+    ]
+    # Nothing fell back, so nothing was printed instead of posted.
+    assert capsys.readouterr().out == ""
+
+
+def test_post_comment_never_raises_without_a_pr(monkeypatch, capsys):
+    """A missing PR must surface the reason, not crash the blocked run."""
+    repo = _FakeRepo(open_prs=0)
+    _online(monkeypatch, lambda: repo)
+
+    state = _state()
+    state.dev.branch = BRANCH
+    ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    assert ref == f"comment://{state.run_id}"
+
+    out = capsys.readouterr().out
+    assert BLOCK_REASON in out
+    assert BRANCH in out
+    # It RECOGNISED there was no PR rather than tripping over one that is not
+    # there. Both endings return a ref and print the reason, so neither the
+    # return value nor the presence of the body can tell them apart: the
+    # witnesses are that get_issue was never reached, and that this is not the
+    # wording the exception handler uses.
+    assert repo.names() == ["get_pulls"]
+    assert "could not comment on the PR" not in out
+
+
+@pytest.mark.parametrize("break_state", [
+    pytest.param(lambda s: setattr(s, "dev", None), id="dev-is-None"),
+    pytest.param(lambda s: None, id="branch-is-empty"),
+])
+def test_post_comment_does_not_ask_github_without_a_branch(monkeypatch, capsys,
+                                                           break_state):
+    """No branch, no query -- `head="someone:"` does not select nothing.
+
+    The dangerous version of this is not a crash, it is a success: an empty
+    branch makes a head filter that GitHub can answer with an unrelated PR, and
+    the next thing this function does is write the block reason on whatever
+    came back. So the claim is stronger than "it returned a ref" -- it is that
+    get_pulls is never called at all. `_state()` leaves branch "", which is why
+    the second case needs no setup of its own.
+    """
+    repo = _FakeRepo(open_prs=1)
+    _online(monkeypatch, lambda: repo)
+
+    state = _state()
+    break_state(state)
+    ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    assert repo.calls == []
+    assert ref == f"comment://{state.run_id}"
+    assert BLOCK_REASON in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("failing", ["_repo", "get_pulls", "get_issue", "create_comment"])
+def test_post_comment_survives_a_github_failure(monkeypatch, capsys, failing):
+    """Rate limit, 502, dead token, locked conversation -- the block still stands.
+
+    Each step of the online path is broken on its own, `_repo()` included, so
+    this cannot pass by hardening only the first call. The witness is not just
+    "did not raise": the real exception's own text has to reach stdout, because
+    a canned "something went wrong" string would satisfy a handler that never
+    looked at what it caught.
+    """
+    repo = _FakeRepo(open_prs=1, failing=failing)
+
+    def _explode():
+        raise RuntimeError(GITHUB_BOOM)
+
+    _online(monkeypatch, _explode if failing == "_repo" else (lambda: repo))
+
+    state = _state()
+    state.dev.branch = BRANCH
+    ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    assert ref == f"comment://{state.run_id}"
+
+    out = capsys.readouterr().out
+    assert BLOCK_REASON in out
+    assert GITHUB_BOOM in out
+    # And it is the failure ending, not the no-PR one -- a handler that reported
+    # every problem as "no PR" would hide a token that expired mid-demo.
+    assert "could not comment on the PR" in out
+    assert "no PR for" not in out
+
+
+def test_the_blind_except_does_not_swallow_the_conftest_github_guard(monkeypatch):
+    """`except Exception` must not eat the seam raiser that keeps us off GitHub.
+
+    post_comment now calls `_repo()` INSIDE its try, so the only thing still
+    holding conftest's `_unpatched_repo` up is that `pytest.fail` raises
+    `Failed`, which derives from BaseException rather than Exception. Downgrade
+    that raiser to an ordinary Exception and this handler eats it: every test
+    that opts into the online path without replacing `_repo` would go green
+    while performing live writes against DEMO_REPO, which is the exact bug
+    SEAM 2 in conftest.py exists to prevent. That property is now pinned by a
+    test rather than by a comment.
+    """
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "GITHUB_TOKEN", "x")
+    monkeypatch.setattr(config, "GITHUB_REPO", "someone/auth-service")
+    # github_ops._repo is deliberately left as conftest's raiser.
+
+    state = _state()
+    state.dev.branch = BRANCH
+
+    with pytest.raises(pytest.fail.Exception, match="github_ops._repo"):
+        github_ops.post_comment(state, BLOCK_REASON)

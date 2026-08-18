@@ -25,6 +25,7 @@ Still to build:
 """
 
 import hashlib
+import logging
 import os
 import subprocess
 
@@ -211,7 +212,37 @@ def open_pr(state: RunState) -> DevResult:
 
 
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
-    """Post a comment on the PR (reviewer + security lanes). Returns comment ref (URL)."""
+    """Post a comment on the PR (reviewer + security lanes). Returns a comment ref.
+
+    Returns a ref string in every case, and does not raise. That is a hard
+    requirement rather than politeness, because of WHERE it is called from:
+    graph.py sets `status="blocked"` and then, on the very next line, calls
+    `post_comment(state, state.security.explanation)`. The block is the
+    product; the comment is only how a human learns why. So a comment that
+    cannot be delivered must not be able to convert a correctly-blocked run
+    into a traceback -- on stage, in front of judges.
+
+    Three ways delivery fails online, and all three end the same way (the
+    reason on stdout, a `comment://<run_id>` ref back to the caller):
+
+      * there is no branch to look a PR up by -- `state.dev` is None, or its
+        branch is still "". We do not ASK GitHub in that case. `head="owner:"`
+        is not a filter that selects nothing, so a query built from an empty
+        branch is a query that can come back with somebody else's PR, and
+        this function's next move is to write on whatever came back.
+      * the branch has no open PR. Ordinary: `open_pr` is skipped or the PR was
+        merged or closed between the two calls.
+      * the API call itself fails -- rate limit, 502, an expired token, a
+        locked conversation. Caught broadly ON PURPOSE: the caller has already
+        decided to block, and there is no failure from this API worth losing
+        that decision over. The traceback still reaches the logger with
+        exc_info, so nothing is silently discarded.
+
+    `_repo()` is inside that try too, and the conftest guard that keeps the
+    suite off the live API survives it only because `pytest.fail` raises
+    `Failed`, which derives from BaseException rather than Exception. Pinned by
+    test_the_blind_except_does_not_swallow_the_conftest_github_guard.
+    """
     if finding is not None:
         header = (
             f"**[{finding.tool} · {finding.severity}] {finding.rule}** "
@@ -227,24 +258,29 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
             fh.write(f"\n## {state.ticket_id} ({state.run_id})\n{body}\n")
         return f"local://{config.OFFLINE_NOTES}"
 
-    repo = _repo()
+    branch = state.dev.branch if state.dev and state.dev.branch else ""
+    ref = f"comment://{state.run_id}"
+    no_pr = f"[post_comment] no PR for {branch!r}; reason: {body}"
 
-    branch = state.dev.branch if state.dev else ""
+    if not branch:
+        print(no_pr)
+        return ref
 
-    pulls = repo.get_pulls(
-        state="open",
-        head=f"{repo.owner.login}:{branch}",
-    )
-
-    if pulls.totalCount == 0:
-        raise RuntimeError(
-            f"no open PR for branch {branch!r} to comment on"
+    try:
+        repo = _repo()
+        pulls = repo.get_pulls(state="open", head=f"{repo.owner.login}:{branch}")
+        if pulls.totalCount == 0:
+            print(no_pr)
+            return ref
+        return repo.get_issue(pulls[0].number).create_comment(body).html_url
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "post_comment could not reach the PR for branch %r; the reason "
+            "goes to stdout instead of being lost with the run", branch,
+            exc_info=True,
         )
-
-    issue = repo.get_issue(pulls[0].number)
-    comment = issue.create_comment(body)
-
-    return comment.html_url
+        print(f"[post_comment] could not comment on the PR ({exc!r}); reason: {body}")
+        return ref
 
 
 def deploy_note() -> str:
