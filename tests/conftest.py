@@ -111,7 +111,7 @@ repository. So the guard that keeps the suite off GitHub is also what points it
 at the working tree.
 
 Measured with a `subprocess.Popen` recorder, `pytest -q` at the repository root,
-before this fixture existed: 169 `git` child processes, 105 of them with
+before this fixture existed: 204 `git` child processes, 105 of them with
 cwd=`<repo>/runs/offline-demo`, from 19 tests that never mention git -- the
 pipeline tests in test_pipeline_smoke.py, test_gates_cli.py and
 test_agent_fallbacks.py, which reach `open_pr` through `run_pipeline`. They left

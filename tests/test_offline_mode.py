@@ -195,6 +195,65 @@ def test_open_pr_refuses_a_repository_it_did_not_create(tmp_path, monkeypatch):
     assert (victim / "their_work.txt").read_text() == "do not touch\n"
 
 
+def _make_foreign_worktree(tmp_path):
+    """Somebody else's checkout where `.git` is a FILE, not a directory.
+
+    `git init` writes `.git/` as a directory, but `git worktree add` -- and
+    `git submodule add` -- writes `.git` as a one-line `gitdir:` text file
+    pointing into the parent's admin directory. Everything else about it is a
+    working checkout: a HEAD, a branch, an index, a local identity.
+    """
+    origin = _make_foreign_repo(tmp_path / "someone-elses-repo")
+    linked = tmp_path / "someone-elses-worktree"
+    _git("worktree", "add", "-b", "their-feature", str(linked), cwd=origin)
+    return linked
+
+
+def test_open_pr_refuses_a_worktree_it_did_not_create(tmp_path, monkeypatch):
+    """The same refusal where `.git` is a file -- a linked worktree, a submodule.
+
+    A separate test because it was a separate code path: asking
+    `os.path.isdir(<path>/.git)` answers False for a checkout that very much is
+    a repository, so the guard was skipped and `init` ran against a live one.
+    That is not a hypothetical shape -- this project is itself a linked
+    worktree, so `OFFLINE_REPO=.`, the example the docstring names, is exactly
+    this case.
+
+    MEASURED against that version, in a throwaway worktree: it rewrote the
+    victim's local `user.email`, committed a `README.md` onto the branch they
+    had checked out, then died with `NotADirectoryError` writing the marker
+    inside a `.git` that is a file. Note what that run left alone -- the branch
+    LIST, byte for byte, because the damage was a commit on the branch already
+    checked out. So HEAD, the local identity and the working tree all have to
+    be part of the witness here; the branch list alone would have called it
+    clean.
+    """
+    victim = _make_foreign_worktree(tmp_path)
+    # The precondition the whole test rests on. If a future git ever writes a
+    # directory here, everything below still passes while testing nothing.
+    assert not (victim / ".git").is_dir()
+    assert (victim / ".git").is_file()
+
+    head_before = _git("rev-parse", "HEAD", cwd=victim)
+    branches_before = _git("branch", "--list", cwd=victim)
+    email_before = _git("config", "--local", "--get", "user.email", cwd=victim)
+    files_before = sorted(p.name for p in victim.iterdir())
+
+    monkeypatch.setattr(config, "OFFLINE", True)
+    monkeypatch.setattr(config, "OFFLINE_REPO", str(victim))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        github_ops.open_pr(_state())
+
+    assert str(victim) in str(excinfo.value)
+    assert _git("rev-parse", "HEAD", cwd=victim) == head_before
+    assert _git("branch", "--list", cwd=victim) == branches_before
+    assert _git("config", "--local", "--get", "user.email", cwd=victim) == email_before
+    assert sorted(p.name for p in victim.iterdir()) == files_before
+    assert not (victim / "README.md").exists()
+    assert (victim / "their_work.txt").read_text() == "do not touch\n"
+
+
 def test_a_repo_offline_mode_created_is_reused_not_refused(offline):
     """The guard must not fire on our own workspace -- including a second run.
 

@@ -78,7 +78,7 @@ jobs:
       # FileNotFoundError and the agent falls back. Install gitleaks/semgrep/
       # trivy here and those five silently switch to the real-scanner path.
       # Re-measured after offline mode became real git: the suite still passes
-      # 73/73 either way, but the run goes from 3.6s to 37.6s and starts pulling
+      # 76/76 either way, but the run goes from 3.6s to 37.6s and starts pulling
       # a ~108 MB trivy database on every push. (The 3.6s floor is itself new —
       # it was 0.16s while open_pr's local branch was a stub. Every pipeline test
       # now does a real `git init` + commit in its own tmp_path.) The real

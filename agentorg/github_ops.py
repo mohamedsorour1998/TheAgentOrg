@@ -78,7 +78,7 @@ def _ensure_offline_repo() -> str:
     (measured on a laptop: `Mohamed Sorour <sorour@192.168.1.9>`, commit exit 0,
     with a warning). It refuses when it cannot build a plausible address, and
     refuses outright under user.useConfigOnly. Deleting these two lines and
-    running the suite with that set fails 25 tests; with them, 74 pass.
+    running the suite with that set fails 26 tests; with them, 76 pass.
 
     -b main is likewise explicit rather than trusting init.defaultBranch, since
     `open_pr` checks out "main" by name on every subsequent run.
@@ -90,11 +90,25 @@ def _ensure_offline_repo() -> str:
     OFFLINE_REPO=. that is this repository and the user's own working tree. The
     test is a marker file init writes, not a guess from branch names or remotes:
     the question is "did we make this?", and only a marker answers it.
+
+    `os.path.exists`, NOT `os.path.isdir`, and that is load-bearing rather than
+    sloppy. `git init` writes `.git/` as a directory, but a linked WORKTREE --
+    and a submodule -- gets a one-line `gitdir:` FILE instead. `isdir` answers
+    False for those, so the guard never ran and `init` went to work on a live
+    checkout. Measured on the isdir version, in a throwaway worktree: it
+    rewrote the victim's local user.email, committed a README.md onto the
+    branch they had checked out, then died with NotADirectoryError writing the
+    marker inside a `.git` that is a file. `exists` covers both shapes, and the
+    marker check below still refuses correctly because
+    `os.path.exists("<a file>/agent-org-offline")` is False. Note that this
+    repository is itself a linked worktree, so OFFLINE_REPO=. above is the
+    gitfile case, not the directory one. Pinned by
+    test_open_pr_refuses_a_worktree_it_did_not_create.
     """
     path = config.OFFLINE_REPO
     os.makedirs(path, exist_ok=True)
     marker = os.path.join(path, ".git", _OFFLINE_MARKER)
-    if not os.path.isdir(os.path.join(path, ".git")):
+    if not os.path.exists(os.path.join(path, ".git")):
         _git("init", "-b", "main", cwd=path)
         _git("config", "user.email", "agentorg@example.com", cwd=path)
         _git("config", "user.name", "Agent Org", cwd=path)
