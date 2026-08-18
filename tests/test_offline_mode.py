@@ -547,6 +547,12 @@ def test_a_chatty_github_failure_stays_one_short_warning_line(monkeypatch, caplo
 # they need the fake GitHub above; what they exercise is graph.py + log.py.
 # =========================================================================
 
+# Captured at import, before any test has patched it. Read at CALL time this
+# would wrap the previous call's wrapper, so the second run in a test would go
+# through two layers of local_open_pr and the third through three.
+_REAL_OPEN_PR = github_ops.open_pr
+
+
 def _poisoned_run_with_only_the_comment_online(monkeypatch, repo_factory):
     """Run the poisoned pipeline with the block comment as its ONLY online call.
 
@@ -556,12 +562,10 @@ def _poisoned_run_with_only_the_comment_online(monkeypatch, repo_factory):
     """
     from agentorg.graph import run_pipeline
 
-    real_open_pr = github_ops.open_pr
-
     def local_open_pr(state):
         config.OFFLINE = True
         try:
-            return real_open_pr(state)
+            return _REAL_OPEN_PR(state)
         finally:
             config.OFFLINE = False
 
@@ -595,10 +599,10 @@ def test_the_decision_log_distinguishes_a_delivered_comment_from_a_lost_one(
     Read back through log.read rather than off the returned RunState: the claim
     is about the artifact on disk, and the in-memory object is not it.
 
-    Both halves are run, because either alone proves nothing. A graph that
-    logged the ref only on success passes a delivered-only test; a graph that
-    logged any constant passes either one on its own. The claim is that the two
-    rows carry the two DIFFERENT refs and are not equal.
+    Both halves are run, because either alone proves nothing: a graph that
+    logged the ref only on success passes a delivered-only test, and for each
+    half there exists a constant that passes it on its own. The claim is that
+    the two rows carry the two DIFFERENT refs and are not equal.
     """
     delivered = _poisoned_run_with_only_the_comment_online(
         monkeypatch, lambda: _FakeRepo(open_prs=1))
@@ -616,4 +620,124 @@ def test_the_decision_log_distinguishes_a_delivered_comment_from_a_lost_one(
 
     assert COMMENT_URL in delivered_row.summary, "the posted comment's URL"
     assert f"comment://{lost.run_id}" in lost_row.summary, "the fallback ref"
+    assert delivered_row.summary != lost_row.summary
+
+
+# =========================================================================
+# The OFFLINE branch's own failure, which is the one the demo can actually
+# hit: `OFFLINE=true` IS the demo command, so a NOTES file that cannot be
+# written is a traceback on the path stage takes. Measured before the guard
+# existed, on the real command:
+#
+#   OFFLINE=true python -m agentorg.graph --poisoned
+#   IsADirectoryError: [Errno 21] Is a directory: '.../NOTES.md'   EXIT=1
+#
+# ...on a run that had already, correctly, blocked.
+# =========================================================================
+
+def _notes_under_a_file(tmp_path):
+    """os.makedirs trips: the PARENT of NOTES.md is a regular file.
+
+    Raises FileExistsError, not the NotADirectoryError you might expect --
+    `exist_ok=True` only forgives a path that exists AND is a directory. Worth
+    writing down because guessing it wrong is what this test caught first.
+    """
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("something else is here\n")
+    return blocker / "NOTES.md"
+
+
+def _notes_is_a_directory(tmp_path):
+    """open(..., "a") trips: the notes path ITSELF is a directory."""
+    notes = tmp_path / "workspace" / "NOTES.md"
+    notes.mkdir(parents=True)
+    return notes
+
+
+@pytest.mark.parametrize("break_notes, expected_error, expected_path", [
+    pytest.param(_notes_under_a_file, "FileExistsError", "not-a-directory",
+                 id="makedirs-fails"),
+    pytest.param(_notes_is_a_directory, "IsADirectoryError", "NOTES.md",
+                 id="open-fails"),
+])
+def test_post_comment_never_raises_when_the_notes_file_cannot_be_written(
+        tmp_path, monkeypatch, caplog, capsys, break_notes, expected_error,
+        expected_path):
+    """A NOTES file that cannot be written must not crash a blocked run.
+
+    Both statements in the offline branch are broken, one per case -- the
+    makedirs and the open -- because a guard around only one of them would look
+    right and still take the demo down. Neither case uses chmod: a permission
+    bit is not portable and does nothing when the suite runs as root, whereas
+    these two are ordinary OSErrors that any filesystem produces. The reviewer's
+    own reproduction was a PermissionError through the same two statements.
+    """
+    monkeypatch.setattr(config, "OFFLINE", True)
+    monkeypatch.setattr(config, "OFFLINE_NOTES", str(break_notes(tmp_path)))
+
+    state = _state()
+    with caplog.at_level(logging.DEBUG, logger="agentorg.github_ops"):
+        ref = github_ops.post_comment(state, BLOCK_REASON)
+
+    # The honest ref. `local://<path>` here would be the run's log row claiming
+    # a delivery that never happened -- worse than the silence it replaced,
+    # because a reader would stop looking.
+    assert ref == f"comment://{state.run_id}"
+    assert not ref.startswith("local://"), "the artifact must not claim a failed write"
+
+    out = capsys.readouterr().out
+    assert BLOCK_REASON in out, "the reason still has to reach a human"
+    # Both of these FLOW from the caught exception rather than from our own
+    # fixed wording, and each case names the exception it actually produces
+    # rather than a family both happen to share -- a canned "could not write"
+    # string would satisfy a looser assertion.
+    assert expected_error in out, "the caught exception's own type"
+    assert expected_path in out, "the failing path, named by the OSError itself"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, "one line on the projector"
+    line = warnings[0].getMessage()
+    assert "\n" not in line, "a multi-line WARNING is not one projector line"
+    assert len(line) < 400, f"WARNING was {len(line)} chars: {line[:120]}..."
+    assert warnings[0].exc_info is None, "the traceback must not ride the projector line"
+
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(debugs) == 1
+    assert debugs[0].exc_info is not None, "demoted, not discarded"
+
+
+def test_the_decision_log_does_not_claim_a_notes_write_that_failed(tmp_path,
+                                                                   monkeypatch):
+    """The offline half of Finding 2, end to end through the demo's own command.
+
+    On this path the success ref is the CONSTANT `local://<OFFLINE_NOTES>`, so
+    unlike the online path it carries no information by itself -- which is
+    exactly why the failure has to change it. Both halves are run: a
+    post_comment that always returned the local:// constant passes the
+    delivered half, and one that always returned comment:// passes the lost
+    half.
+    """
+    from agentorg.graph import run_pipeline
+
+    good = tmp_path / "good" / "NOTES.md"
+    monkeypatch.setattr(config, "OFFLINE_NOTES", str(good))
+    delivered = run_pipeline("DEMO-POISON", "Add a per-IP login rate limit.",
+                             poisoned=True)
+
+    bad = tmp_path / "bad" / "NOTES.md"
+    bad.mkdir(parents=True)
+    monkeypatch.setattr(config, "OFFLINE_NOTES", str(bad))
+    lost = run_pipeline("DEMO-POISON", "Add a per-IP login rate limit.",
+                        poisoned=True)
+
+    assert delivered.status == "blocked"
+    assert lost.status == "blocked", "an unwritable NOTES file must not change the verdict"
+    assert "DEMO-POISON" in good.read_text(), "the delivered half really wrote"
+
+    delivered_row = _block_row(delivered)
+    lost_row = _block_row(lost)
+
+    assert f"local://{good}" in delivered_row.summary
+    assert f"comment://{lost.run_id}" in lost_row.summary
+    assert "local://" not in lost_row.summary, "no claim of a write that failed"
     assert delivered_row.summary != lost_row.summary

@@ -212,6 +212,34 @@ def open_pr(state: RunState) -> DevResult:
     return dev
 
 
+def _undelivered(what: str, exc: Exception, body: str, ref: str) -> str:
+    """Report a block reason we could not deliver, and hand back the honest ref.
+
+    Both of post_comment's paths degrade through here, so the function carries
+    one pattern rather than two. The shape is security.run's scanner fallback:
+    one bounded line at WARNING naming the cause, the reason itself on stdout,
+    and the traceback left to the DEBUG record its caller emits.
+
+    Bounded is the load-bearing word. During the demo this prints on the
+    projector immediately above `status=blocked`, and a wall of text there
+    reads as a crash rather than as the block working. A real GithubException
+    carries the whole JSON response body in its message, so `exc` goes through
+    _one_line -- imported from security rather than copied, so the two callers'
+    200-char bound cannot drift. `what` is bounded too: it names a branch or a
+    path, and neither is ours to trust the length of.
+
+    Returns `ref` -- the caller's "not delivered" ref -- so that the log row
+    graph.py writes cannot claim a delivery that did not happen.
+    """
+    detail = f"{type(exc).__name__}: {_one_line(str(exc))}"
+    logging.getLogger(__name__).warning(
+        "could not %s (%s); block reason to stdout instead",
+        _one_line(what, limit=100), detail,
+    )
+    print(f"[post_comment] could not {what} ({detail}); reason: {body}")
+    return ref
+
+
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
     """Post a comment on the PR (reviewer + security lanes). Returns a comment ref.
 
@@ -223,8 +251,18 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
     cannot be delivered must not be able to convert a correctly-blocked run
     into a traceback -- on stage, in front of judges.
 
-    Three ways delivery fails online, and all three end the same way (the
-    reason on stdout, a `comment://<run_id>` ref back to the caller):
+    BOTH paths degrade, and the offline one matters most: the demo command is
+    `OFFLINE=true`, so that is the branch stage actually takes.
+
+      * OFFLINE -- the NOTES file cannot be written: a read-only workspace, a
+        stale directory sitting where the file should be, a full disk. The ref
+        then says `comment://<run_id>`, NOT `local://<path>`. That distinction
+        is the whole point of returning a ref at all: graph.py records it, so a
+        `local://` ref on a run whose bytes never reached disk would be the
+        artifact claiming a delivery that did not happen.
+
+    Three more ways delivery fails online, all ending the same way (the reason
+    on stdout, a `comment://<run_id>` ref back to the caller):
 
       * there is no branch to look a PR up by -- `state.dev` is None, or its
         branch is still "". We do not ASK GitHub in that case. `head="owner:"`
@@ -251,16 +289,41 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         )
         body = header + body
 
+    # The "not delivered" ref, shared by both paths and computed before either
+    # of them runs. graph.py writes whatever comes back into the run's log row,
+    # so this is the value that tells a reader the reason never landed anywhere.
+    ref = f"comment://{state.run_id}"
+
     if _use_local():
         # No network (or no credentials): append the reason to a local NOTES file.
         # `or "."` because dirname("NOTES.md") is "", and makedirs("") raises.
-        os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
-        with open(config.OFFLINE_NOTES, "a") as fh:
-            fh.write(f"\n## {state.ticket_id} ({state.run_id})\n{body}\n")
+        #
+        # Wrapped for the same reason the online branch is, and this is the
+        # branch that matters more: the demo command is `OFFLINE=true`, so an
+        # unwritable NOTES path -- a read-only workspace, a stale directory
+        # sitting where the file should be, a full disk -- is a traceback on
+        # the path stage actually takes. Measured before this guard existed:
+        # `OFFLINE=true python -m agentorg.graph --poisoned` exited 1 with
+        # IsADirectoryError, on a run that had correctly blocked.
+        try:
+            os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
+            with open(config.OFFLINE_NOTES, "a") as fh:
+                fh.write(f"\n## {state.ticket_id} ({state.run_id})\n{body}\n")
+        except Exception as exc:
+            # Inline and at DEBUG: this is the "demote, don't drop" half, and
+            # it is also what satisfies BLE001 -- the rule wants a logging call
+            # carrying exc_info in the handler itself, which a call to
+            # _undelivered would not provide.
+            logging.getLogger(__name__).debug("post_comment failure traceback",
+                                              exc_info=True)
+            return _undelivered("write the block reason to the offline NOTES file",
+                                exc, body, ref)
+        # Only now -- a local:// ref means the bytes are on disk. Returning it
+        # from anywhere above would be the artifact claiming a delivery that
+        # did not happen, which is worse than the silence this replaced.
         return f"local://{config.OFFLINE_NOTES}"
 
     branch = state.dev.branch if state.dev and state.dev.branch else ""
-    ref = f"comment://{state.run_id}"
     no_pr = f"[post_comment] no PR for {branch!r}; reason: {body}"
 
     if not branch:
@@ -275,32 +338,14 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
             return ref
         return repo.get_issue(pulls[0].number).create_comment(body).html_url
     except Exception as exc:
-        # One bounded line at WARNING, the traceback demoted to DEBUG. This is
-        # the same shape as security.run's scanner fallback and it is here for
-        # the same reason: during the demo this prints on the projector
-        # immediately above `status=blocked`, and a wall of text there reads as
-        # a crash rather than as the block working.
-        #
-        # A real GithubException repr embeds the entire JSON response body, so
-        # both the log line and the stdout line go through _one_line -- IMPORTED
-        # from security rather than copied, so the two cannot drift. The DEBUG
-        # record keeps everything, because it renders from exc_info: nothing is
-        # dropped, only demoted.
-        #
-        # BLE001 can force a logging call carrying exc_info to EXIST. It cannot
-        # force its level, its wording or its length, so those are pinned by a
-        # caplog test rather than by lint -- see
+        # Same two lines as the offline branch above, in the same order, for
+        # the same reasons. BLE001 can force a logging call carrying exc_info
+        # to EXIST; it cannot force its level, its wording or its length, so
+        # those are pinned by a caplog test rather than by lint -- see
         # test_a_chatty_github_failure_stays_one_short_warning_line. Nothing
         # here can reach the return value; logging cannot affect control flow.
-        detail = f"{type(exc).__name__}: {_one_line(str(exc))}"
-        logging.getLogger(__name__).warning(
-            "could not comment on the PR for branch %r (%s); the block reason "
-            "goes to stdout instead of being lost with the run",
-            _one_line(branch), detail,
-        )
         logging.getLogger(__name__).debug("post_comment failure traceback", exc_info=True)
-        print(f"[post_comment] could not comment on the PR ({detail}); reason: {body}")
-        return ref
+        return _undelivered(f"comment on the PR for branch {branch!r}", exc, body, ref)
 
 
 def deploy_note() -> str:
