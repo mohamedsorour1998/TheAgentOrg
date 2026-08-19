@@ -190,9 +190,27 @@ def classify_failure(
     through when you have it. It is the half of the discriminator that
     `shutil.which` cannot supply, and vice versa; see the module docstring's
     measured table for the two fault modes each half gets wrong on its own.
-    Called without a hint, this can only consult the filesystem, so it will
-    report a present-but-broken binary as "absent" -- which is why the wrappers
-    should always pass what safe_run told them.
+
+    CALLED WITHOUT A HINT THIS DEGRADES, AND IT DEGRADES TOWARDS FAILING OPEN.
+    With no hint there is only the filesystem to consult, so the answer is
+    whatever `shutil.which` says. MEASURED, hintless, row by row:
+
+      * binary absent from PATH -> "absent"  correct
+      * real file, `+x` bit gone -> "absent"  WRONG, this is a FAULT
+      * argv0 is a directory     -> "absent"  WRONG, this is a FAULT
+      * on PATH, broken shebang  -> "fault"   correct (`which` resolves it)
+      * malformed argv           -> "fault"   correct
+
+    The two that leak are precisely the two the plan's ruling names by name -- a
+    lost `+x` bit and a noexec mount -- and both leak in the dangerous
+    direction: classified "absent", they take the fixture-fallback path and fail
+    OPEN under `SCANNERS_REQUIRED=true`. Note which row is NOT a problem here:
+    the broken shebang comes out correct hintless, because `which` finds it. So
+    "we don't run scanners behind shebangs, the hintless path is safe for us" is
+    exactly the wrong conclusion to draw -- it reasons about the one row that
+    works. Pass the hint, or call `run_scanner`, which cannot forget to.
+    `test_classify_failure_without_a_hint_degrades_exactly_where_documented`
+    pins every row above.
 
     Defaults to "fault" when uncertain. That direction is deliberate: guessing
     "fault" on a genuinely absent binary makes CI noisy and is caught by the
@@ -226,9 +244,11 @@ def run_scanner(
 
     It exists so a wrapper cannot forget to pass `safe_run`'s observation into
     `classify_failure`. Forgetting is not a loud mistake: the classifier still
-    returns an answer, and the answer is "absent" for a broken-shebang scanner,
-    which under SCANNERS_REQUIRED fails OPEN. A single call site removes the
-    opportunity.
+    returns a plausible answer, and MEASURED, that answer is "absent" for the two
+    fault modes the ruling names by name -- a scanner whose `+x` bit is gone, and
+    an argv0 that resolves to a directory. Both then take the fixture-fallback
+    path and fail OPEN under SCANNERS_REQUIRED. A single call site removes the
+    opportunity; see `classify_failure`'s docstring for the full hintless table.
     """
     observed: list[FailureKind] = []
     result = safe_run(cmd, timeout=timeout, _observed=observed)

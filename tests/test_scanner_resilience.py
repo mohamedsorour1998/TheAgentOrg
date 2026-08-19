@@ -34,7 +34,12 @@ from pydantic import ValidationError
 from agentorg import fixtures_loader
 from agentorg.common import config
 from agentorg.security import trivy_tool
-from agentorg.security._run import error_finding, run_scanner, safe_run
+from agentorg.security._run import (
+    classify_failure,
+    error_finding,
+    run_scanner,
+    safe_run,
+)
 from agentorg.state import SEVERITY_ORDER, DevResult, compute_security_verdict
 
 # A diff that ADDS a dependency manifest pinning two long-known-vulnerable
@@ -696,4 +701,126 @@ def test_error_finding_rejects_a_tool_name_the_finding_model_will_not_accept():
         assert error_finding(tool, "ok").tool == tool, (
             f"{tool!r} is one of Finding.tool's three accepted names and must "
             f"still work"
+        )
+
+
+def test_classify_failure_without_a_hint_degrades_exactly_where_documented():
+    """The hintless path, pinned row by row -- including where it is UNSAFE.
+
+    WHY A TEST FOR A DEGRADED PATH, RATHER THAN JUST A WARNING NOT TO USE IT
+        `classify_failure` is public and `kind_hint` is optional, so calling it
+        bare compiles, returns a plausible answer, and is the natural thing to
+        reach for from a wrapper that already has a `None` from `safe_run`. What
+        makes that dangerous is WHICH rows it gets wrong.
+
+    THE ROWS THAT LEAK ARE THE TWO THE PLAN'S RULING NAMES BY NAME
+        Hintless there is no exception type to consult, so the answer is whatever
+        `shutil.which` says -- and `which` requires the executable bit it is
+        being asked about. So a scanner whose `+x` bit is gone reads "absent",
+        and an argv0 that resolves to a directory reads "absent", when both are
+        FAULTS. Classified absent, they take the fixture-fallback path and fail
+        OPEN under SCANNERS_REQUIRED=true, which inverts the knob's purpose.
+
+    AND THE ROW THAT DOES *NOT* LEAK IS THE TRAP
+        The broken-shebang case comes out CORRECT hintless, because `which`
+        resolves it. An earlier version of the module's own docstrings named that
+        row as the hintless hazard -- exactly backwards. The danger in getting
+        this backwards is not academic: a reader who believes the shebang row is
+        the problem concludes "we don't invoke scanners through shebangs, so the
+        hintless path is fine here", and ships the two rows that actually leak.
+        Pinning all five rows is what stops the prose and the behaviour drifting
+        apart again.
+
+    This is also the only direct coverage `classify_failure` has -- every other
+    test reaches it through `run_scanner`. Both entry points matter, because the
+    one being documented as unsafe is the one still callable.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="agentorg-hintless-"))
+
+    noexec = scratch / "scanner-without-x-bit"
+    noexec.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    noexec.chmod(0o644)
+
+    bad_shebang = scratch / "scanner-with-unresolvable-shebang"
+    bad_shebang.write_text(
+        "#!/nonexistent/interpreter\necho hi\n", encoding="utf-8"
+    )
+    bad_shebang.chmod(0o755)
+
+    # (cmd, truth, what a hintless call actually answers, why)
+    rows = (
+        (
+            ["agentorg-no-such-scanner-binary-9e4c1b"],
+            "absent",
+            "absent",
+            (
+                "nothing installed and nothing on PATH: the one row where the "
+                "filesystem alone is sufficient"
+            ),
+        ),
+        (
+            [str(noexec)],
+            "fault",
+            "absent",
+            (
+                "DOCUMENTED LEAK: shutil.which needs the +x bit it is being "
+                "asked about, so a real file without it reads as absent"
+            ),
+        ),
+        (
+            [str(scratch)],
+            "fault",
+            "absent",
+            (
+                "DOCUMENTED LEAK: a directory is not on PATH, so which reports "
+                "nothing and the fault reads as absent"
+            ),
+        ),
+        (
+            [str(bad_shebang)],
+            "fault",
+            "fault",
+            (
+                "NOT a leak, and this is the trap: which resolves the file, so "
+                "the hintless answer is already correct here. Reasoning from "
+                "this row to 'the hintless path is safe' ships the two above"
+            ),
+        ),
+        (
+            [],
+            "fault",
+            "fault",
+            "malformed argv has no binary to look up, and the default is fault",
+        ),
+    )
+
+    for cmd, truth, hintless_answer, why in rows:
+        got = classify_failure(cmd)
+
+        assert got == hintless_answer, (
+            f"classify_failure({cmd!r}) with no hint answered {got!r}; the "
+            f"documented hintless behaviour is {hintless_answer!r}. {why}. If "
+            f"this is red the degradation has MOVED, and both this test and "
+            f"classify_failure's docstring table have to be re-measured "
+            f"together -- a silent change here is what makes the prose lie."
+        )
+
+        # The half that says why the hint exists at all. Where these two differ
+        # is exactly the fail-open exposure of calling this bare.
+        if hintless_answer != truth:
+            assert got == "absent" and truth == "fault", (
+                f"a documented leak must be in the absent-for-a-fault "
+                f"direction; {cmd!r} gave {got!r} against truth {truth!r}"
+            )
+
+        # ...and passing the hint must FIX every leaking row. This is the
+        # assertion that makes the conjunction's value concrete rather than
+        # asserted: same command, same classifier, correct answer once the
+        # exception type is supplied.
+        _, hinted = run_scanner(cmd, timeout=5)
+        assert hinted == truth, (
+            f"run_scanner({cmd!r}) supplies the hint and must therefore answer "
+            f"{truth!r}, the truth; got {hinted!r}. If the hintless and hinted "
+            f"answers agree on every row, the hint is buying nothing and the "
+            f"conjunction has been broken."
         )
