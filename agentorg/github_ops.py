@@ -80,7 +80,7 @@ def _ensure_offline_repo() -> str:
     (measured on a laptop: `Mohamed Sorour <sorour@192.168.1.9>`, commit exit 0,
     with a warning). It refuses when it cannot build a plausible address, and
     refuses outright under user.useConfigOnly. Deleting these two lines and
-    running the suite with that set fails 26 tests; with them, 76 pass.
+    running the suite with that set fails 29 tests; with them, 95 pass.
 
     -b main is likewise explicit rather than trusting init.defaultBranch, since
     `open_pr` checks out "main" by name on every subsequent run.

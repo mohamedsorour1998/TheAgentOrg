@@ -72,17 +72,21 @@ jobs:
       - name: Regenerate + validate fixtures
         run: python make_fixtures.py
 
-      # DELIBERATELY no scanner binaries in this job. Five assertions expect
-      # len(blocking) == 2, and today that 2 comes from the fixture fallback in
-      # agents/security.py: with nothing on PATH, run_all_scanners raises
-      # FileNotFoundError and the agent falls back. Install gitleaks/semgrep/
-      # trivy here and those five silently switch to the real-scanner path.
-      # Re-measured after offline mode became real git: the suite still passes
-      # 76/76 either way, but the run goes from 3.6s to 37.6s and starts pulling
-      # a ~108 MB trivy database on every push. (The 3.6s floor is itself new —
-      # it was 0.16s while open_pr's local branch was a stub. Every pipeline test
-      # now does a real `git init` + commit in its own tmp_path.) The real
-      # binaries belong in `scan`, which is about them.
+      # DELIBERATELY no scanner binaries in this job. With nothing on PATH,
+      # run_all_scanners raises FileNotFoundError and agents/security.py falls
+      # back to the fixture verdict. Re-measured at HEAD b95cedb with a counter
+      # on run_all_scanners: 24 tests take that fallback here, and all 24
+      # silently switch to the real-scanner path if you install gitleaks/
+      # semgrep/trivy in this job -- four of them are the ones asserting
+      # len(blocking) == 2 (the other two such assertions stub run_all_scanners
+      # themselves, so PATH cannot reach them).
+      #
+      # The suite still passes 95/95 either way, but the run goes from 5.2s to
+      # about 48s (three samples: 46.8s, 48.6s, 47.6s) and starts pulling a
+      # ~108 MB trivy database on every push. (The
+      # 5.2s floor is itself new — it was 0.16s while open_pr's local branch was
+      # a stub. Every pipeline test now does a real `git init` + commit in its
+      # own tmp_path.) The real binaries belong in `scan`, which is about them.
       - name: Run tests
         run: pytest -q
 

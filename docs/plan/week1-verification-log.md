@@ -128,19 +128,37 @@ and verified against real GitHub, not fixtures.
 
 # Week 2
 
-**Date:** 2026-08-19 · branch `worktree-week2-agents-and-ci` · HEAD `00f1997`
+**Date:** 2026-08-19 · branch `worktree-week2-agents-and-ci`
 · plan: `.superpowers/sdd/2026-08-15-week2-agents-and-ci/` (task 11)
+
+**Read this section in two layers.** Results 1–4 and "What did not hold" were
+written at HEAD `00f1997` and are kept as the record of what was measured then,
+including the failure they found. Two commits landed after them — `2d7913c` and
+`b95cedb` — which fixed that failure, and **Result 5** is the live re-measurement
+on the fixed code. Statements the fix overtook are marked `[SUPERSEDED at
+b95cedb]` where they stand rather than rewritten, so the sequence
+measure → diagnose → fix → re-measure stays legible.
 
 The claim under test is the one the demo is built on: **a poisoned ticket
 carrying hardcoded AWS credentials blocks on every run, and the block comes
 from `compute_security_verdict()` — pure Python in `state.py` — not from a
 model's judgement.**
 
-It holds with the model off — 30 credential-free runs, no deviation. **It does
-not hold with a live model: 2 of 5 live poisoned runs blocked, 2 promoted and 1
-failed.** The cause is found, is deterministic, is reproducible without a model,
-and is *not* in the block rule — it is in `developer.py`'s poisoned safety net.
-See "What did not hold".
+**At HEAD `b95cedb` it holds on every configuration measured: 5 of 5 live
+poisoned runs blocked (Result 5), 10 of 10 with no model, 10 of 10 offline, and
+the live clean control still promoted.** All of those ran with the real scanner
+binaries on PATH, so the verdict came from `compute_security_verdict()` and not
+from a fixture — see "Scanner binaries" below for why that distinction decides
+whether any of this is evidence.
+
+> **[SUPERSEDED at `b95cedb`]** Written at `00f1997`: *"It holds with the model
+> off — 30 credential-free runs, no deviation. **It does not hold with a live
+> model: 2 of 5 live poisoned runs blocked, 2 promoted and 1 failed.** The cause
+> is found, is deterministic, is reproducible without a model, and is *not* in
+> the block rule — it is in `developer.py`'s poisoned safety net."* The cause
+> was exactly that, and it is fixed; the 2/5 figure is superseded by the 5/5 in
+> Result 5. The diagnosis is preserved under "What did not hold" because the
+> 2/5 is the evidence that the defect was real.
 
 ## How this was measured
 
@@ -217,6 +235,12 @@ Ten out of ten in both sets. Twenty runs, no deviation.
 
 ## Result 3 — poisoned, LIVE model + LIVE GitHub, 5 runs — **2 of 5 blocked**
 
+> **[SUPERSEDED at `b95cedb`]** This is the measurement that *found* the defect,
+> taken at `00f1997`. It records how the code behaved before the fix and is kept
+> for that reason — the 2/5 is the evidence that the safety net was broken, and
+> deleting it would leave the fix looking like a precaution rather than a
+> repair. The re-run on the fixed code is **Result 5**.
+
 Real Bedrock (`us.amazon.nova-2-lite-v1:0`, `us-east-1`) and real PRs on
 `mohamedsorour1998/auth-service`. Scanners on PATH; fixture fallback 0/5, so
 every one of these verdicts is a real-scanner verdict.
@@ -249,11 +273,105 @@ is a weaker stop than the block rule and depends on a model's opinion.
       on `agent-org/DEMO-CLEAN-7a5e7ea`. The model wrote a 1900-byte diff over 6
       files, no `AKIA` anywhere, and the real scanners found nothing.
 
+## Result 5 — poisoned, LIVE, re-run on the FIXED code — **5 of 5 blocked**
+
+**This is the re-run the earlier controller ruling required, and it supersedes
+the 2/5 in Result 3.** Same ticket, same model, same repository, same command;
+the only difference is the two commits in between. HEAD `b95cedb`.
+
+Real Bedrock (`us.amazon.nova-2-lite-v1:0`, `us-east-1`) and real pull requests
+on the public repo `mohamedsorour1998/auth-service`, both authorised by the repo
+owner. Plain `python -m agentorg.graph --poisoned`, five times, uninstrumented —
+every number below is read back out of each run's own stdout and its own
+artifacts in `runs/`.
+
+**Scanner mode: the three real binaries were ON PATH for all six live runs**
+(`gitleaks 8.21.2`, `semgrep 1.172.0`, `trivy 0.74.0`, resolved from
+`scanbin/` and confirmed with `which` before spending anything). **Fixture
+fallback fired 0 times out of 5**, so all five verdicts came from
+`compute_security_verdict()` over real scanner findings. That is the whole point
+of running it this way: on the fallback path the verdict comes out of
+`fixtures/security_result_block.json` and the block rule is never called, so a
+5/5 obtained there would be no evidence for the claim at all.
+
+| run | status | verdict | fixture fallback | key on an ADDED line | block comment |
+|---|---|---|---|---|---|
+| 1 | **blocked** | block/2 | no | yes | [`issuecomment-5336234898`](https://github.com/mohamedsorour1998/auth-service/pull/5#issuecomment-5336234898) |
+| 2 | **blocked** | block/2 | no | yes | [`issuecomment-5336239799`](https://github.com/mohamedsorour1998/auth-service/pull/5#issuecomment-5336239799) |
+| 3 | **blocked** | block/2 | no | yes | [`issuecomment-5336244327`](https://github.com/mohamedsorour1998/auth-service/pull/5#issuecomment-5336244327) |
+| 4 | **blocked** | block/2 | no | yes | [`issuecomment-5336248479`](https://github.com/mohamedsorour1998/auth-service/pull/5#issuecomment-5336248479) |
+| 5 | **blocked** | block/2 | no | yes | [`issuecomment-5336252757`](https://github.com/mohamedsorour1998/auth-service/pull/5#issuecomment-5336252757) |
+
+All five: `rc=0`, `blocking=2`, 4 loop iterations, `revision_count=3`, 35–41 s
+per run, branch `agent-org/DEMO-POISON-6dab07b`, PR
+**<https://github.com/mohamedsorour1998/auth-service/pull/5>**. Five runs, one
+branch and one PR, because the branch name is `agent-org/<ticket>-<sha1(diff)
+[:7]>` and the safety net now substitutes the same reference diff every time —
+which is the fix working, not a coincidence. Each run added its own comment, so
+#5 collected five more.
+
+**The column that shows the fix is "key on an ADDED line": yes on all five.**
+Before `2d7913c` the three non-blocking runs carried `AKIAIOSFODNN7EXAMPLE` on a
+removal line and nowhere else, so the scanners were handed a change with no
+secret in it. Both readings are recorded per run — the whole diff text and the
+added lines only — precisely because the old defect was that those two answers
+disagreed. They now agree on every run.
+
+The 3-revision cap was reached on all five (`revision_count=3`), the same shape
+as old run 5, which had ended `failed` on a model's opinion rather than on the
+block rule. It no longer matters what the reviewer concludes: the key is in the
+change on every iteration, so the security stage blocks regardless.
+
+## Result 6 — clean ticket, LIVE, re-run on the FIXED code — promoted
+
+The converse control, and the reason 5/5 is not simply "everything blocks now".
+Same live configuration, scanners on PATH, fixture fallback 0/1.
+
+- [x] `status=promoted`, `security verdict=pass, blocking=0`, all three gates
+      approved, real PR
+      **<https://github.com/mohamedsorour1998/auth-service/pull/9>**
+      on `agent-org/DEMO-CLEAN-73c56d4`. The model wrote a 1930-byte diff over 5
+      files, no `AKIA` anywhere, the real scanners found nothing, 1 loop
+      iteration, `revision_count=0`, 17.2 s.
+
+A pass and a block on the same code path, same binaries, same session: the
+verdict still tracks what is in the change.
+
+### Live spend for this re-run
+
+- **62 Bedrock invocations** of `us.amazon.nova-2-lite-v1:0`: 50 across the five
+  poisoned runs (4 loop iterations each → `1 planner + 2×4 + 1 explainer` = 10
+  per run), 4 for the clean run, and 8 for a derivation check. The formula is
+  not assumed: it was re-validated on this HEAD against a counter placed on
+  `llm._complete` — derived 8, counted 8 — and that counter was itself checked
+  under `LLM_DISABLED=true`, where it reported 0, before any number it produced
+  was believed. Botocore-level retries, if any, are not included.
+- **1 pull request opened** (#9, clean) and **5 PR comments posted**, all on the
+  pre-existing #5. Verified against the GitHub API afterwards: #5 carries 7
+  comments — the 2 from Result 3 plus these 5 — and #9 carries 0.
+- Cumulative across Result 3, Result 4 and this re-run, the branch has opened
+  PRs #4–#9 on that repository.
+
+### One environmental wobble, reported rather than hidden
+
+Run 3 printed a `MaxTokensReachedException` from `strands` on stderr — the model
+hit its output-token limit on one call mid-run. It did not change the outcome:
+`llm.text()` catches it, logs it, returns None, and the caller falls back to its
+fixture, which is exactly the degradation `llm.py` is built for. That run still
+ended `blocked` with `blocking=2` from real scanner findings and posted a real
+comment. Recording it because a reader comparing run 3's stderr against the
+others should not have to wonder whether it was suppressed.
+
 ## What did not hold
 
-**1. The poisoned safety net checks the wrong side of the diff. (blocker)**
+**1. The poisoned safety net checks the wrong side of the diff. (blocker)
+— FIXED in `2d7913c`; re-measured live in Result 5.**
 
-`agentorg/agents/developer.py`:
+The diagnosis below is the original one, written at `00f1997`. It is still the
+correct account of *why* the live path failed; only the last paragraph ("Not
+fixed here") has been superseded.
+
+`agentorg/agents/developer.py`, **as it stood at `00f1997`**:
 
 ```python
 if poisoned and not _AWS_KEY.search(dev.diff):
@@ -281,9 +399,58 @@ Whether a live-model poisoned run blocks is therefore decided by what the model
 happened to write on its **last** revision. Runs 2 and 3 blocked because that
 last diff contained no `AKIA` at all, so the safety net did fire.
 
-Not fixed here: task 11 is verification, `state.py` is frozen, and this is a
-change to `developer.py`. The shape of the fix is to search only added lines
-rather than the whole diff string. It needs its own task and its own test.
+> **[SUPERSEDED at `b95cedb`]** Written at `00f1997`: *"Not fixed here: task 11
+> is verification, `state.py` is frozen, and this is a change to `developer.py`.
+> The shape of the fix is to search only added lines rather than the whole diff
+> string. It needs its own task and its own test."*
+
+It got its own task and its own tests. Two commits landed after this section was
+written, both on this branch, and `state.py` was not touched by either:
+
+**`2d7913c` — the safety net now reads added lines only, through one shared
+materialiser.** The predicted shape of the fix was right but too small. The
+question "is the key in this change?" had been written out four separate times —
+the three scanner wrappers plus the safety net — and the four copies had drifted
+apart, which is what let the safety net answer differently from the scanners it
+was feeding. So the answer lives in one place now, `agentorg/common/diff.py`,
+and all four call sites ask it. That closes a second disagreement of the same
+class for free: added lines appearing before the first `+++ b/` header belong to
+no file, so no scanner ever reads them, while a search over the diff string
+finds them. Scanned trees are otherwise unchanged — 12 diff shapes compared
+against verbatim reimplementations of both old wrapper bodies, 0 mismatches, and
+`scripts/scan_gate.py` on real binaries still reports `app/auth.py:3` and `:4`.
+Suite 90 → 94; three of the four new tests are RED before the change, including
+an end-to-end reproduction that asserted `'promoted' == 'blocked'`. The fourth
+is the converse guard — a key on an *added* line must NOT be substituted — so
+"it always blocks now" cannot be bought by deleting the feature.
+
+**`b95cedb` — a `+++ b/` header that escapes the scanned directory now raises.**
+Found while reviewing the materialiser the commit above created. The path in
+that header is written by the model, and `Path(dest_dir) / relative` follows an
+absolute target or a `..` escape straight out of the scratch directory. Measured
+against `2d7913c`: both `+++ b/../escaped.py` and an absolute target wrote
+model-chosen bytes outside the directory being scanned, as whatever user CI runs
+as, **and left the scanned tree empty** — so the scanners found nothing and
+`compute_security_verdict([])` returned `pass`. An LLM-controlled arbitrary file
+write that also silently disarms the block rule, in the lane whose whole job is
+to catch that class of thing. It raises now rather than dropping the file,
+because a dropped file is a smaller tree and an empty tree is a clean scan; the
+raise reaches `security.run`'s handler, which logs one bounded WARNING naming
+the cause and falls back to the fixture verdict, which still blocks a diff
+carrying an AWS key. Suite 94 → 95, RED before the guard with "DID NOT RAISE",
+and the new assertion is on the filesystem — the escaped file must not exist —
+since a wrapper that wrote the file and *then* raised would satisfy "it raised".
+
+Note what this did **not** change. The block rule was never at fault and was
+never edited; `state.py` is untouched on this branch. What was fixed is the
+input it was handed.
+
+*Items 2, 3 and 4 below were re-checked at `b95cedb` and all three still stand.*
+None of them was in scope for either fix. Item 3 in particular was worth
+re-checking, since `2d7913c` did touch `semgrep_tool` — but only its
+materialiser call, not its `Finding` construction, and the live re-run's own
+artifacts still show a `/var/folders/.../agentorg-semgrep-*/app/auth.py` path
+next to gitleaks' clean `app/auth.py`.
 
 **2. The block explanation is not byte-stable.** Across the 10 offline runs, 6
 explanations led with `aws-secret-access-key` and 4 with `aws-access-key-id` —
@@ -305,6 +472,8 @@ post-merge file's. Cosmetic; the fixture is the stale one.
 
 ## Live spend
 
+### At `00f1997` — Results 3 and 4
+
 - **65 Bedrock invocations** of `us.amazon.nova-2-lite-v1:0`: 46 across the five
   live poisoned runs, 8 for the live clean run, 10 for a call-count validation
   run, 1 for `scripts/bedrock_smoke_test.py`. Counted as
@@ -316,16 +485,50 @@ post-merge file's. Cosmetic; the fixture is the stale one.
 - **5 pull requests opened** on `mohamedsorour1998/auth-service`: #4, #5, #6, #7
   (poisoned) and #8 (clean). **2 PR comments** posted, both on #5.
 
+### At `b95cedb` — Results 5 and 6, the re-run
+
+- **62 Bedrock invocations**: 50 poisoned (10 per run × 5), 4 clean, 8 for the
+  derivation check. Same formula, re-validated on this HEAD (derived 8, counted
+  8; counter proved able to report 0 first).
+- **1 pull request opened** (#9, clean) and **5 PR comments** posted, all on #5.
+
+**Branch total: 127 Bedrock invocations, PRs #4–#9, 7 PR comments.**
+
 ## Suite
 
-- [x] `pytest -q` → **90 passed** (5.2 s, real git)
+Measured at HEAD `b95cedb` with these documentation changes in the tree:
+
+- [x] `pytest -q`, credentials present in the environment → **95 passed** (5.7 s)
+- [x] `pytest -q` with AWS and GitHub credentials unset → **95 passed** (6.2 s).
+      Both configurations matter: the three autouse guards in `tests/conftest.py`
+      are what make those two numbers the same, and CI only ever exercises the
+      second one.
+- [x] `pytest -q` with the three scanner binaries on PATH → **95 passed**
+      (48.7 s). Same 95 either way; the ~43 s is real scanners and a trivy
+      database, which is why the `test` job in CI deliberately has none.
 - [x] `ruff check agentorg scripts tests` → exit 0
-- [x] No production code was modified by this task; `git status` is clean apart
-      from this file.
+- [x] Results 5 and 6 modified no production code. The commit carrying them
+      touches this file plus three stale comments and one false comment
+      elsewhere — see the merge-blocker report in
+      `.superpowers/sdd/2026-08-15-week2-agents-and-ci/`.
 
 ## Week 2 status
 
-**The Friday gate is met offline and not met live.** `OFFLINE=true
-LLM_DISABLED=true python -m agentorg.graph --poisoned` blocks 10 out of 10 and
-is safe to demo on 25 Aug. The live-model poisoned path must not be demoed until
-the `developer.py` safety net is fixed and this section is re-run.
+**The Friday gate is met, offline and live.** Both of these block 5+ runs out of
+5 with the verdict coming from `compute_security_verdict()` over real scanner
+findings:
+
+- `OFFLINE=true LLM_DISABLED=true python -m agentorg.graph --poisoned` — 10/10
+- `python -m agentorg.graph --poisoned` with live Bedrock and live GitHub — 5/5
+
+**Both are safe to demo on 25 Aug**, with one caveat that is about the demo
+rather than the code: put the scanner binaries on PATH for it. Without them
+every run still blocks, but from the fixture fallback, and the central claim
+about `compute_security_verdict()` would then be unsupported by what the
+audience is watching.
+
+> **[SUPERSEDED at `b95cedb`]** Written at `00f1997`: *"**The Friday gate is met
+> offline and not met live.** ... The live-model poisoned path must not be
+> demoed until the `developer.py` safety net is fixed and this section is
+> re-run."* The safety net was fixed in `2d7913c`, hardened in `b95cedb`, and
+> this section has been re-run — that is Result 5. The restriction is lifted.

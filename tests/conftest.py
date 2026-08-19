@@ -76,10 +76,17 @@ The guard mirrors seam 1 deliberately, so there is one pattern to learn:
     `LLM_DISABLED`. `_use_local()` is its only reader and reads it through the
     module at call time, so the fixture reaches it whatever the credentials say.
   * `github_ops._repo` is the seam layer, the counterpart of `llm._complete`.
-    It is the single point where a `Github` client is constructed, and both
-    call sites (`open_pr`, `post_comment`) invoke it OUTSIDE their try blocks,
-    so a raiser there escapes rather than being folded into a `GithubException`
-    branch. It uses `pytest.fail` for the same BaseException reason as above.
+    It is the single point where a `Github` client is constructed. The two call
+    sites do NOT treat it alike, and it is worth knowing which mechanism is
+    actually load-bearing: `open_pr` calls it outside any try, so a raiser
+    there simply escapes, but `post_comment` calls it INSIDE the try whose
+    blind `except Exception` absorbs every GitHub failure. Placement is not
+    what saves that second path -- `pytest.fail` is. It raises `Failed`, which
+    derives from BaseException rather than Exception, so `except Exception`
+    cannot catch it. Downgrade this raiser to an ordinary Exception and
+    post_comment swallows it while the live writes go out. Pinned by
+    test_the_blind_except_does_not_swallow_the_conftest_github_guard in
+    tests/test_offline_mode.py, not by this paragraph.
 
 A test that genuinely wants the online path opts in, in its own body. The
 `_repo` line is the load-bearing one -- it is what keeps the test off the
@@ -111,12 +118,21 @@ repository. So the guard that keeps the suite off GitHub is also what points it
 at the working tree.
 
 Measured with a `subprocess.Popen` recorder, `pytest -q` at the repository root,
-before this fixture existed: 204 `git` child processes, 105 of them with
-cwd=`<repo>/runs/offline-demo`, from 19 tests that never mention git -- the
+with this fixture removed so both knobs keep their shipped `runs/` defaults
+(re-measured at HEAD b95cedb): 224 `git` child processes, 125 of them with
+cwd=`<repo>/runs/offline-demo`, from 22 tests that never mention git -- the
 pipeline tests in test_pipeline_smoke.py, test_gates_cli.py and
-test_agent_fallbacks.py, which reach `open_pr` through `run_pipeline`. They left
-a real nested repository behind with five `agent-org/*` branches and a NOTES.md.
-`runs/` is gitignored, so `git status` stayed clean and nothing pointed at it.
+test_agent_fallbacks.py, plus the two in test_offline_mode.py that redirect
+OFFLINE_NOTES but not OFFLINE_REPO. All of them reach `open_pr` through
+`run_pipeline`. They left a real nested repository behind with six
+`agent-org/*` branches and a NOTES.md. `runs/` is gitignored, so `git status`
+stayed clean and nothing pointed at it.
+
+Note which way that number runs, because it is easy to quote backwards: WITH
+this fixture the suite spawns MORE git, not less -- 329 processes across the 31
+tests that spawn git at all -- because each test inits its own repo instead of
+sharing one. The win is not fewer processes, it is that every one of them
+lands in tmp_path.
 
 Two things were wrong with that, beyond the litter. It is SHARED MUTABLE STATE:
 one repo, one NOTES file, every test appending to both, so a test can pass on
@@ -192,7 +208,7 @@ def _unpatched_repo() -> NoReturn:
         "the environment performs live branch, commit and pull-request WRITES "
         "against DEMO_REPO. It patched config.OFFLINE and/or the credentials "
         "but NOT github_ops._repo. A test that wants the online path must "
-        "replace all three -- see tests/conftest.py.",
+        "replace all four -- see tests/conftest.py.",
         pytrace=False,
     )
 
