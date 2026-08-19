@@ -1,7 +1,7 @@
 import pytest
 
+from agentorg.agents import developer, planner, reviewer, security, sre
 from agentorg.state import RunState
-from agentorg.agents import planner, developer, reviewer, security, sre
 
 TICKET_TEXT = "Add a per-IP login rate limit."
 
