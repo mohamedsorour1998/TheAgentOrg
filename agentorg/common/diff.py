@@ -75,8 +75,31 @@ def write_added_files(diff: str | None, dest_dir: str) -> None:
     pins those numbers (app/auth.py:3 and :4 on the poisoned fixture), so this
     has to stay one file line per added diff line, in order, with the file
     ending in a newline like any other text file.
+
+    Every target must land INSIDE `dest_dir`, and one that does not raises.
+    The path in a `+++ b/` header is written by the model, and `Path(dest_dir)
+    / relative` follows an absolute target or a `..` escape straight out of the
+    scratch directory: measured before this guard, `+++ b/../escaped.py` and an
+    absolute target both wrote model-chosen bytes outside the directory being
+    scanned, as whatever user CI runs as, and left the scanned tree EMPTY.
+
+    Loudly, not silently. Dropping the offending file would leave the scanners
+    a smaller tree, and an empty tree is a clean scan -- compute_security_verdict
+    ([]) returns "pass", which is the one failure mode this lane keeps closing.
+    The raise propagates out of the scanner wrapper into security.run, which
+    logs one bounded WARNING naming the cause and falls back to the fixture
+    verdict; that still blocks a diff carrying an AWS key. A genuinely
+    malformed diff is then diagnosable instead of mysteriously scanning nothing.
     """
+    root = Path(dest_dir).resolve()
     for relative, body in added_files(diff).items():
-        path = Path(dest_dir) / relative
+        path = (root / relative).resolve()
+        # `is_relative_to` is also True for root itself, which an empty target
+        # produces -- that is a directory, not a file to write.
+        if path == root or not path.is_relative_to(root):
+            raise ValueError(
+                f"diff header target {relative!r} resolves to {path}, outside "
+                f"the directory being scanned ({root}); refusing to write it"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body + "\n", encoding="utf-8")

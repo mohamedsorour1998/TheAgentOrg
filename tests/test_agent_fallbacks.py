@@ -287,6 +287,48 @@ def test_the_safety_net_and_the_scanners_read_the_same_change(monkeypatch, tmp_p
         )
 
 
+def test_a_diff_cannot_write_outside_the_directory_being_scanned(tmp_path):
+    """A `+++ b/` target that escapes the scratch directory must be refused.
+
+    The path in that header comes from the model. `Path(temp_dir) / relative`
+    follows an absolute target or a `..` escape straight out of the scratch
+    directory, so before this guard a diff could make a scanner wrapper write
+    model-chosen bytes anywhere the CI user can write -- LLM-controlled
+    arbitrary file write, in the lane whose whole job is to catch that class of
+    thing.
+
+    Driven through gitleaks_tool rather than the materialiser directly, because
+    the claim worth pinning is that the path the SCANNERS take is guarded.
+
+    Asserted on the filesystem: the escaped file must not exist. "It raised" on
+    its own is a weak witness -- a wrapper that wrote the file and then raised
+    would satisfy it.
+
+    Loud rather than silent, deliberately. Skipping the file quietly would hand
+    the scanners a smaller tree, and an empty scan is a PASS to
+    compute_security_verdict. The raise reaches security.run's handler, which
+    logs one WARNING naming the cause and falls back to the fixture verdict --
+    which still blocks a diff carrying an AWS key.
+    """
+    from agentorg.security import gitleaks_tool
+
+    scanned_dir = tmp_path / "scratch"
+    scanned_dir.mkdir()
+    escaped = tmp_path / "escaped.py"
+
+    cases = {
+        "a .. escape": f"--- a/x.py\n+++ b/../{escaped.name}\n+ESCAPED = 1\n",
+        "an absolute target": f"--- a/x.py\n+++ b/{escaped}\n+ESCAPED = 1\n",
+    }
+
+    for name, diff in cases.items():
+        dev = DevResult(branch="b", diff=diff, summary="s", files_changed=[])
+        with pytest.raises(ValueError, match="outside"):
+            gitleaks_tool._write_diff_to_temp(dev, str(scanned_dir))
+        assert not escaped.exists(), f"{name}: wrote outside the scanned directory"
+        assert list(scanned_dir.rglob("*")) == [], f"{name}: wrote something anyway"
+
+
 def test_reviewer_feedback_reaches_the_prompt(monkeypatch):
     """A revision must feed must_fix back to the model."""
     from agentorg.common import llm
