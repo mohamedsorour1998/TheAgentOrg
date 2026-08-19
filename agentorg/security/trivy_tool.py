@@ -28,7 +28,14 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
-from ._run import error_finding, run_scanner, unrunnable_findings
+from ._run import (
+    ReportShapeError,
+    error_finding,
+    report_objects,
+    report_text,
+    run_scanner,
+    unrunnable_findings,
+)
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
@@ -149,31 +156,32 @@ def scan(dev: DevResult) -> list[Finding]:
 
     findings: list[Finding] = []
 
-    for target in targets:
-        vulnerabilities = target.get("Vulnerabilities", []) or []
-
-        for vulnerability in vulnerabilities:
-            findings.append(
-                Finding(
-                    tool="trivy",
-                    severity=_map_severity(
-                        vulnerability.get("Severity")
-                    ),
-                    rule=vulnerability.get(
-                        "VulnerabilityID",
-                        "unknown",
-                    ),
-                    file=target.get(
-                        "Target",
-                        "unknown",
-                    ),
-                    line=0,
-                    description=(
-                        vulnerability.get("Title")
-                        or vulnerability.get("Description")
-                        or "Trivy vulnerability finding."
-                    ),
+    # Wrong-typed INNER fields are a fault too, and the top-level guards above
+    # cannot see them -- see _run.report_text for the nine measured crashes and
+    # the fail-open they produce end to end. `Vulnerabilities` is nested one level
+    # deeper than either other wrapper reads, so it needs its own list-of-objects
+    # check: a single bare string among well-formed entries made
+    # `vulnerability.get` raise AttributeError.
+    try:
+        for target in targets:
+            for vulnerability in report_objects(target, "Vulnerabilities"):
+                findings.append(
+                    Finding(
+                        tool="trivy",
+                        severity=_map_severity(
+                            report_text(vulnerability, "Severity", "")
+                        ),
+                        rule=report_text(vulnerability, "VulnerabilityID", "unknown"),
+                        file=report_text(target, "Target", "unknown"),
+                        line=0,
+                        description=(
+                            report_text(vulnerability, "Title", "")
+                            or report_text(vulnerability, "Description", "")
+                            or "Trivy vulnerability finding."
+                        ),
+                    )
                 )
-            )
+    except ReportShapeError as exc:
+        return [error_finding("trivy", f"unusable report: {exc}")]
 
     return findings

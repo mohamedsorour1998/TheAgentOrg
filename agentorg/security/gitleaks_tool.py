@@ -29,7 +29,14 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
-from ._run import error_finding, run_scanner, unrunnable_findings
+from ._run import (
+    ReportShapeError,
+    error_finding,
+    report_int,
+    report_text,
+    run_scanner,
+    unrunnable_findings,
+)
 
 CONFIG_PATH = (
     Path(__file__).resolve().parent / "gitleaks.toml"
@@ -153,7 +160,11 @@ def scan(dev: DevResult) -> list[Finding]:
     # and `for leak in "some string"` iterates CHARACTERS until `leak.get` raises
     # AttributeError from inside the loop below -- an exception on the fault path
     # at the exact moment the pipeline is trying to report that a scanner failed.
-    # `null` is a real gitleaks report meaning "no leaks", so it is not a fault.
+    # `null` is accepted as an empty report purely defensively. MEASURED with
+    # real gitleaks 8.21.2 on a clean tree: it writes `[]`, not `null`. So this
+    # is not a case the binary is known to produce -- it costs one comparison
+    # and keeps a plausible variant off the fault path, which is the whole
+    # justification. Do not cite it as gitleaks behaviour.
     leaks = [] if data is None else data
     if not isinstance(leaks, list) or not all(isinstance(leak, dict) for leak in leaks):
         return [
@@ -166,32 +177,30 @@ def scan(dev: DevResult) -> list[Finding]:
 
     findings: list[Finding] = []
 
-    for leak in leaks:
-        rule_id = leak.get(
-            "RuleID",
-            "unknown",
-        )
-
-        findings.append(
-            Finding(
-                tool="gitleaks",
-                severity="critical",
-                rule=rule_id,
-                file=_repo_relative(
-                    leak.get("File", "unknown"),
-                    temp_dir,
-                ),
-                line=int(
-                    leak.get(
-                        "StartLine",
-                        0,
-                    ) or 0
-                ),
-                description=(
-                    leak.get("Description")
-                    or "Secret detected by Gitleaks."
-                ),
+    # Wrong-typed INNER fields are a fault too, and the top-level guard above
+    # cannot see them -- see _run.report_text for the nine measured crashes and
+    # the fail-open they produce end to end. Every field this loop dereferences
+    # goes through a reader that rejects an unusable type instead of raising from
+    # the middle of a Finding construction.
+    try:
+        for leak in leaks:
+            findings.append(
+                Finding(
+                    tool="gitleaks",
+                    severity="critical",
+                    rule=report_text(leak, "RuleID", "unknown"),
+                    file=_repo_relative(
+                        report_text(leak, "File", "unknown"),
+                        temp_dir,
+                    ),
+                    line=report_int(leak, "StartLine", 0),
+                    description=(
+                        report_text(leak, "Description", "")
+                        or "Secret detected by Gitleaks."
+                    ),
+                )
             )
-        )
+    except ReportShapeError as exc:
+        return [error_finding("gitleaks", f"unusable report: {exc}")]
 
     return findings

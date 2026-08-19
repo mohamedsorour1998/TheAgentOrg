@@ -25,7 +25,15 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
-from ._run import error_finding, run_scanner, unrunnable_findings
+from ._run import (
+    ReportShapeError,
+    error_finding,
+    report_int,
+    report_mapping,
+    report_text,
+    run_scanner,
+    unrunnable_findings,
+)
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
@@ -166,33 +174,32 @@ def scan(dev: DevResult) -> list[Finding]:
 
     findings: list[Finding] = []
 
-    for result_item in results:
-        extra = result_item.get("extra", {})
+    # Wrong-typed INNER fields are a fault too, and the top-level guards above
+    # cannot see them -- see _run.report_text for the nine measured crashes and
+    # the fail-open they produce end to end. `extra` is the likeliest of them for
+    # this wrapper: it holds severity and message, so a truncated or mangled
+    # report makes `extra.get` raise AttributeError.
+    try:
+        for result_item in results:
+            extra = report_mapping(result_item, "extra")
+            start = report_mapping(result_item, "start")
 
-        start = result_item.get("start", {})
-
-        findings.append(
-            Finding(
-                tool="semgrep",
-                severity=_map_severity(
-                    extra.get("severity")
-                ),
-                rule=result_item.get(
-                    "check_id",
-                    "unknown",
-                ),
-                file=result_item.get(
-                    "path",
-                    "unknown",
-                ),
-                line=int(
-                    start.get("line", 0) or 0
-                ),
-                description=(
-                    extra.get("message")
-                    or "Semgrep finding."
-                ),
+            findings.append(
+                Finding(
+                    tool="semgrep",
+                    severity=_map_severity(
+                        report_text(extra, "severity", "")
+                    ),
+                    rule=report_text(result_item, "check_id", "unknown"),
+                    file=report_text(result_item, "path", "unknown"),
+                    line=report_int(start, "line", 0),
+                    description=(
+                        report_text(extra, "message", "")
+                        or "Semgrep finding."
+                    ),
+                )
             )
-        )
+    except ReportShapeError as exc:
+        return [error_finding("semgrep", f"unusable report: {exc}")]
 
     return findings

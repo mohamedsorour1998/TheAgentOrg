@@ -425,7 +425,7 @@ def test_safe_run_reports_a_nonzero_exit_rather_than_hiding_it():
 
 
 def test_the_shipped_config_defaults_keep_ci_on_the_fixture_fallback_path():
-    """SCANNERS_REQUIRED must default false, or five other tests go red.
+    """SCANNERS_REQUIRED must default false, or four pinned assertions go red.
 
     The plan's central ruling distinguishes ABSENT from BROKEN: a missing
     binary is a CI/dev affordance that keeps the existing fixture-fallback
@@ -433,9 +433,18 @@ def test_the_shipped_config_defaults_keep_ci_on_the_fixture_fallback_path():
     demo machine and production images. If the default flipped, CI's `test`
     job -- which installs no scanners on purpose -- would start producing
     three scanner-error findings instead of the fixture's two AWS-key
-    findings, and the five assertions that read `len(blocking) == 2`
-    (tests/test_pipeline_smoke.py, test_agent_fallbacks.py x3,
-    test_gates_cli.py) would fail without anything naming the cause.
+    findings.
+
+    THE COUNT, MEASURED TWO WAYS, because they are different facts. EIGHT literal
+    `assert len(...blocking) == 2` statements exist in tests/ (AST count; one is
+    a CHAINED comparison at test_functional_contract.py:135 that a
+    single-operator search misses). FOUR of them depend on this default --
+    test_pipeline_smoke.py:20, test_agent_fallbacks.py:466,
+    test_block_determinism.py:13, test_gates_cli.py:383 -- measured by flipping
+    the default and seeing which go red. The other four never reach the scanner
+    path: three patch run_all_scanners, one reads the fixture file. Earlier
+    versions of this docstring, config.py and _run.py said "five" and "six";
+    both were wrong and both were copied from the plan.
 
     Loaded from source into a THROWAWAY module with the environment cleared,
     so what is pinned is the shipped default rather than whatever happens to
@@ -454,7 +463,7 @@ def test_the_shipped_config_defaults_keep_ci_on_the_fixture_fallback_path():
 
     assert probe.SCANNERS_REQUIRED is False, (
         f"SCANNERS_REQUIRED must ship defaulting to False -- see this test's "
-        f"docstring for the five assertions that depend on it. Got "
+        f"docstring for the four assertions that depend on it. Got "
         f"{probe.SCANNERS_REQUIRED!r}"
     )
     assert isinstance(probe.SCANNER_TIMEOUT_SECONDS, int), (
@@ -1209,8 +1218,9 @@ def test_an_absent_binary_still_raises_so_ci_keeps_the_fixture_fallback(
     A binary that is simply not installed must keep the shipped behaviour --
     raise, so agents/security.py falls back to the fixture verdict. That is what
     lets CI's `test` job run with no scanners and still see the poisoned diff's
-    two AWS-key findings, which six assertions across the suite read as
-    `len(blocking) == 2`.
+    two AWS-key findings. Four assertions across the suite depend on that, of
+    eight that read `len(blocking) == 2` -- both counts measured; see
+    config.SCANNERS_REQUIRED.
 
     THE RAISE IS THE ASSERTION, and it is not a stylistic choice: the
     alternative -- returning `[]` -- is the silent-pass shape. A wrapper that
@@ -1512,4 +1522,402 @@ def test_the_wrappers_shell_out_through_the_subprocess_module_attribute():
         f"three binaries executed. Saw {seen!r}. If this is empty, something now "
         f"holds a direct reference to the function (`from subprocess import "
         f"run`) and the gate's spy is blind."
+    )
+
+
+# ==========================================================================
+# Review round 2 -- what the top-level shape guards could not see
+# ==========================================================================
+
+
+@pytest.mark.parametrize(
+    "tool, report, what_it_used_to_do",
+    [
+        # Every one of these PASSES the top-level guard the first review round
+        # added, and then crashed on a dereference inside the parse loop.
+        # MEASURED against that code -- these are the exact exceptions and the
+        # exact lines:
+        (
+            "gitleaks",
+            '[{"RuleID": "r", "File": "f", "StartLine": "not-an-int"}]',
+            "ValueError from int() at gitleaks_tool.py:184",
+        ),
+        (
+            "gitleaks",
+            '[{"RuleID": "r", "File": {"nested": 1}, "StartLine": 1}]',
+            "TypeError from os.path.relpath at gitleaks_tool.py:48",
+        ),
+        (
+            "gitleaks",
+            '[{"RuleID": ["a", "list"], "File": "f", "StartLine": 1}]',
+            "pydantic ValidationError at gitleaks_tool.py:176",
+        ),
+        (
+            "gitleaks",
+            '[{"RuleID": "r", "File": "f", "StartLine": 1, "Description": {"o": 1}}]',
+            "pydantic ValidationError at gitleaks_tool.py:176",
+        ),
+        # These two exist because MUTATION found them, not because reading the
+        # code suggested them. `report_int`'s final fall-through raise -- the one
+        # for a type that is neither int, bool, nor str -- was reached by no test:
+        # replacing it with `return default` left the whole suite green at 175
+        # passed. Every other case routes through an earlier branch. An unpinned
+        # fall-through in an integer reader means a report carrying an object
+        # where a line number belongs would silently become line 0.
+        (
+            "gitleaks",
+            '[{"RuleID": "r", "File": "f", "StartLine": {"nested": 1}}]',
+            "TypeError from int() on a dict",
+        ),
+        (
+            "semgrep",
+            (
+                '{"results": [{"check_id": "c", "path": "p", "extra": {}, '
+                '"start": {"line": [1, 2]}}]}'
+            ),
+            "TypeError from int() on a list",
+        ),
+        (
+            "semgrep",
+            (
+                '{"results": [{"check_id": "c", "path": "p", "extra": "nope", '
+                '"start": {"line": 1}}]}'
+            ),
+            "AttributeError from extra.get at semgrep_tool.py:178",
+        ),
+        (
+            "semgrep",
+            (
+                '{"results": [{"check_id": "c", "path": "p", "extra": {}, '
+                '"start": "nope"}]}'
+            ),
+            "AttributeError from start.get at semgrep_tool.py:189",
+        ),
+        (
+            "semgrep",
+            (
+                '{"results": [{"check_id": "c", "path": "p", "extra": {}, '
+                '"start": {"line": "x"}}]}'
+            ),
+            "ValueError from int() at semgrep_tool.py:188",
+        ),
+        (
+            "trivy",
+            '{"Results": [{"Target": "t", "Vulnerabilities": ["not-an-object"]}]}',
+            "AttributeError from vulnerability.get at trivy_tool.py:160",
+        ),
+        (
+            "trivy",
+            (
+                '{"Results": [{"Target": "t", "Vulnerabilities": '
+                '[{"Severity": {"o": 1}, "VulnerabilityID": "v"}]}]}'
+            ),
+            "AttributeError from .upper() in _map_severity at trivy_tool.py:56",
+        ),
+    ],
+)
+def test_wrong_typed_inner_fields_block_rather_than_crashing(
+    tool, report, what_it_used_to_do, monkeypatch, tmp_path
+):
+    """The fail-open the TOP-LEVEL shape guards do not reach. One level deeper.
+
+    WHY THIS EXISTS AS A SEPARATE TEST FROM THE WRONG-SHAPE ONE ABOVE
+        `test_a_report_of_the_wrong_json_shape_blocks_rather_than_crashing`
+        checks that a report which is a list-where-an-object-belongs (or the
+        reverse) is rejected. Every report below SATISFIES that guard: gitleaks'
+        is a list of objects, semgrep's and trivy's are objects whose results key
+        is a list of objects. The wrong type is on a FIELD the loop dereferences,
+        so the guard passes and the crash happens later, inside a Finding
+        construction. MEASURED on the code the first review round approved: 9 of
+        9 of these raised, at the locations named in each parameter.
+
+    THE END-TO-END CONSEQUENCE IS A PROMOTED CHANGE, which is why this is not a
+        tidiness test. The exception escapes the wrapper, agents/security.py
+        catches it, and falls back to the fixture verdict -- and the fixture
+        verdict for a CLEAN diff is "pass". Measured with all three scanners
+        installed and all three emitting wrong-typed inner fields on a clean
+        diff: `verdict=pass, blocking=0`. A change promoted although no scanner
+        output was ever read. Pinned end to end by
+        test_the_security_agent_blocks_when_every_report_has_wrong_typed_fields.
+
+    WHY IT NEEDS A MISBEHAVING SCANNER, and why that is still in scope. Real
+        gitleaks 8.21.2 and semgrep 1.172.0 reports are well-typed at every level
+        (measured: StartLine int, File str, extra dict, start.line int, no result
+        missing `extra`). So none of these arise from a healthy binary -- but a
+        misbehaving scanner is the entire premise of this lane, and "the scanner
+        is broken in a way we did not anticipate" is what fail-closed means.
+    """
+    _fake_scanner(
+        tmp_path / "bin", tool, _write_report_script(tool, report), monkeypatch
+    )
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+
+    # WHICH fault. The report here is valid JSON AND passes the top-level shape
+    # guard, so a reason naming either of those means the fake wrote something
+    # other than intended and this case is pinning a guard that already existed.
+    description = findings[0].description
+    assert "not valid JSON" not in description, (
+        f"this report IS valid JSON, so a parse error means the fake scanner "
+        f"wrote an empty file and the field readers were never reached -- the "
+        f"exact way the first version of this harness faked results. Got "
+        f"{description!r}"
+    )
+    assert "not the expected JSON" not in description, (
+        f"this report passes the top-level shape guard, so a top-level "
+        f"complaint means this case duplicates the wrong-shape test instead of "
+        f"covering the field readers. Got {description!r}"
+    )
+    assert "unusable report" in description, (
+        f"the reason must identify this as a field-level rejection, since that "
+        f"is a different fix from a mangled top-level report ({what_it_used_to_do} "
+        f"is what it used to do). Got {description!r}"
+    )
+
+
+def test_the_security_agent_blocks_when_every_report_has_wrong_typed_fields(
+    monkeypatch, tmp_path
+):
+    """The fail-open from Finding 1, end to end, on the shape that hides it.
+
+    The diff is CLEAN and all three scanners are installed. That combination is
+    what made the old behaviour invisible: the wrappers crashed, the fixture
+    fallback ran, and the fixture verdict for a clean diff is `pass` -- so the
+    pipeline reported a successful scan of a change no scanner output was read
+    for. MEASURED on the code the first review round approved: `verdict=pass,
+    blocking=0`.
+
+    This is the same assertion shape as
+    test_the_security_agent_blocks_on_a_faulting_scanner_without_the_fixture, but
+    driven by a fault that test cannot produce: there the scanners exit non-zero,
+    here they exit 0 and write a report that looks healthy until a field is read.
+    """
+    reports = {
+        "gitleaks": '[{"RuleID": "r", "File": "f", "StartLine": "not-an-int"}]',
+        "semgrep": '{"results": [{"check_id": "c", "path": "p", "extra": "nope"}]}',
+        "trivy": '{"Results": [{"Target": "t", "Vulnerabilities": ["bare-string"]}]}',
+    }
+    for tool, report in reports.items():
+        _fake_scanner(
+            tmp_path / "bin", tool, _write_report_script(tool, report), monkeypatch
+        )
+
+    state = RunState(
+        ticket_id="CLEAN-2",
+        ticket_text="add a harmless constant",
+        plan=PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["x"]),
+        dev=_dev(),
+    )
+
+    result = security_agent.run(state)
+
+    assert result.verdict == "block", (
+        f"three scanners emitting unusable reports on a CLEAN diff must BLOCK. "
+        f"Got {result.verdict!r} with {_summarize(result.findings)}. A 'pass' "
+        f"here is the fail-open: the crash reaches the fixture fallback, and the "
+        f"fixture verdict for a clean diff is 'pass', so a change is promoted "
+        f"although no scanner output was read."
+    )
+    assert {f.rule for f in result.blocking} == {
+        "gitleaks-scanner-error",
+        "semgrep-scanner-error",
+        "trivy-scanner-error",
+    }, f"every unusable report must be named. Got {_summarize(result.blocking)}"
+
+
+def test_a_well_typed_report_still_parses_into_real_findings(monkeypatch, tmp_path):
+    """The negative control for the field readers, per tool.
+
+    Without it, readers that rejected EVERYTHING would satisfy every case above
+    -- and that fails closed on the clean fixture too, which takes the demo's
+    promote path down. The reports below are the well-typed shapes real gitleaks,
+    semgrep and trivy emit, and each must map to a Finding with the field values
+    intact rather than to a scanner-error.
+
+    It also pins the two type coercions the readers deliberately KEEP: a
+    `StartLine` arriving as the string "7" is accepted as 7, because gitleaks has
+    shipped both across versions and the wrapper did `int(...)` before.
+    """
+    cases = {
+        "gitleaks": (
+            (
+                '[{"RuleID": "aws-access-key-id", "File": "app/auth.py", '
+                '"StartLine": "7", "Description": "AWS key found"}]'
+            ),
+            "aws-access-key-id",
+            7,
+        ),
+        "semgrep": (
+            (
+                '{"results": [{"check_id": "rule.id", "path": "app/auth.py", '
+                '"extra": {"severity": "ERROR", "message": "bad"}, '
+                '"start": {"line": 12}}]}'
+            ),
+            "rule.id",
+            12,
+        ),
+        "trivy": (
+            (
+                '{"Results": [{"Target": "requirements.txt", "Vulnerabilities": '
+                '[{"Severity": "HIGH", "VulnerabilityID": "CVE-2020-1", '
+                '"Title": "vuln"}]}]}'
+            ),
+            "CVE-2020-1",
+            0,
+        ),
+    }
+
+    for tool, (report, expected_rule, expected_line) in cases.items():
+        _fake_scanner(
+            tmp_path / f"bin-{tool}",
+            tool,
+            _write_report_script(tool, report),
+            monkeypatch,
+        )
+
+        findings = WRAPPERS[tool].scan(_dev())
+
+        assert len(findings) == 1, (
+            f"{tool}: a well-typed report must map to exactly one finding, not "
+            f"be rejected. Got {_summarize(findings)} -- readers that reject "
+            f"everything fail closed on the CLEAN fixture too."
+        )
+        assert findings[0].rule == expected_rule, (
+            f"{tool}: expected rule {expected_rule!r}, got {findings[0].rule!r}"
+        )
+        assert findings[0].line == expected_line, (
+            f"{tool}: expected line {expected_line}, got {findings[0].line}. For "
+            f"gitleaks this also pins that a numeric STRING is still coerced, "
+            f"which the wrapper did before these readers existed."
+        )
+
+
+def test_a_boolean_is_not_quietly_read_as_a_line_number(monkeypatch, tmp_path):
+    """`"StartLine": true` must be rejected, not silently become line 1.
+
+    `bool` is an `int` subclass in Python, so `isinstance(True, int)` is True and
+    the obvious integer reader accepts it. A report carrying a boolean where a
+    line number belongs is a wrong-typed field, and a finding pointing at line 1
+    of the file is worse than a rejection: it is a plausible-looking wrong answer
+    on a PR comment. Split out from the table above because it is the one case
+    the natural implementation gets wrong rather than crashing on.
+    """
+    _fake_scanner(
+        tmp_path / "bin",
+        "gitleaks",
+        _write_report_script(
+            "gitleaks", '[{"RuleID": "r", "File": "f", "StartLine": true}]'
+        ),
+        monkeypatch,
+    )
+
+    findings = gitleaks_tool.scan(_dev())
+    _only_error_findings(findings, "gitleaks")
+    assert "boolean" in findings[0].description, (
+        f"the reason must say the field was a boolean, since 'expected an "
+        f"integer' alone reads as a type the reader could have coerced; got "
+        f"{findings[0].description!r}"
+    )
+
+
+def test_the_fan_out_stops_at_the_first_absent_scanner_and_hides_real_faults(
+    monkeypatch, tmp_path
+):
+    """A KNOWN LIMIT, pinned so it cannot regress further or be rediscovered.
+
+    THIS TEST ASSERTS A FAIL-OPEN. It is not describing correct behaviour; it is
+    recording the exact boundary of the plan's central ruling so the limit is
+    visible in the suite rather than living in a review thread.
+
+    WHAT IT DEMONSTRATES
+        `run_all_scanners` is a sequential loop, and the ruling makes an ABSENT
+        binary raise. So the first absent scanner aborts the fan-out and the
+        scanners after it never run. With semgrep absent but gitleaks and trivy
+        INSTALLED AND BROKEN, on a clean diff, measured: `verdict=pass,
+        blocking=0`. Two genuine faults go unreported because the absent raise
+        won the race, and the fixture fallback for a clean diff is `pass`.
+
+    IT IS PRE-EXISTING, not introduced here: measured identical on 40f2e56,
+        before any of this task's changes. It follows directly from
+        raise-on-absent, which is the ruling's design and not this task's choice.
+
+    WHY IT IS NOT FIXED HERE. The fix is a decision above this task: either the
+        fan-out collects per-scanner outcomes instead of letting one raise abort
+        it, or absent stops being signalled by an exception. Both change the
+        frozen `run_all_scanners` seam's behaviour and the meaning of the four
+        fallback-dependent `len(blocking) == 2` assertions, so the coordinator
+        rules on it.
+
+    WHAT WOULD MAKE THE FIRST HALF GO RED: fixing the limit. That is the intended
+        outcome -- when it does, replace the first half with one asserting that
+        both real faults ARE reported. A red there is good news; it is not a
+        regression to be silenced.
+
+    SCANNERS_REQUIRED=true DOES rescue it, and that was worth measuring rather
+        than assuming. I expected the knob to change only what the first failure
+        SAYS, leaving the abort in place -- measured, that is wrong, and the
+        reason is structural: with the knob on, the absent branch of
+        `_run.unrunnable_findings` RETURNS a finding instead of raising, so
+        nothing aborts the loop and all three scanners report. The abort exists
+        only because the knob-off path signals absence with an exception.
+
+        That sharpens what the coordinator has to rule on. The limit is not "the
+        fan-out is sequential"; it is "absence is signalled by an exception, and
+        only when the knob is off". The demo machine and any production image set
+        the knob true, so the configuration that ships is already the one without
+        the limit -- the exposure is CI's binary-free mode and a developer laptop,
+        where a mixed absent/broken environment is most likely to occur.
+    """
+    bin_dir = tmp_path / "bin"
+    for tool in ("gitleaks", "trivy"):
+        _fake_scanner(bin_dir, tool, 'echo "internal error" >&2\nexit 2', monkeypatch)
+    # semgrep is deliberately NOT created here, and the fan-out runs semgrep
+    # FIRST -- see the tuple in agentorg/security/__init__.py.
+    assert not (bin_dir / "semgrep").exists(), "semgrep must be the absent one"
+
+    state = RunState(
+        ticket_id="CLEAN-3",
+        ticket_text="add a harmless constant",
+        plan=PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["x"]),
+        dev=_dev(),
+    )
+
+    result = security_agent.run(state)
+
+    assert result.verdict == "pass", (
+        f"THE KNOWN LIMIT: expected the documented fail-open (semgrep's absent "
+        f"raise aborts the fan-out, the fixture fallback for a clean diff is "
+        f"'pass'), got {result.verdict!r}. If this is red because both real "
+        f"faults are now reported, the limit has been FIXED -- delete this test "
+        f"and assert the fix instead. See this test's docstring."
+    )
+    assert result.blocking == [], (
+        f"the two real faults are expected to be unreported here; got "
+        f"{_summarize(result.blocking)}"
+    )
+
+    # THE SECOND HALF IS THE REMEDY, and it is a real one: with the knob on, the
+    # absent branch RETURNS a finding instead of raising, so nothing aborts the
+    # loop and all three scanners are reported -- the absent one and both real
+    # faults. This is the assertion that identifies the abort as a property of
+    # signalling absence by exception, not of the loop being sequential.
+    monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)
+    required = security_agent.run(state)
+
+    assert required.verdict == "block", (
+        f"SCANNERS_REQUIRED must make the absent scanner block; got "
+        f"{required.verdict!r}"
+    )
+    assert {f.rule for f in required.blocking} == {
+        "semgrep-scanner-error",
+        "gitleaks-scanner-error",
+        "trivy-scanner-error",
+    }, (
+        f"with the knob on, nothing raises, so the fan-out completes and every "
+        f"scanner reports -- the absent one AND the two real faults the knob-off "
+        f"path above loses. Got {_summarize(required.blocking)}. If this names "
+        f"only semgrep, the absent branch has started raising again even under "
+        f"the knob, which reintroduces the abort in the configuration the demo "
+        f"machine runs."
     )

@@ -168,6 +168,150 @@ def error_finding(tool: ScannerTool, reason: str) -> Finding:
     )
 
 
+class ReportShapeError(Exception):
+    """A scanner report parsed, but a field the wrapper reads has the wrong type.
+
+    Raised by the `report_*` readers below and caught by each wrapper's parse
+    loop, which converts it to a blocking `error_finding`. A dedicated exception
+    rather than a sentinel return, because the loops dereference these values
+    immediately: a sentinel would have to be checked at every one of the eleven
+    call sites, and the one site that forgot would crash exactly as before.
+
+    NOT a subclass of ValueError or TypeError. The wrappers must catch THIS and
+    not the crash it replaces, or a genuine bug in the mapping code would be
+    silently reported as a scanner fault -- which is the fail-CLOSED direction,
+    but it would also make a real defect look like someone else's broken binary.
+    """
+
+
+def report_text(container: dict, key: str, default: str) -> str:
+    """Read a string field from a scanner report, or reject the report.
+
+    WHY THE TOP-LEVEL SHAPE GUARDS ARE NOT ENOUGH -- MEASURED, 9 of 9 cases.
+    Each wrapper checks that its report is a list-of-objects (gitleaks) or an
+    object whose results key is a list-of-objects (semgrep, trivy). Every one of
+    those guards passes for a report whose INNER fields are wrong-typed, and the
+    parse loop then crashes on the dereference:
+
+      | report                                      | crash                     |
+      |---------------------------------------------|---------------------------|
+      | gitleaks StartLine: "not-an-int"            | ValueError                |
+      | gitleaks File: {...}                        | TypeError in os.path      |
+      | gitleaks RuleID: [...]                      | pydantic ValidationError  |
+      | gitleaks Description: {...}                 | pydantic ValidationError  |
+      | semgrep extra: "not-a-dict"                 | AttributeError            |
+      | semgrep start: "not-a-dict"                 | AttributeError            |
+      | semgrep start.line: "x"                     | ValueError                |
+      | trivy Vulnerabilities: ["not-an-object"]    | AttributeError            |
+      | trivy Severity: {...}                       | AttributeError in .upper  |
+
+    END TO END that is a FAIL-OPEN, which is why this is not merely tidiness. On
+    a CLEAN diff with all three scanners installed and all three emitting
+    wrong-typed inner fields, `security.run` measured `verdict=pass, blocking=0`:
+    the exception escapes the wrapper, agents/security.py catches it and falls
+    back to the fixture verdict, and the fixture verdict for a clean diff is
+    "pass". A change was promoted although no scanner output was ever read --
+    the same shape this module exists to close, one level deeper than the
+    top-level guards reach.
+
+    MITIGATING, and it is why this is a guard rather than an emergency: real
+    gitleaks 8.21.2 and semgrep 1.172.0 reports are well-typed at every level
+    (measured: StartLine int, File str, extra dict, start.line int, and no
+    result missing `extra`). So reaching this needs an already-misbehaving
+    scanner -- which is precisely the case the rest of this module assumes.
+
+    A MISSING key is not a fault: every call site passes the default the wrapper
+    used before, and a report legitimately omits optional fields. Only a key
+    that is PRESENT with an unusable type is rejected. `None` is treated as
+    absent for the same reason -- JSON `null` is how these tools spell "no
+    value".
+    """
+    value = container.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ReportShapeError(
+            f"field {key!r} was {type(value).__name__}, expected a string"
+        )
+    return value
+
+
+def report_int(container: dict, key: str, default: int) -> int:
+    """Read an integer field from a scanner report, or reject the report.
+
+    Accepts a JSON number, and a string of digits because gitleaks has shipped
+    both for `StartLine` across versions -- `int("12")` is what the wrapper did
+    before and that behaviour is preserved. Rejects anything else, including a
+    non-numeric string, which used to raise ValueError from inside the loop.
+
+    `bool` is excluded deliberately: it is an `int` subclass in Python, so
+    `isinstance(True, int)` is True and a report carrying `"StartLine": true`
+    would silently become line 1. That is a wrong-typed field, not a line
+    number.
+    """
+    value = container.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise ReportShapeError(f"field {key!r} was a boolean, expected an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ReportShapeError(
+                f"field {key!r} was the non-numeric string {value!r}, "
+                f"expected an integer"
+            ) from exc
+    raise ReportShapeError(
+        f"field {key!r} was {type(value).__name__}, expected an integer"
+    )
+
+
+def report_mapping(container: dict, key: str) -> dict:
+    """Read a nested object from a scanner report, or reject the report.
+
+    semgrep's `extra` and `start` are read this way. Before this, `extra: "x"`
+    made `extra.get(...)` raise AttributeError -- the single most likely of the
+    nine measured cases, because `extra` is where semgrep puts severity and
+    message and a truncated or streamed report can plausibly mangle it.
+    """
+    value = container.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ReportShapeError(
+            f"field {key!r} was {type(value).__name__}, expected an object"
+        )
+    return value
+
+
+def report_objects(container: dict, key: str) -> list[dict]:
+    """Read a list-of-objects field from a scanner report, or reject the report.
+
+    trivy's `Vulnerabilities` is read this way: a list containing a bare string
+    made `vulnerability.get(...)` raise AttributeError. Checks every element
+    rather than just the type of the list, because a report that is mostly
+    well-formed with one bad entry is the realistic shape and is exactly the one
+    a spot check misses.
+    """
+    value = container.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ReportShapeError(
+            f"field {key!r} was {type(value).__name__}, expected a list"
+        )
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ReportShapeError(
+                f"field {key!r}[{index}] was {type(item).__name__}, "
+                f"expected an object"
+            )
+    return value
+
+
 def _note(observed: list[FailureKind] | None, kind: FailureKind) -> None:
     """Record what a failure looked like, for run_scanner. Never raises."""
     if observed is not None:
@@ -225,8 +369,10 @@ def classify_failure(
 
     Defaults to "fault" when uncertain. That direction is deliberate: guessing
     "fault" on a genuinely absent binary makes CI noisy and is caught by the
-    five `len(blocking) == 2` assertions immediately, whereas guessing "absent"
-    on a real fault fails OPEN and is caught by nothing.
+    four fallback-dependent `len(blocking) == 2` assertions immediately (of eight
+    such assertions in the suite -- see config.SCANNERS_REQUIRED for both
+    measured counts), whereas guessing "absent" on a real fault fails OPEN and is
+    caught by nothing.
     """
     if kind_hint == "fault":
         return "fault"
@@ -284,8 +430,9 @@ def unrunnable_findings(
       * `kind == "absent"` with `SCANNERS_REQUIRED` false -> RAISES, which is the
         pre-existing behaviour this must not change. agents/security.py catches
         it and falls back to the FIXTURE verdict, which still blocks the poisoned
-        diff on its two AWS-key findings, and six assertions across the suite
-        read `len(blocking) == 2` on the strength of that.
+        diff on its two AWS-key findings. Eight assertions across the suite read
+        `len(blocking) == 2`, four of them dependent on this path -- both counts
+        measured; see config.SCANNERS_REQUIRED, which carries the site list.
       * `kind == "absent"` with `SCANNERS_REQUIRED` true -> a blocking finding.
         The knob promotes absent to fault for the demo machine and production
         images, where an uninstalled scanner is a real defect.
