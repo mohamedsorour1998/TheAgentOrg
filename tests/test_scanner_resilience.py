@@ -32,15 +32,23 @@ import pytest
 from pydantic import ValidationError
 
 from agentorg import fixtures_loader
+from agentorg.agents import security as security_agent
 from agentorg.common import config
-from agentorg.security import trivy_tool
+from agentorg.security import gitleaks_tool, run_all_scanners, semgrep_tool, trivy_tool
 from agentorg.security._run import (
     classify_failure,
     error_finding,
     run_scanner,
     safe_run,
+    unrunnable_findings,
 )
-from agentorg.state import SEVERITY_ORDER, DevResult, compute_security_verdict
+from agentorg.state import (
+    SEVERITY_ORDER,
+    DevResult,
+    PlanResult,
+    RunState,
+    compute_security_verdict,
+)
 
 # A diff that ADDS a dependency manifest pinning two long-known-vulnerable
 # releases. Added lines only, because that is all the materialiser in
@@ -535,7 +543,7 @@ def test_safe_run_survives_malformed_argv_so_the_broad_clause_cannot_be_deleted(
         )
 
 
-def test_run_scanner_tells_a_wrapper_absent_from_broken():
+def test_run_scanner_tells_a_wrapper_absent_from_broken(tmp_path):
     """The absent-vs-fault call Task 3 must make, and the trap in making it.
 
     THE RULING THIS SERVES
@@ -560,7 +568,11 @@ def test_run_scanner_tells_a_wrapper_absent_from_broken():
         real mechanism, and a mock of `which` would pin the test to the
         implementation it is supposed to be checking.
     """
-    scratch = Path(tempfile.mkdtemp(prefix="agentorg-faultprobe-"))
+    # tmp_path, not tempfile.mkdtemp: pytest removes it. The first version of
+    # this test used mkdtemp with no rmtree, which left one
+    # agentorg-faultprobe-* tree in the system temp dir per `pytest` run --
+    # measured at 91 of them (plus 91 agentorg-hintless-*) before this fix.
+    scratch = tmp_path
 
     noexec = scratch / "scanner-without-x-bit"
     noexec.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
@@ -704,7 +716,7 @@ def test_error_finding_rejects_a_tool_name_the_finding_model_will_not_accept():
         )
 
 
-def test_classify_failure_without_a_hint_degrades_exactly_where_documented():
+def test_classify_failure_without_a_hint_degrades_exactly_where_documented(tmp_path):
     """The hintless path, pinned row by row -- including where it is UNSAFE.
 
     WHY A TEST FOR A DEGRADED PATH, RATHER THAN JUST A WARNING NOT TO USE IT
@@ -735,7 +747,7 @@ def test_classify_failure_without_a_hint_degrades_exactly_where_documented():
     test reaches it through `run_scanner`. Both entry points matter, because the
     one being documented as unsafe is the one still callable.
     """
-    scratch = Path(tempfile.mkdtemp(prefix="agentorg-hintless-"))
+    scratch = tmp_path  # pytest-managed; see the note in the test above
 
     noexec = scratch / "scanner-without-x-bit"
     noexec.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
@@ -824,3 +836,680 @@ def test_classify_failure_without_a_hint_degrades_exactly_where_documented():
             f"answers agree on every row, the hint is buying nothing and the "
             f"conjunction has been broken."
         )
+
+
+# ==========================================================================
+# Task 3 -- the three wrappers, wrapped
+#
+# THE PROPERTY EVERY TEST BELOW IS AFTER, in one sentence: no scanner fault may
+# reach `compute_security_verdict` as an empty findings list, because
+# `compute_security_verdict([])` returns `("pass", [])`. Four separate fixes in
+# this repository have been that same bug.
+#
+# HOW THE FAULTS ARE BUILT, AND WHY NOT WITH MOCKS
+#     Each test below puts a REAL executable named `gitleaks` / `semgrep` /
+#     `trivy` on PATH -- a shell script that exits non-zero, or writes garbage,
+#     or writes nothing -- and lets the wrapper shell out to it for real. So what
+#     is exercised is `subprocess`, PATH resolution, exit codes and report files:
+#     the same machinery the demo machine runs.
+#
+#     Patching `_run.run_scanner` instead would be shorter and would pin much
+#     less -- that asserts the wrapper handles a `None` it was HANDED, not that a
+#     broken binary produces one. Two of the five fault modes in
+#     `_run.classify_failure`'s measured table exist precisely because the real
+#     mechanism disagrees with the obvious model of it.
+#
+# WHY PATH IS SET WITH monkeypatch.setenv
+#     It is undone at teardown. Mutating os.environ directly would leak a fake
+#     scanner directory into every test that runs after, and those directories
+#     are deleted with tmp_path -- so a later test would resolve `gitleaks` to a
+#     path that no longer exists and fail somewhere else entirely.
+# ==========================================================================
+
+# The wrapper under test, keyed by the binary name it shells out to. Iterated so
+# each fault is pinned PER TOOL rather than once for whichever wrapper happens to
+# be first: the three files are near-identical today, which is exactly the
+# condition under which one of them silently drifts.
+WRAPPERS = {
+    "gitleaks": gitleaks_tool,
+    "semgrep": semgrep_tool,
+    "trivy": trivy_tool,
+}
+
+# The report filename each wrapper tells its scanner to write. The fake scanners
+# below need it to write a report -- or to deliberately not write one -- at the
+# path the wrapper will then look for.
+REPORT_NAMES = {
+    "gitleaks": "gitleaks-report.json",
+    "semgrep": "semgrep-report.json",
+    "trivy": "trivy-report.json",
+}
+
+# A diff with nothing interesting in it. These tests are about fault handling,
+# not detection, and a fake scanner ignores the content anyway -- but the
+# materialiser must have something to write, or a change to it would surface
+# here as a confusing red.
+_HARMLESS_DIFF = "--- /dev/null\n+++ b/app/noop.py\n@@ -0,0 +1 @@\n+VALUE = 1\n"
+
+
+def _dev() -> DevResult:
+    return DevResult(
+        branch="feat/x",
+        diff=_HARMLESS_DIFF,
+        summary="s",
+        files_changed=["app/noop.py"],
+    )
+
+
+def _fake_scanner(bin_dir: Path, tool: str, script: str, monkeypatch) -> None:
+    """Put an executable named `tool` on PATH whose body is `script`.
+
+    PATH is REPLACED, not prepended, so the real binary cannot answer if the fake
+    is somehow not found. On a machine with the scanners installed -- CI's `scan`
+    job, a demo laptop -- a prepend that failed would silently run the real
+    scanner and the test would pass while pinning nothing. It also matters
+    directly to
+    test_a_scanner_whose_x_bit_is_gone_blocks_rather_than_looking_absent, whose
+    whole subject is what PATH resolution does with an unrunnable file.
+
+    SO `script` MAY USE ONLY SHELL BUILTINS AND ABSOLUTE PATHS. Nothing external
+    resolves -- there is no `cat`, no `sleep`, no `printf(1)`. This is not a
+    style note; it silently faked results here twice, and neither failure looked
+    like one:
+
+      * `cat > "$arg" <<EOF` -- the shell performs the REDIRECTION before it
+        tries to execute `cat`, so the report file is created EMPTY and then
+        `cat: not found`. The wrapper reads an empty file, raises
+        JSONDecodeError, and returns a scanner-error -- so three parametrized
+        batches asserting "a malformed report blocks" and "a wrong-shaped report
+        blocks" passed while every one of them was actually testing the
+        empty-file parse error. Caught by
+        test_a_working_scanner_is_not_reported_as_a_fault, which is the only test
+        here that expects NO finding.
+      * `sleep 30` -- not found, so the script exits 127 immediately. The wrapper
+        sees an unexpected exit code and returns a scanner-error, so the timeout
+        test passed without a timeout ever occurring.
+
+    Both now assert on WHICH fault they got, not merely that they got one.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    path = bin_dir / tool
+    path.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+    path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+
+def _write_report_script(tool: str, body: str) -> str:
+    """A /bin/sh scanner that writes `body` to whichever argv is its report path.
+
+    Walks argv for the report filename rather than hardcoding a position, because
+    that is what the wrapper actually passed: a wrapper that reordered its flags
+    is still honoured, and one that stopped asking for a report at all makes these
+    tests fail loudly instead of silently.
+
+    `echo` because it is a shell BUILTIN -- see _fake_scanner on why nothing
+    external resolves here, and on the empty report files a `cat` heredoc left
+    behind. Every body below is one line and free of single quotes, which is what
+    lets the single-quoted form be exact.
+    """
+    return (
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        f"    *{REPORT_NAMES[tool]}) echo '{body}' > \"$arg\" ;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 0"
+    )
+
+
+def _only_error_findings(findings: list, tool: str) -> None:
+    """Assert `findings` is exactly one BLOCKING scanner-error for `tool`."""
+    assert findings, (
+        f"{tool}: a fault produced an EMPTY findings list. "
+        f"compute_security_verdict([]) returns ('pass', []), so this is the "
+        f"silent-pass bug -- the gate reports clean precisely because it did "
+        f"not run. It must return [error_finding(...)] instead."
+    )
+    assert len(findings) == 1, (
+        f"{tool}: expected exactly one scanner-error finding, got "
+        f"{_summarize(findings)}"
+    )
+    finding = findings[0]
+    assert finding.tool == tool, (
+        f"the error finding must name the tool that failed; got {finding.tool!r}"
+    )
+    assert finding.rule == f"{tool}-scanner-error", (
+        f"{tool}: expected rule {tool}-scanner-error, got {finding.rule!r}"
+    )
+
+    verdict, blocking = compute_security_verdict(
+        findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+    )
+    assert verdict == "block", (
+        f"{tool}: a fault must BLOCK at threshold "
+        f"{config.SECURITY_BLOCK_THRESHOLD!r}; got {verdict!r} from "
+        f"{_summarize(findings)}. This is what makes the fault fail CLOSED -- "
+        f"the finding existing is not enough if its severity does not reach the "
+        f"threshold."
+    )
+    assert blocking == findings, (
+        f"{tool}: the error finding must be in the blocking list, since that is "
+        f"what the PR comment and the projector name as the reason"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_a_scanner_that_exits_nonzero_blocks_instead_of_raising(
+    tool, monkeypatch, tmp_path
+):
+    """A present binary failing with an unexpected exit code must BLOCK.
+
+    Exit codes 0 and 1 are all three scanners SPEAKING -- gitleaks exits 1 when
+    it finds secrets, semgrep exits 1 when it finds matches -- so this uses 2,
+    which every wrapper already treated as a failure.
+
+    WHAT CHANGED, AND WHY THE OLD BEHAVIOUR WAS NOT GOOD ENOUGH
+        Before Task 3 this raised RuntimeError, agents/security.py caught it and
+        returned the FIXTURE verdict. That is right when no binary is installed
+        and wrong when one is: the fixture describes the DEMO diff, so a real
+        change scanned by a broken scanner would be judged on findings from a
+        different diff entirely -- blocked when the fixture blocks, promoted when
+        it passes, either way not scanned. Now the fault is a finding about the
+        fault itself.
+    """
+    _fake_scanner(
+        tmp_path / "bin",
+        tool,
+        'echo "boom: the database is locked" >&2\nexit 2',
+        monkeypatch,
+    )
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+    assert "2" in findings[0].description, (
+        f"the exit code must survive into the description -- it is what tells an "
+        f"operator which failure this was. Got {findings[0].description!r}"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_a_scanner_that_writes_no_report_blocks_instead_of_raising(
+    tool, monkeypatch, tmp_path
+):
+    """Exit 0 and no report file is a fault: the change went UNSCANNED.
+
+    This is the fault mode closest to the silent-pass bug, because it looks like
+    success from outside. The binary exists, it ran, it exited 0 -- and there is
+    nothing to parse. A wrapper answering `[]` here would report a clean scan for
+    a change no scanner ever read.
+
+    NOT THE SAME CASE AS AN ABSENT BINARY, and the plan's brief draws that line
+    by name: a missing report is a fault when the binary RAN, and is NOT a fault
+    when it never ran. The absent path is pinned by
+    test_an_absent_binary_still_raises_so_ci_keeps_the_fixture_fallback.
+    """
+    _fake_scanner(tmp_path / "bin", tool, "exit 0", monkeypatch)
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_a_scanner_that_writes_malformed_json_blocks_instead_of_raising(
+    tool, monkeypatch, tmp_path
+):
+    """A report that is not JSON at all is a fault, per tool."""
+    _fake_scanner(
+        tmp_path / "bin",
+        tool,
+        _write_report_script(tool, "this is not json at all"),
+        monkeypatch,
+    )
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+    assert "not valid JSON" in findings[0].description, (
+        f"the description must say the report was unparseable, and say it in "
+        f"those words -- distinguishing this from the missing-report and "
+        f"wrong-shape faults, which are different bugs to chase. Got "
+        f"{findings[0].description!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool, wrong_shape",
+    [
+        # gitleaks' report is a LIST of leak objects; semgrep's and trivy's are
+        # OBJECTS. Each case below is valid JSON of a shape the wrapper's parse
+        # cannot survive: `for leak in "str"` iterates CHARACTERS and `data.get`
+        # raises AttributeError on a list -- an exception on the fault path,
+        # where a blocking finding belongs.
+        ("gitleaks", '{"Results": []}'),
+        ("gitleaks", '"a bare string"'),
+        ("gitleaks", '["not an object"]'),
+        ("semgrep", "[1, 2, 3]"),
+        ("semgrep", '{"results": "not a list"}'),
+        ("trivy", "[1, 2, 3]"),
+        ("trivy", '{"Results": "not a list"}'),
+    ],
+)
+def test_a_report_of_the_wrong_json_shape_blocks_rather_than_crashing(
+    tool, wrong_shape, monkeypatch, tmp_path
+):
+    """Parseable JSON of the wrong SHAPE must block, not raise mid-parse.
+
+    Distinct from the malformed-JSON test above: `json.loads` SUCCEEDS here, so
+    the try/except around it never fires and the wrapper walks into its own parse
+    loop holding a value of the wrong type. Measured against the pre-Task-3 code:
+    gitleaks' loop raised AttributeError on a bare string, and semgrep's and
+    trivy's raised AttributeError on a list. Neither is a JSONDecodeError, so
+    both escaped as an exception rather than becoming a blocking finding.
+    """
+    _fake_scanner(
+        tmp_path / "bin",
+        tool,
+        _write_report_script(tool, wrong_shape),
+        monkeypatch,
+    )
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+
+    # The report here PARSES. So a reason naming a parse error or a missing file
+    # means the fake never wrote what this test thinks it wrote, and the shape
+    # guard was never reached -- which is exactly how an earlier version of this
+    # harness passed while testing nothing. See _fake_scanner.
+    assert "not valid JSON" not in findings[0].description, (
+        f"this report is VALID JSON of the wrong shape, so a parse error means "
+        f"the fake scanner wrote an empty file and the shape guard was never "
+        f"exercised. Got {findings[0].description!r}"
+    )
+    assert "no report" not in findings[0].description, (
+        f"the fake scanner did not write its report where the wrapper asked, so "
+        f"this test is not pinning the shape guard. Got "
+        f"{findings[0].description!r}"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_a_scanner_that_hangs_blocks_instead_of_waiting_forever(
+    tool, monkeypatch, tmp_path
+):
+    """A hung scanner is a fault, and the wrapper must not wait for it.
+
+    The timeout is patched to 1s against a 30s sleep -- a margin no loaded
+    machine can close -- so the test costs about a second. `config` is patched
+    through the MODULE attribute because that is how each wrapper reads it; a
+    wrapper written `from ..common.config import SCANNER_TIMEOUT_SECONDS` would
+    bind the value at import and silently ignore this, the same trap
+    tests/conftest.py documents for LLM_DISABLED.
+
+    On a projector this is the fault that matters most: with no timeout the
+    pipeline waits at the gate forever, produces no verdict at all, and looks
+    like a freeze rather than a block.
+    """
+    monkeypatch.setattr(config, "SCANNER_TIMEOUT_SECONDS", 1)
+    # /bin/sleep by ABSOLUTE path: PATH is replaced with the fake's directory, so
+    # a bare `sleep` is not found and the script exits 127 instantly -- which is
+    # also a fault, so this test passed without ever timing out. See
+    # _fake_scanner.
+    _fake_scanner(tmp_path / "bin", tool, "/bin/sleep 30", monkeypatch)
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+
+    # WHICH fault, not merely that there was one. An exit code in the reason
+    # means the command RAN and returned -- so it did not hang, and this test
+    # would be pinning something else entirely.
+    assert "exit code" not in findings[0].description, (
+        f"a timeout must not be reported as an exit code -- if it is, the fake "
+        f"scanner returned instead of hanging and this test proves nothing. Got "
+        f"{findings[0].description!r}"
+    )
+    assert "timeout" in findings[0].description, (
+        f"the reason must name the timeout, since that is what an operator has "
+        f"to act on; got {findings[0].description!r}"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_a_scanner_whose_x_bit_is_gone_blocks_rather_than_looking_absent(
+    tool, monkeypatch, tmp_path
+):
+    """Installed-but-unrunnable is a FAULT, and this is the row that fails open.
+
+    `shutil.which` reports this file as absent, because `which` requires the
+    executable bit it is being asked about -- so a wrapper discriminating on the
+    filesystem alone would take the fixture-fallback path for a scanner that IS
+    installed and IS broken. Under SCANNERS_REQUIRED=true that inverts the knob's
+    entire purpose. The plan's ruling names this case ("a lost +x bit, a noexec
+    mount") and `_run.classify_failure`'s measured table lists it as one of the
+    two documented leaks of the hintless path.
+
+    Built with chmod rather than by mocking `which`, because the real mechanism
+    is the thing the two candidate discriminators disagree about.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    path = bin_dir / tool
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o644)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_an_absent_binary_still_raises_so_ci_keeps_the_fixture_fallback(
+    tool, monkeypatch, tmp_path
+):
+    """The RULING's other half: absent is an affordance, not a fault.
+
+    A binary that is simply not installed must keep the shipped behaviour --
+    raise, so agents/security.py falls back to the fixture verdict. That is what
+    lets CI's `test` job run with no scanners and still see the poisoned diff's
+    two AWS-key findings, which six assertions across the suite read as
+    `len(blocking) == 2`.
+
+    THE RAISE IS THE ASSERTION, and it is not a stylistic choice: the
+    alternative -- returning `[]` -- is the silent-pass shape. A wrapper that
+    returned `[]` for an absent binary would make the fan-out report a clean scan
+    on a machine with no scanners at all. Pinned again from the fan-out's side by
+    test_absent_never_yields_an_empty_findings_list_from_a_wrapper.
+
+    PATH is emptied rather than left alone, so this test means the same thing in
+    both scanner modes. Without that it would pass vacuously in CI's `test` job
+    (nothing installed) and fail on the `scan` job and any demo laptop.
+    """
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        WRAPPERS[tool].scan(_dev())
+
+    assert tool in str(excinfo.value), (
+        f"the raise must name the scanner that is missing, so the WARNING line "
+        f"in agents/security.py says which one; got {str(excinfo.value)!r}"
+    )
+    assert "SCANNERS_REQUIRED" in str(excinfo.value), (
+        "the message must name the knob that turns this into a blocking "
+        "finding, since that is the whole remedy an operator has"
+    )
+
+
+@pytest.mark.parametrize("tool", sorted(WRAPPERS))
+def test_scanners_required_promotes_an_absent_binary_to_a_blocking_fault(
+    tool, monkeypatch, tmp_path
+):
+    """With the knob set, a missing scanner blocks loudly instead of borrowing a fixture.
+
+    This is the demo-machine and production configuration. Without the knob the
+    fan-out quietly reports the fixture's verdict for a change no scanner read;
+    with it, "trivy is not installed" becomes a blocking finding that says so.
+
+    Patched with monkeypatch.setattr on the config MODULE, which is both how the
+    suite flips OFFLINE and LLM_DISABLED and the only thing that works here: the
+    module-level `os.environ.get` in config.py has already run by the time any
+    test starts, so `setenv("SCANNERS_REQUIRED", "true")` would do nothing.
+    """
+    monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    findings = WRAPPERS[tool].scan(_dev())
+    _only_error_findings(findings, tool)
+    assert "SCANNERS_REQUIRED" in findings[0].description, (
+        f"the description must say the knob is what made this a fault, so the "
+        f"finding is not mistaken for a broken install; got "
+        f"{findings[0].description!r}"
+    )
+
+
+def test_a_working_scanner_is_not_reported_as_a_fault(monkeypatch, tmp_path):
+    """The negative control, and it is load-bearing for the demo's promote path.
+
+    Without it every test above passes on a wrapper that returns a scanner-error
+    unconditionally -- which fails closed, blocks the CLEAN fixture too, and
+    takes the promote half of the demo down.
+
+    Each fake writes an EMPTY but well-formed report in its own tool's shape, so
+    the wrapper parses it and finds nothing. Zero findings is the correct answer
+    here and is what a clean scan looks like; the point is that it is reached by
+    parsing rather than by failing.
+    """
+    empty_reports = {
+        "gitleaks": "[]",
+        "semgrep": '{"results": []}',
+        "trivy": '{"Results": []}',
+    }
+
+    for tool, module in sorted(WRAPPERS.items()):
+        _fake_scanner(
+            tmp_path / f"bin-{tool}",
+            tool,
+            _write_report_script(tool, empty_reports[tool]),
+            monkeypatch,
+        )
+
+        findings = module.scan(_dev())
+        assert findings == [], (
+            f"{tool}: a scanner that ran and reported nothing must yield NO "
+            f"findings, not a scanner-error. Got {_summarize(findings)} -- a "
+            f"wrapper that faults on success blocks the clean fixture and takes "
+            f"the demo's promote path down."
+        )
+
+
+def test_absent_never_yields_an_empty_findings_list_from_a_wrapper(
+    monkeypatch, tmp_path
+):
+    """The fan-out's own view of the ruling, both ways round the knob.
+
+    Pinned from `run_all_scanners` rather than from a single wrapper, because
+    that is the frozen seam agents/security.py calls and the level at which "the
+    scanners found nothing" is indistinguishable from "the scanners did not run".
+    The two outcomes below are the only two allowed with no binaries on PATH, and
+    `[]` is neither of them:
+
+      * knob off -> RAISES. security.run catches it and uses the fixture
+        verdict, which still blocks a diff carrying an AWS key.
+      * knob on  -> three blocking findings, one per tool, and a `block` verdict.
+
+    THE LAST ASSERTION IS THE ONE THAT MATTERS: with the knob on, all THREE tools
+    must be named. A fan-out that stopped at the first fault would report one,
+    and "gitleaks is missing" on a machine where all three are missing
+    understates the problem -- it would hide the second and third faults behind
+    the first fix.
+    """
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+
+    with pytest.raises(FileNotFoundError):
+        run_all_scanners(_dev())
+
+    monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)
+    findings = run_all_scanners(_dev())
+
+    assert findings != [], (
+        "run_all_scanners returned [] with SCANNERS_REQUIRED set and no "
+        "binaries installed. compute_security_verdict([]) returns ('pass', []), "
+        "so this is the silent pass: a change promoted by a gate that never ran."
+    )
+    verdict, blocking = compute_security_verdict(
+        findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+    )
+    assert verdict == "block", (
+        f"three unrunnable scanners must block; got {verdict!r} from "
+        f"{_summarize(findings)}"
+    )
+    assert {f.tool for f in blocking} == {"gitleaks", "semgrep", "trivy"}, (
+        f"every failed scanner must be named, not just the first: a fan-out that "
+        f"short-circuits hides the second and third faults behind the first fix. "
+        f"Got {_summarize(blocking)}"
+    )
+
+
+def test_the_security_agent_blocks_on_a_faulting_scanner_without_the_fixture(
+    monkeypatch, tmp_path
+):
+    """End to end through the agent: a fault blocks on ITS OWN finding.
+
+    Everything above tests wrappers. This tests the consequence, and it is the
+    claim the demo makes: `security.run` on a change scanned by broken scanners
+    reports `block` with scanner-errors in `blocking` -- NOT the fixture's two
+    AWS-key findings, which describe a different diff.
+
+    THE DIFF HERE IS DELIBERATELY CLEAN, and that is what makes the assertion
+    sharp. The fixture fallback for a clean diff is `pass`, so a fault that
+    reached it would be indistinguishable from a successful scan. Measured
+    against the pre-Task-3 code, this exact scenario: verdict `pass`, blocking
+    `[]` -- a change promoted by three scanners that all failed.
+    """
+    for tool in WRAPPERS:
+        _fake_scanner(
+            tmp_path / "bin",
+            tool,
+            'echo "internal error" >&2\nexit 2',
+            monkeypatch,
+        )
+
+    state = RunState(
+        ticket_id="CLEAN-1",
+        ticket_text="add a harmless constant",
+        plan=PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["x"]),
+        dev=_dev(),
+    )
+
+    result = security_agent.run(state)
+
+    assert result.verdict == "block", (
+        f"a clean diff scanned by three broken scanners must BLOCK -- the gate "
+        f"did not run, so it cannot report clean. Got {result.verdict!r} with "
+        f"{_summarize(result.findings)}. A 'pass' here is the silent-pass bug "
+        f"exactly: the fixture fallback for a clean diff is 'pass'."
+    )
+    assert {f.rule for f in result.blocking} == {
+        "gitleaks-scanner-error",
+        "semgrep-scanner-error",
+        "trivy-scanner-error",
+    }, (
+        f"the block must be on the scanner faults themselves, not on fixture "
+        f"findings about the demo diff. Got {_summarize(result.blocking)}"
+    )
+    assert result.explanation, "a blocked run must always explain itself"
+
+
+def test_semgrep_treats_a_missing_rules_file_as_a_fault_not_an_absent_scanner(
+    monkeypatch, tmp_path
+):
+    """semgrep's own rules file is packaged with it, so its absence is a FAULT.
+
+    The distinction is easy to get backwards, and getting it backwards fails
+    OPEN. `semgrep_rules.yml` ships inside `agentorg/security/`, so if it is gone
+    the install or the build is broken -- semgrep itself may be perfectly present
+    and healthy. Before Task 3 this raised FileNotFoundError, which is the SAME
+    exception the no-binary case raises, so agents/security.py could not tell
+    them apart and answered both with the fixture verdict. On a machine that HAS
+    semgrep, that means the gate reports the demo diff's verdict for whatever
+    change is actually being scanned.
+
+    Only this one wrapper has a config file to lose, which is why it gets a test
+    the other two do not.
+
+    A working fake semgrep is put on PATH -- one that writes an empty report and
+    exits 0 -- so this cannot pass by accident on a machine with no binaries: the
+    fault has to come from the rules check and nothing else.
+    """
+    _fake_scanner(
+        tmp_path / "bin",
+        "semgrep",
+        _write_report_script("semgrep", '{"results": []}'),
+        monkeypatch,
+    )
+    # Patched on the Path class the wrapper imported, narrowed to the rules file
+    # by name so the report's own .exists() check still answers truthfully --
+    # otherwise this would pin the missing-report fault instead.
+    real_exists = Path.exists
+    monkeypatch.setattr(
+        semgrep_tool.Path,
+        "exists",
+        lambda self, *a, **kw: (
+            False if self.name == "semgrep_rules.yml" else real_exists(self, *a, **kw)
+        ),
+    )
+
+    findings = semgrep_tool.scan(_dev())
+    _only_error_findings(findings, "semgrep")
+    assert "rules file" in findings[0].description, (
+        f"the description must name the rules file, because a broken package is "
+        f"a different fix from a broken binary; got {findings[0].description!r}"
+    )
+
+
+def test_unrunnable_findings_has_no_third_outcome(monkeypatch):
+    """The shared helper: never `[]`, on any input. Pinned directly.
+
+    All three wrappers delegate the ruling here, so this is the one place the
+    absent-vs-fault fork exists -- and the one place a regression changes all
+    three wrappers at once. `[]` is unreachable by construction, because the
+    absent branch raises; this asserts the construction rather than the prose
+    claiming it.
+
+    `kind=None` is included because that is what `run_scanner` returns when the
+    command RAN. A wrapper reaching here with it has confused a bad exit code for
+    a failure to launch, and "fault" is the safe reading -- the other direction
+    fails open.
+    """
+    for kind in ("fault", None):
+        findings = unrunnable_findings("trivy", kind, "reason")
+        assert len(findings) == 1 and findings[0].severity == "high", (
+            f"kind={kind!r} must yield exactly one high finding; got "
+            f"{_summarize(findings)}"
+        )
+
+    with pytest.raises(FileNotFoundError):
+        unrunnable_findings("trivy", "absent", "reason")
+
+    monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)
+    promoted = unrunnable_findings("trivy", "absent", "reason")
+    assert len(promoted) == 1 and promoted[0].severity == "high", (
+        f"SCANNERS_REQUIRED must promote absent to a blocking finding; got "
+        f"{_summarize(promoted)}"
+    )
+
+
+def test_the_wrappers_shell_out_through_the_subprocess_module_attribute():
+    """scripts/scan_gate.py's binary spy must keep working. Pinned here, in pytest.
+
+    The gate proves all three scanners actually executed by REPLACING
+    `subprocess.run` on the module object and recording every argv[0]. That works
+    only while the call goes through the attribute at call time. A refactor to
+    `from subprocess import run` -- in `_run.py` now, since that is where the
+    single call site lives -- would bind the function at import and make the spy
+    blind: the gate would report `binaries executed: []`.
+
+    Asserted here because the gate runs only in CI's `scan` job with all three
+    binaries installed, so a laptop and CI's `test` job would otherwise learn
+    about this at the worst possible moment. This test needs no binaries: it
+    patches the attribute and checks the patch is SEEN.
+    """
+    seen: list[str] = []
+    real_run = subprocess.run
+
+    def spy(args, *rest, **kwargs):
+        if isinstance(args, list | tuple) and args:
+            seen.append(str(args[0]))
+        return real_run(args, *rest, **kwargs)
+
+    subprocess.run = spy
+    try:
+        # Through safe_run, the one place any wrapper shells out from.
+        safe_run([sys.executable, "-c", "pass"], timeout=5)
+    finally:
+        subprocess.run = real_run
+
+    assert seen == [sys.executable], (
+        f"replacing subprocess.run on the module object must be visible to "
+        f"_run.safe_run, because that is how scripts/scan_gate.py proves all "
+        f"three binaries executed. Saw {seen!r}. If this is empty, something now "
+        f"holds a direct reference to the function (`from subprocess import "
+        f"run`) and the gate's spy is blind."
+    )

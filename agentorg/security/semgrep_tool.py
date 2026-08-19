@@ -7,15 +7,25 @@ WHAT TO BUILD:
     2. Run semgrep with our rules and JSON output.
     3. Map each result to a Finding.
     4. Map Semgrep severity -> our Severity.
+
+EVERY FAILURE PATH HERE IS FAIL-CLOSED, AND ONE IS NOT
+    `compute_security_verdict([])` returns `("pass", [])`, so this wrapper may
+    never answer a broken scanner with an empty list. Each failure below returns
+    `[error_finding("semgrep", ...)]`, which is `high`, which is the block
+    threshold. The one exception is a binary that is merely ABSENT: per the
+    plan's central ruling that is a development and CI affordance, so it raises
+    and agents/security.py falls back to the fixture verdict. The whole
+    absent-vs-fault decision lives in `_run.unrunnable_findings`.
 """
 
 import json
-import subprocess
 import tempfile
 from pathlib import Path
 
+from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
+from ._run import error_finding, run_scanner, unrunnable_findings
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
@@ -55,12 +65,24 @@ def scan(dev: DevResult) -> list[Finding]:
 
         rules_path = Path(__file__).with_name("semgrep_rules.yml")
 
+        # A missing rules file is a FAULT, never an "absent scanner". The file
+        # ships inside this package, so its absence means a broken install or a
+        # bad build -- semgrep itself may be perfectly present. It also cannot
+        # reach the fixture-fallback path on a machine that HAS semgrep, because
+        # then the gate would report the demo fixture's verdict for whatever
+        # change is actually being scanned. Note the FileNotFoundError this used
+        # to raise was indistinguishable, to the handler in agents/security.py,
+        # from the no-binary case.
         if not rules_path.exists():
-            raise FileNotFoundError(
-                f"Semgrep rules file not found: {rules_path}"
-            )
+            return [
+                error_finding(
+                    "semgrep",
+                    f"its rules file is missing from the installed package: "
+                    f"{rules_path}",
+                )
+            ]
 
-        result = subprocess.run(
+        result, kind = run_scanner(
             [
                 "semgrep",
                 "--config",
@@ -70,30 +92,41 @@ def scan(dev: DevResult) -> list[Finding]:
                 str(report_path),
                 temp_dir,
             ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+            timeout=config.SCANNER_TIMEOUT_SECONDS,
         )
 
-        # Semgrep can return non-zero when findings exist.
-        # Exit codes other than 0/1 indicate an actual execution failure.
-        if result.returncode not in (0, 1):
-            raise RuntimeError(
-                "Semgrep failed with exit code "
-                f"{result.returncode}: "
-                f"{result.stderr.strip()}"
+        # The command never launched. `kind` carries the absent-vs-fault verdict
+        # already, computed from both the exception type and the filesystem.
+        if result is None:
+            return unrunnable_findings(
+                "semgrep",
+                kind,
+                f"the semgrep command could not be run (classified {kind!r}); "
+                f"timeout was {config.SCANNER_TIMEOUT_SECONDS}s",
             )
 
-        # Fail loudly rather than reporting "no findings": an empty list is
-        # indistinguishable from a clean scan, and compute_security_verdict([])
-        # returns PASS.
+        # Semgrep exits 1 when it HAS findings -- the poisoned demo depends on
+        # that -- so only other codes mean it broke. It ran, so this is a fault
+        # whatever SCANNERS_REQUIRED says.
+        if result.returncode not in (0, 1):
+            return [
+                error_finding(
+                    "semgrep",
+                    f"exit code {result.returncode}: {result.stderr.strip()}",
+                )
+            ]
+
+        # It ran and left no report: a fault, and NOT the same case as an absent
+        # binary. There nothing ran and the fixture fallback is right; here the
+        # change is genuinely unscanned by a scanner that is installed.
         if not report_path.exists():
-            raise RuntimeError(
-                f"Semgrep wrote no report to {report_path}. "
-                f"stderr: {result.stderr.strip()}"
-            )
+            return [
+                error_finding(
+                    "semgrep",
+                    f"exit code {result.returncode} but no report at "
+                    f"{report_path}. stderr: {result.stderr.strip()}",
+                )
+            ]
 
         try:
             data = json.loads(
@@ -102,13 +135,38 @@ def scan(dev: DevResult) -> list[Finding]:
                 )
             )
         except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "Semgrep produced invalid JSON output."
-            ) from exc
+            return [
+                error_finding(
+                    "semgrep", f"report at {report_path} is not valid JSON: {exc}"
+                )
+            ]
+
+    # Valid JSON of the wrong SHAPE is unusable too, and it fails LOUDLY in a way
+    # a reader does not expect: `data.get` raises AttributeError on a list or a
+    # string, on the fault path, where a blocking finding was supposed to appear.
+    if not isinstance(data, dict):
+        return [
+            error_finding(
+                "semgrep",
+                f"report was {type(data).__name__}, not the expected JSON object",
+            )
+        ]
+
+    results = data.get("results", [])
+    if not isinstance(results, list) or not all(
+        isinstance(item, dict) for item in results
+    ):
+        return [
+            error_finding(
+                "semgrep",
+                f"report's 'results' was not a list of objects: "
+                f"got {type(results).__name__}",
+            )
+        ]
 
     findings: list[Finding] = []
 
-    for result_item in data.get("results", []):
+    for result_item in results:
         extra = result_item.get("extra", {})
 
         start = result_item.get("start", {})

@@ -63,12 +63,22 @@ ABSENT IS NOT BROKEN, AND THE OBVIOUS TEST FOR IT IS WRONG
     finds nothing. Everything else that failed is a FAULT. MEASURED: this
     classifies all five rows above correctly.
 
-WHAT DOES NOT BELONG HERE
+WHERE THE `SCANNERS_REQUIRED` DECISION LIVES, AND WHY IT MOVED HERE
 
-    The `SCANNERS_REQUIRED` decision itself. This module reports absent vs
-    fault; whether an ABSENT scanner is nonetheless treated as a fault is the
-    wrapper's call in Task 3, because that is where the fixture-fallback path
-    is chosen.
+    An earlier version of this section said the knob's decision did NOT belong
+    in this module -- that each wrapper would make it, "because that is where
+    the fixture-fallback path is chosen". Task 3 then wrote the three wrappers
+    and measured what that costs: three byte-identical copies of one
+    security-relevant fork, in three files owned as one lane. This repository
+    has already paid that bill once, in `common/diff.py`, where four private
+    copies of "what does this change contain?" drifted until the poisoned demo
+    stopped blocking (measured: it blocked on 2 of 5 live runs). Duplicating
+    the absent-vs-required fork invites exactly that shape of failure, and the
+    copy that drifts is by definition the one nobody noticed.
+
+    So `unrunnable_findings` below owns it, once. The wrappers still choose
+    WHETHER to call it -- they alone know a `None` from `run_scanner` is what
+    happened -- but not what it means.
 """
 
 import logging
@@ -76,6 +86,7 @@ import shutil
 import subprocess
 from typing import Literal
 
+from ..common import config
 from ..state import Finding
 
 # The tools the fan-out knows about. Mirrors Finding.tool's Literal in state.py
@@ -256,6 +267,70 @@ def run_scanner(
         return result, None
     hint = observed[0] if observed else None
     return None, classify_failure(cmd, kind_hint=hint)
+
+
+def unrunnable_findings(
+    tool: ScannerTool, kind: FailureKind | None, reason: str
+) -> list[Finding]:
+    """The RULING, in one place: what a wrapper does when its scanner did not run.
+
+    Returns a list that is NEVER EMPTY -- `[error_finding(tool, reason)]` -- or
+    RAISES `FileNotFoundError`. There is no third outcome and in particular no
+    `[]`, which is the whole reason this is a function rather than three copies
+    of an `if` in the three wrappers.
+
+      * `kind == "fault"` -> a blocking finding. The scanner is installed and
+        broken: a timeout, an OS error, a non-zero exit, an unreadable report.
+      * `kind == "absent"` with `SCANNERS_REQUIRED` false -> RAISES, which is the
+        pre-existing behaviour this must not change. agents/security.py catches
+        it and falls back to the FIXTURE verdict, which still blocks the poisoned
+        diff on its two AWS-key findings, and six assertions across the suite
+        read `len(blocking) == 2` on the strength of that.
+      * `kind == "absent"` with `SCANNERS_REQUIRED` true -> a blocking finding.
+        The knob promotes absent to fault for the demo machine and production
+        images, where an uninstalled scanner is a real defect.
+
+    WHY IT RAISES INSTEAD OF RETURNING `[]` FOR THE THIRD CASE, which is the
+    obvious shape and was the first draft. `compute_security_verdict([])` returns
+    `("pass", [])`. So an `[]` returned from here is one careless `return` in one
+    wrapper away from being the silent-pass bug this lane has now closed four
+    times -- and that `return` would be invisible in review, because returning
+    the value a helper handed you is what correct code looks like. Raising means
+    no call site can produce an empty findings list even by accident: the shape
+    does not exist to be returned. The cost is a function that both returns and
+    raises, which is worth saying out loud, and is why this docstring leads with
+    it.
+
+    WHY THE KNOB IS READ THROUGH THE MODULE, not imported as a bare name. The
+    suite flips it with `monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)`,
+    which rebinds the module attribute. `from ..common.config import
+    SCANNERS_REQUIRED` would bind the value at import time -- before any fixture
+    runs -- so the knob would silently ignore both the tests and the demo
+    machine's environment. tests/conftest.py's header makes the same point about
+    `config.LLM_DISABLED`; this is that trap in this lane.
+
+    `kind` accepts None so a wrapper can hand over whatever `run_scanner`
+    returned without a narrowing dance. None means the command RAN, so a caller
+    reaching here with it has confused a bad exit code for a failure to launch;
+    treated as a fault, because that direction is caught by a red test and the
+    other direction fails open.
+    """
+    if kind == "absent" and not config.SCANNERS_REQUIRED:
+        raise FileNotFoundError(
+            f"{tool} is not installed, so this change was NOT scanned by it. "
+            f"Set SCANNERS_REQUIRED=true to make that a blocking finding "
+            f"instead of a fixture fallback. Detail: {_one_line(reason)}"
+        )
+
+    if kind == "absent":
+        return [
+            error_finding(
+                tool,
+                f"SCANNERS_REQUIRED is set and {tool} is not installed: {reason}",
+            )
+        ]
+
+    return [error_finding(tool, reason)]
 
 
 def safe_run(
