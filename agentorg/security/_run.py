@@ -93,10 +93,28 @@ THE FIELD READERS COVER TODAY'S DEREFERENCES, AND NOTHING ENFORCES THAT
     `verdict=pass, blocking=0`, because the crash reached agents/security.py's
     fixture fallback and the fixture verdict for a clean diff is "pass".
 
-    The readers cover exactly the eleven fields the three loops read TODAY. They
-    are not a schema and they are not applied automatically. A new field read
-    written as a bare `container.get("Whatever")` reintroduces the same crash
-    class, in the same fail-open direction, and:
+    The readers cover every field the three loops read TODAY -- MEASURED by an AST
+    walk, 17 call sites over 16 distinct keys: gitleaks 4, semgrep 7, trivy 6.
+    (16 rather than 17 because `Description` is read by both gitleaks and trivy.)
+    The per-tool split is given so the next reader can check the claim against the
+    files instead of trusting the total; the same AST walk found zero bare
+    `.get()` calls and zero subscripts inside the guarded parse loops, which is
+    what "every field" means here.
+
+    THAT COUNT WAS WRONG IN THE FIRST VERSION OF THIS SECTION, and the way it was
+    wrong is worth more than the correction. It said "eleven", which is
+    gitleaks' 4 plus semgrep's 7 with trivy's 6 silently omitted -- and eleven is
+    also, coincidentally, the exact number of cases in
+    `test_wrong_typed_inner_fields_block_rather_than_crashing`'s table, so the
+    figure looked corroborated by a real number nearby. It was never measured. It
+    appeared in the same commit that fixed a different unmeasured count elsewhere
+    in this lane, inside the paragraph below headed READ THIS BEFORE ADDING A
+    FIELD READ -- i.e. the sentence most likely to be copied forward. If you
+    change these readers, re-measure rather than adjusting the number by hand.
+
+    The readers are not a schema and they are not applied automatically. A new
+    field read written as a bare `container.get("Whatever")` reintroduces the same
+    crash class, in the same fail-open direction, and:
 
       * ruff will NOT catch it -- a `.get()` is unremarkable code;
       * no test will catch it either, unless someone writes the wrong-typed case
@@ -210,8 +228,9 @@ class ReportShapeError(Exception):
     Raised by the `report_*` readers below and caught by each wrapper's parse
     loop, which converts it to a blocking `error_finding`. A dedicated exception
     rather than a sentinel return, because the loops dereference these values
-    immediately: a sentinel would have to be checked at every one of the eleven
-    call sites, and the one site that forgot would crash exactly as before.
+    immediately: a sentinel would have to be checked at every one of the 17 call
+    sites (measured; see the module docstring for the per-tool split), and the one
+    site that forgot would crash exactly as before.
 
     NOT a subclass of ValueError or TypeError. The wrappers must catch THIS and
     not the crash it replaces, or a genuine bug in the mapping code would be

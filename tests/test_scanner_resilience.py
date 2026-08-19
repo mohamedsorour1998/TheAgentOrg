@@ -1821,7 +1821,7 @@ def test_a_boolean_is_not_quietly_read_as_a_line_number(monkeypatch, tmp_path):
     )
 
 
-def test_the_fan_out_stops_at_the_first_absent_scanner_and_hides_real_faults(
+def test_exception_signalled_absence_hides_real_faults_when_the_knob_is_off(
     monkeypatch, tmp_path
 ):
     """A KNOWN LIMIT, ACCEPTED BY RULING, pinned here so it cannot be forgotten.
@@ -1838,7 +1838,16 @@ def test_the_fan_out_stops_at_the_first_absent_scanner_and_hides_real_faults(
         signals absence by RAISING (`_run.unrunnable_findings`), and one raise
         ends the loop. Change nothing about the loop and the limit persists;
         change how absence is signalled and it disappears, which is exactly what
-        the second half of this test measures.
+        the second half of this test measures. (Independently falsified in review:
+        disabling only the absent `raise`, loop untouched, moved the knob-off
+        outcome from `pass`/0 to `block`/3.)
+
+        THIS TEST WAS ONCE NAMED `test_the_fan_out_stops_at_the_first_absent_
+        scanner_and_hides_real_faults`, which named the loop as the cause -- the
+        error this paragraph exists to correct. A docstring cannot outrun its own
+        function name for a reader skimming the file, so the name was changed to
+        say the mechanism instead. If you find yourself renaming it back towards
+        the loop, re-read the falsification above first.
 
     WHAT IT DEMONSTRATES. With semgrep absent but gitleaks and trivy INSTALLED
         AND BROKEN, on a clean diff, measured: `verdict=pass, blocking=0`. Two
