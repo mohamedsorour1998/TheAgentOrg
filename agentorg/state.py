@@ -9,12 +9,11 @@ A rename breaks all five lanes at once and nobody notices until integration.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-
 
 # --------------------------------------------------------------------------
 # Shared vocabulary
@@ -28,7 +27,7 @@ SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # --------------------------------------------------------------------------

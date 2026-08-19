@@ -6,8 +6,8 @@ Keep this small (it is first on the cut-list). For the demo, checking that CI
 passed is enough for a `go`.
 """
 
-from ..state import RunState, SREResult
 from .. import fixtures_loader
+from ..state import RunState, SREResult
 
 SYSTEM_PROMPT = """You are the SRE. Given CI status and SLO checks, return go or
 no_go with a short rationale. Output must match the SREResult schema."""

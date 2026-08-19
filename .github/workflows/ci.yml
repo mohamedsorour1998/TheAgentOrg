@@ -1,8 +1,14 @@
 # CI — runs on every PR. OWNER: Mariam.
 #
-# Day-1 job: install deps, regenerate fixtures (proves they still validate), run
-# the test suite (proves the stubbed pipeline runs end-to-end). Add lint,
-# scanner jobs, and the deploy job as those lanes come online.
+# Three gates, and every one of them has to be able to fail:
+#
+#   lint  ruff over the package.
+#   test  the suite, with the model pinned off. The runner has no AWS
+#         credentials, so LLM_DISABLED puts every agent on its fixture rather
+#         than letting it attempt a Bedrock call it cannot make.
+#   scan  the REAL security scanners over the poisoned and clean fixtures. This
+#         is the check that proves the wrappers still catch the AWS key the
+#         demo blocks on, rather than that they merely import.
 
 name: ci
 
@@ -11,9 +17,48 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repository; checkout is the only thing that needs
+# a token at all.
+permissions:
+  contents: read
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    # Nothing here should take a minute. The cap exists so a wedged pip install
+    # cannot sit on a runner for the default six hours.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # pyproject pins ruff>=0.16,<0.17 and the repo carries no [tool.ruff]
+      # section, so this runs ruff's own defaults — the same rules a developer
+      # gets locally, which is what makes a red check here reproducible. Do not
+      # add per-file ignores or noqa comments to turn this green.
+      #
+      # All three Python roots, not just agentorg. scripts/scan_gate.py is the
+      # scan job's whole assertion and tests/ is what the test job runs; both
+      # were already clean when this widened, so it cost nothing to close the
+      # gap before either drifts.
+      - name: Ruff lint
+        run: ruff check agentorg scripts tests
+
   test:
     runs-on: ubuntu-latest
+    # The suite itself runs in well under a second; this caps the install.
+    timeout-minutes: 10
+    env:
+      # JOB level, not step level. Without it every agent tries Bedrock and the
+      # runner has no credentials. tests/conftest.py closes the same seam from
+      # the other side, for laptops that DO have credentials.
+      LLM_DISABLED: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -27,5 +72,118 @@ jobs:
       - name: Regenerate + validate fixtures
         run: python make_fixtures.py
 
+      # DELIBERATELY no scanner binaries in this job. With nothing on PATH,
+      # run_all_scanners raises FileNotFoundError and agents/security.py falls
+      # back to the fixture verdict. Re-measured at HEAD b95cedb with a counter
+      # on run_all_scanners: 24 tests take that fallback here, and all 24
+      # silently switch to the real-scanner path if you install gitleaks/
+      # semgrep/trivy in this job -- four of them are the ones asserting
+      # len(blocking) == 2 (the other two such assertions stub run_all_scanners
+      # themselves, so PATH cannot reach them).
+      #
+      # The suite still passes 95/95 either way, but the run goes from 5.2s to
+      # about 48s (three samples: 46.8s, 48.6s, 47.6s) and starts pulling a
+      # ~108 MB trivy database on every push. (The
+      # 5.2s floor is itself new — it was 0.16s while open_pr's local branch was
+      # a stub. Every pipeline test now does a real `git init` + commit in its
+      # own tmp_path.) The real binaries belong in `scan`, which is about them.
       - name: Run tests
         run: pytest -q
+
+  scan:
+    runs-on: ubuntu-latest
+    # Budget: three binary installs, a ~108 MB database, and two scans. The
+    # cap has to clear the warm-up step's own worst case — 3 attempts x the 5m
+    # trivy timeout, plus 1m of backoff — with room for the rest, or the job
+    # would be killed mid-retry rather than reporting why it failed.
+    timeout-minutes: 25
+    env:
+      # Pinned on purpose. An unpinned scanner that changes its rules turns this
+      # check red on code nobody touched. Bump a version deliberately, then
+      # re-run scripts/scan_gate.py and update its expected findings if they
+      # moved. Measured on these three: poisoned -> 2 critical, clean -> 0.
+      GITLEAKS_VERSION: "8.21.2"
+      TRIVY_VERSION: "0.74.0"
+      SEMGREP_VERSION: "1.172.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      # ALL THREE binaries, not just gitleaks. run_all_scanners fans out in the
+      # order (semgrep, gitleaks, trivy) and every wrapper shells out through
+      # subprocess.run, which raises FileNotFoundError when its binary is
+      # absent — so a job carrying only gitleaks dies on semgrep before gitleaks
+      # ever runs. Verified locally: the gate exits 1 with any one of the three
+      # missing, which is the correct behaviour but a useless check.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+
+      - name: Install trivy
+        run: |
+          curl -sSfL -o /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo mv /tmp/trivy /usr/local/bin/trivy
+
+      # Semgrep gets its OWN virtualenv, and is then symlinked onto PATH rather
+      # than having its bin directory prepended — prepending would shadow
+      # setup-python's `python` for every later step. It is a pip package with
+      # hard pins (mcp==1.23.3, opentelemetry-*~=1.37.0, jsonschema~=4.25.1)
+      # and this project already carries mcp 1.29.0 and opentelemetry 1.44.0
+      # underneath strands-agents, so installing it alongside would quietly
+      # downgrade the agent framework's dependencies in the middle of a security
+      # check. The wrappers only need `semgrep` on PATH; they never import it.
+      - name: Install semgrep
+        run: |
+          python -m venv /tmp/semgrep-venv
+          /tmp/semgrep-venv/bin/pip install --quiet "semgrep==${SEMGREP_VERSION}"
+          sudo ln -s /tmp/semgrep-venv/bin/semgrep /usr/local/bin/semgrep
+
+      # Cheaper to fail here, naming the binary, than to decode a
+      # FileNotFoundError raised from inside a wrapper three steps later.
+      - name: Scanner versions
+        run: |
+          gitleaks version
+          trivy --version
+          semgrep --version
+
+      # `trivy fs` downloads a ~108 MB vulnerability database on a cold cache
+      # (measured: 18s) and, when it cannot, exits 1 having written NO report —
+      # which trivy_tool turns into RuntimeError and this job into a red check
+      # on code nobody touched. Do that fetch HERE, retried, so a registry blip
+      # reads as infrastructure rather than as a scanner failure; the gate below
+      # then runs against a warm cache. Trivy already falls back from
+      # mirror.gcr.io to ghcr.io by itself. Do NOT set TRIVY_CACHE_DIR: the gate
+      # invokes trivy exactly as the security agent does, with no environment
+      # overrides, so it must find this database at trivy's default location.
+      - name: Warm the trivy vulnerability database
+        run: |
+          for attempt in 1 2 3; do
+            if trivy fs --download-db-only --timeout 5m .; then
+              exit 0
+            fi
+            echo "trivy database download failed (attempt ${attempt}/3)"
+            if [ "${attempt}" -lt 3 ]; then
+              sleep 30
+            fi
+          done
+          echo "trivy could not fetch its vulnerability database; see above"
+          exit 1
+
+      # The gate is a checked-in script rather than a heredoc so that the bytes
+      # CI runs are the bytes anyone can run on a laptop — a heredoc inside
+      # `run: |` cannot be, and YAML indentation silently rewrites Python.
+      # scripts/scan_gate.py says what it proves and why nothing in it is
+      # wrapped in try/except.
+      - name: Scan gate
+        run: python scripts/scan_gate.py
