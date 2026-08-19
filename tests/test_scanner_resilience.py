@@ -29,11 +29,12 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from pydantic import ValidationError
 
 from agentorg import fixtures_loader
 from agentorg.common import config
 from agentorg.security import trivy_tool
-from agentorg.security._run import error_finding, safe_run
+from agentorg.security._run import error_finding, run_scanner, safe_run
 from agentorg.state import SEVERITY_ORDER, DevResult, compute_security_verdict
 
 # A diff that ADDS a dependency manifest pinning two long-known-vulnerable
@@ -483,4 +484,216 @@ def test_scanners_required_reads_the_environment_like_the_other_boolean_knobs():
         assert probe.SCANNERS_REQUIRED is expected, (
             f"SCANNERS_REQUIRED={raw!r} must parse to {expected}, got "
             f"{probe.SCANNERS_REQUIRED!r}"
+        )
+
+
+# ==========================================================================
+# Task 2, round 2 -- what review found the first round had left on prose
+# ==========================================================================
+
+
+def test_safe_run_survives_malformed_argv_so_the_broad_clause_cannot_be_deleted():
+    """The broad `except Exception` clause must be PINNED, not just argued for.
+
+    WHY THIS TEST EXISTS, AND WHAT IT REPLACES
+        `_run.py` argues at length that its final broad clause is load-bearing
+        and correctly notes that ruff will not catch its removal -- a narrowed
+        `except` with no logging is BLE001-clean, so lint blesses the more
+        dangerous option. Review measured what that argument was worth: with
+        the clause deleted the whole suite still reported `9 passed, 1 skipped`.
+        Every other property in the module was pinned; this one rested on a
+        comment.
+
+    THE MEASURED CONSEQUENCE OF DELETING IT
+        `safe_run([])` raises IndexError and `safe_run([None])` raises
+        TypeError, where the shipped code returns None for both. Neither is an
+        OSError and neither is a SubprocessError, so they slip past every
+        specific clause. A raise escaping safe_run reaches the wrapper, and per
+        the plan's ruling a wrapper is supposed to answer a failure with a
+        BLOCKING error_finding -- it cannot do that for an exception it never
+        sees. The failure mode is the pipeline crashing at the gate that exists
+        to stop bad code, which on a projector is a stack trace where
+        `status=blocked` should be.
+
+    Malformed argv is not a hypothetical: a wrapper building `[binary, *flags]`
+    from a config value that came back empty or None produces exactly these two
+    shapes, and Task 3 builds argv in three new places.
+    """
+    for cmd, expected_exc in (([], "IndexError"), ([None], "TypeError")):
+        result = safe_run(cmd, timeout=config.SCANNER_TIMEOUT_SECONDS)
+        assert result is None, (
+            f"safe_run({cmd!r}) must return None, not raise. Unpatched this "
+            f"raises {expected_exc}, which is neither an OSError nor a "
+            f"SubprocessError -- so if this test is red, the broad final "
+            f"`except Exception` clause has been narrowed or removed and the "
+            f"pipeline can now crash at the security gate. Got {result!r}"
+        )
+
+
+def test_run_scanner_tells_a_wrapper_absent_from_broken():
+    """The absent-vs-fault call Task 3 must make, and the trap in making it.
+
+    THE RULING THIS SERVES
+        A binary that is merely ABSENT is a development and CI affordance that
+        keeps the fixture-fallback path -- that is what lets CI's `test` job run
+        with no scanners and still see the fixture's two AWS-key findings. A
+        binary that is present and BROKEN is a fault that must block. Both come
+        back from `safe_run` as None, so something has to distinguish them, and
+        under SCANNERS_REQUIRED=true getting it wrong in the "absent" direction
+        fails OPEN -- the exact inversion of what the knob is for.
+
+    WHY NEITHER OBVIOUS DISCRIMINATOR WORKS -- both halves MEASURED
+        `shutil.which` alone calls a file whose +x bit is gone "absent", and
+        calls a directory "absent", because `which` requires the executable bit
+        it is being asked about. Those are the two cases the plan names by name.
+        The exception type alone calls a scanner that IS on PATH but has an
+        unresolvable shebang "absent", because errno 2 there names the missing
+        INTERPRETER rather than the scanner.
+
+        So the answer is the conjunction of both signals, and this test pins
+        each row of it. The +x case is built rather than mocked: chmod is the
+        real mechanism, and a mock of `which` would pin the test to the
+        implementation it is supposed to be checking.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="agentorg-faultprobe-"))
+
+    noexec = scratch / "scanner-without-x-bit"
+    noexec.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    noexec.chmod(0o644)
+
+    bad_shebang = scratch / "scanner-with-unresolvable-shebang"
+    bad_shebang.write_text(
+        "#!/nonexistent/interpreter\necho hi\n", encoding="utf-8"
+    )
+    bad_shebang.chmod(0o755)
+
+    cases = (
+        (
+            ["agentorg-no-such-scanner-binary-7b3e2a"],
+            "absent",
+            (
+                "a binary that is simply not installed is the CI/dev "
+                "affordance, and must stay on the fixture-fallback path"
+            ),
+        ),
+        (
+            [str(noexec)],
+            "fault",
+            (
+                "a real file whose +x bit is gone is INSTALLED BUT BROKEN -- "
+                "the plan names this case. shutil.which() reports it absent, "
+                "which is why the exception type is needed as well"
+            ),
+        ),
+        (
+            [str(scratch)],
+            "fault",
+            "a directory is present and unrunnable, not absent",
+        ),
+        (
+            [str(bad_shebang)],
+            "fault",
+            (
+                "a scanner ON PATH whose interpreter is missing raises "
+                "FileNotFoundError, so the exception type alone would call "
+                "this absent -- this is the row shutil.which is needed for"
+            ),
+        ),
+        (
+            [],
+            "fault",
+            "malformed argv is a defect in the caller, not a missing tool",
+        ),
+    )
+
+    for cmd, expected_kind, why in cases:
+        result, kind = run_scanner(cmd, timeout=5)
+
+        assert result is None, (
+            f"{cmd!r} cannot produce a result; got {result!r}"
+        )
+        assert kind == expected_kind, (
+            f"run_scanner({cmd!r}) classified this {kind!r}, expected "
+            f"{expected_kind!r}. {why}. Getting a 'fault' wrong as 'absent' is "
+            f"the dangerous direction: under SCANNERS_REQUIRED=true it takes "
+            f"the fixture-fallback path and fails OPEN."
+        )
+
+
+def test_run_scanner_reports_no_failure_kind_when_the_command_ran():
+    """A run that happened is never classified as a failure, at any exit code.
+
+    The negative control for the test above. A classifier that answered "fault"
+    unconditionally would satisfy four of its five rows, and would then make
+    every wrapper in Task 3 emit a blocking error_finding on every run --
+    including the clean fixture, which takes the demo's promote path down.
+
+    The non-zero case is the one that matters most: gitleaks exits 1 when it
+    finds secrets and semgrep exits 1 when it finds matches, so on the poisoned
+    demo diff two of the three scanners exit non-zero on the happy path.
+    """
+    ran, kind = run_scanner(
+        [sys.executable, "-c", "print('ok')"],
+        timeout=config.SCANNER_TIMEOUT_SECONDS,
+    )
+    assert isinstance(ran, subprocess.CompletedProcess), f"got {type(ran)}"
+    assert kind is None, (
+        f"a successful run has no failure kind; got {kind!r}"
+    )
+
+    noisy, kind = run_scanner(
+        [sys.executable, "-c", "import sys; sys.exit(1)"],
+        timeout=config.SCANNER_TIMEOUT_SECONDS,
+    )
+    assert noisy is not None and noisy.returncode == 1, (
+        f"exit 1 is gitleaks and semgrep REPORTING FINDINGS, not failing to "
+        f"run; got {noisy!r}"
+    )
+    assert kind is None, (
+        f"a non-zero exit must not be classified as a failure to run -- doing "
+        f"so would swap the poisoned demo's two real criticals for a "
+        f"scanner-error. Got kind={kind!r}"
+    )
+
+
+def test_a_timeout_classifies_as_a_fault_and_never_as_absent():
+    """A hung scanner is installed by definition, so it can only be a fault.
+
+    Separated from the table above because it is the one fault mode with no
+    filesystem signal at all: the binary exists, `which` finds it, and it is
+    perfectly executable -- it simply never returns. If a timeout were ever
+    classified "absent", a scanner hanging on the demo machine would take the
+    fixture-fallback path and the run would be promoted on fixture findings
+    while the real scanner was still wedged.
+    """
+    result, kind = run_scanner(
+        [sys.executable, "-c", "import time; time.sleep(30)"], timeout=1
+    )
+    assert result is None, f"a timeout produces no result; got {result!r}"
+    assert kind == "fault", (
+        f"a timeout is a present-but-broken scanner and must classify as "
+        f"'fault'; got {kind!r}. 'absent' here would fail OPEN under "
+        f"SCANNERS_REQUIRED=true."
+    )
+
+
+def test_error_finding_rejects_a_tool_name_the_finding_model_will_not_accept():
+    """A mistyped tool name must fail at authoring time, not on the fault path.
+
+    `Finding.tool` is a Literal of exactly three names. `error_finding` is
+    called only when a scanner has already failed, so a typo there raises
+    pydantic's ValidationError at the precise moment the pipeline is trying to
+    report that failure -- converting "the scanner broke, here is a blocking
+    finding" into "the pipeline crashed". Typing the parameter moves the error
+    to where a type checker sees it; this test pins that the runtime rejection
+    is still real, so nobody swaps the Literal for a bare `str` and assumes
+    pydantic will keep covering it.
+    """
+    with pytest.raises(ValidationError):
+        error_finding("gitleeks", "typo in the tool name")
+
+    for tool in ("gitleaks", "semgrep", "trivy"):
+        assert error_finding(tool, "ok").tool == tool, (
+            f"{tool!r} is one of Finding.tool's three accepted names and must "
+            f"still work"
         )
