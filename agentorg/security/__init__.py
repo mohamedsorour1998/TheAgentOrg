@@ -8,8 +8,11 @@ fans out to all three and concatenates. The security agent then applies the
 deterministic block rule; you do NOT decide pass/block here — you only produce
 findings.
 
-This lane is fully self-contained: it depends only on state.py and the scanner
-CLIs. It never imports the graph, so you can build and test it in isolation.
+This lane is self-contained: it depends only on state.py, the scanner CLIs, and
+common/diff.py — the one materialiser that decides what "this change contains"
+means, shared with the developer's poisoned safety net so the two cannot
+disagree about it again. It never imports the graph, so you can build and test
+it in isolation.
 """
 
 from ..state import DevResult, Finding

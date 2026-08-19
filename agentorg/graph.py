@@ -10,9 +10,24 @@ does not change — the function signatures are frozen in state.py.
 Flow:
     plan -> gate1 -> develop -> review -(loop)-> open_pr -> security -> gate2 -> sre -> gate3 -> promote
 
-Human gates are handled by pause()/resume() in gates.py. In this synchronous
-demo runner we AUTO-APPROVE gates (auto_approve=True) so a single call walks the
-whole path; the real UI/CLI records genuine HumanDecisions.
+Human gates are handled by pause()/resume() in gates.py. The demo runner
+AUTO-APPROVES them (auto_approve=True) so a single call walks the whole path;
+auto_approve=False asks a real human on the terminal, and agentorg/gates_cli.py
+records the same decision out of band for anyone who walked away.
+
+A run reaches the end of this file only by being approved at every step. There
+are four ways it does not, and they are checked in this order:
+    security verdict "block"      -> status "blocked"   (deterministic rule)
+    reviewer never approved       -> status "failed"    (revision budget spent)
+    sre verdict "no_go"           -> status "failed"
+    a human said no at any gate   -> status "rejected"
+"rejected" is reserved for the human ones. An agent's refusal is a "failed" run,
+because nobody was asked.
+
+The order is load-bearing: the deterministic block is evaluated on every run
+that produced a diff and wins over every other stop, because "the poisoned
+ticket blocks" is a claim about code, not about what a model thought of the
+diff. See the comment at step 5b.
 
 Run it:
     python -m agentorg.graph            # clean ticket  -> promoted
@@ -21,12 +36,17 @@ Run it:
 
 from __future__ import annotations
 
-from .state import (
-    RunState, HumanDecision, LogEvent, compute_security_verdict,
-)
+import os
+from collections.abc import Callable
+
+from . import gates, github_ops, log
+from .agents import developer, planner, reviewer, security, sre
 from .common import config
-from . import log, gates, github_ops
-from .agents import planner, developer, reviewer, security, sre
+from .state import (
+    HumanDecision,
+    LogEvent,
+    RunState,
+)
 
 
 def _log(state: RunState, actor, stage, action, verdict="", summary=""):
@@ -42,28 +62,97 @@ def _auto_gate(state: RunState, gate: str) -> HumanDecision:
     return HumanDecision(gate=gate, decision="approved", by="auto", reason="demo auto-approve")
 
 
+# Exact words, not a prefix. A prefix match on "a" made "abort" — the most
+# natural way to bail out of a prompt you did not mean to be at — mean APPROVE,
+# on the three prompts in this system where being misread is most expensive.
+# Everything not in this set rejects, so bare Enter still fails closed.
+APPROVAL_WORDS = frozenset({"a", "approve", "approved", "y", "yes"})
+
+
+def _cli_gate(state: RunState, gate: str) -> HumanDecision:
+    """Real gate: pause, ask a human on the terminal, record their decision."""
+    path = gates.pause(state, gate)
+    print(f"\n[{gate}] paused. state saved -> {path}")
+    answer = input(f"[{gate}] approve / reject? [a = approve, anything else rejects] ")
+    decision = "approved" if answer.strip().lower() in APPROVAL_WORDS else "rejected"
+    return HumanDecision(gate=gate, decision=decision,
+                         by=os.environ.get("USER", "human"))
+
+
+def _decide(state: RunState, gate: str, ask: Callable[[RunState, str], HumanDecision]) -> bool:
+    """Take the human decision at one gate. False means the run stops here.
+
+    Recording the decision and honouring it live together rather than at each
+    of the three call sites, because the two failures that matter are a gate
+    that was recorded but not honoured and a gate that was honoured but not
+    recorded — and both are easy to write by hand three times in a row.
+
+    Every decision is logged, not only the refusals. gates.resume() already logs
+    the async ones, so without this the timeline would show a run pausing at a
+    gate and then simply carrying on, with no record of who let it through.
+    """
+    decision = ask(state, gate)
+    state.decisions.append(decision)
+    stopping = decision.decision == "rejected"
+    _log(state, "human", gate, decision.decision, verdict=decision.decision,
+         summary=decision.reason or (f"run stopped at {gate}" if stopping else ""))
+    if stopping:
+        state.status = "rejected"
+    return not stopping
+
+
 def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
                  auto_approve: bool = True) -> RunState:
-    """Walk one ticket through the whole pipeline. Returns the final RunState."""
+    """Walk one ticket through the whole pipeline. Returns the final RunState.
+
+    The walk itself is _walk; this wrapper exists only to guarantee the ending
+    is written down. _walk has seven `return state` exits, so a `gates.save`
+    before each one would be seven chances to forget one — and the eighth exit
+    somebody adds next month would be wrong by default. A finally clause is
+    wrong by default in the safe direction instead: it also persists a run that
+    died on an exception, which is exactly the run someone needs to inspect
+    afterwards, and which no `return`-site save can reach at all.
+
+    state is built here rather than in _walk so the finally clause has something
+    to save even if _walk raises on its first line.
+    """
     state = RunState(ticket_id=ticket_id, ticket_text=ticket_text)
-    _log(state, "system", "plan", "opened", summary=f"run started for {ticket_id}")
+    try:
+        return _walk(state, poisoned=poisoned, auto_approve=auto_approve)
+    finally:
+        gates.save(state)
+
+
+def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
+    """The pipeline itself. Always call through run_pipeline, never directly."""
+    _log(state, "system", "plan", "opened", summary=f"run started for {state.ticket_id}")
+    ask = _auto_gate if auto_approve else _cli_gate
 
     # 1. PLAN ---------------------------------------------------------------
     state.plan = planner.run(state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
 
     # 2. GATE 1 -------------------------------------------------------------
-    if auto_approve:
-        state.decisions.append(_auto_gate(state, "gate1"))
+    if not _decide(state, "gate1", ask):
+        return state
 
     # 3. DEVELOP + REVIEW LOOP ---------------------------------------------
+    # Two exits, and they are not the same outcome, so they do not share a log
+    # line: one says the reviewer approved this diff, the other says the run
+    # ran out of chances to make one it would.
     while True:
         state.dev = developer.run(state, poisoned=poisoned)
         _log(state, "developer", "develop", "proposed", summary=state.dev.summary)
 
         state.review = reviewer.run(state)
-        if state.review.verdict == "approve" or state.revision_count >= config.MAX_REVISION_LOOPS:
-            _log(state, "reviewer", "review", "reviewed", verdict=state.review.verdict)
+        if state.review.verdict == "approve":
+            _log(state, "reviewer", "review", "reviewed", verdict="approve",
+                 summary="reviewer approved the diff")
+            break
+        if state.revision_count >= config.MAX_REVISION_LOOPS:
+            _log(state, "reviewer", "review", "reviewed", verdict="changes_requested",
+                 summary=f"revision cap of {config.MAX_REVISION_LOOPS} reached, "
+                         f"changes still requested")
             break
         state.revision_count += 1
         _log(state, "reviewer", "review", "reviewed", verdict="changes_requested",
@@ -80,13 +169,47 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
          verdict=state.security.verdict, summary=f"{len(state.security.blocking)} blocking")
     if state.security.verdict == "block":
         state.status = "blocked"
-        github_ops.post_comment(state, state.security.explanation)
-        _log(state, "system", "security", "blocked", summary="pipeline halted by block rule")
+        # The ref is written down rather than dropped on the floor. post_comment
+        # cannot raise, so a delivery failure leaves no trace unless it is
+        # recorded: it returns the comment's https:// URL when the reason
+        # reached the PR, and comment://<run_id> when it did not. This log row
+        # is the artifact -- runs/<run_id>.jsonl is what log.py calls the source
+        # of truth the timeline UI renders -- and without the ref that file is
+        # byte-identical whether the block was reported or evaporated into a 502.
+        ref = github_ops.post_comment(state, state.security.explanation)
+        _log(state, "system", "security", "blocked",
+             summary=f"pipeline halted by block rule; block reason {ref}")
+        return state
+
+    # 5b. THE REVIEWER'S VERDICT IS TERMINAL --------------------------------
+    # Reached only by the cap exit from the loop above: the revision budget is
+    # spent and the reviewer is still asking for changes, so nobody has approved
+    # this change and it must not promote. Treated as sre.verdict == "no_go" is
+    # below, and "failed" rather than "rejected" because no human was asked.
+    #
+    # Placed AFTER the security stage, deliberately. The block rule is
+    # deterministic code, and the whole premise of this pipeline is that the
+    # block is not a model's judgement — so it must be evaluated on every run
+    # that produced a diff, whatever the reviewer thought of that diff. Stopping
+    # here first would invert that: on the poisoned ticket a competent reviewer
+    # SHOULD object to the hardcoded credentials, the developer's safety net
+    # re-inserts the key on every revision, so the cap would reliably exhaust
+    # and the run would end "failed" without the scanners ever running. That
+    # quietly downgrades "the poisoned ticket blocks every single time" into
+    # "it fails at review", which is a different and weaker claim.
+    #
+    # So a block wins above and returns; only a run the scanners CLEARED can be
+    # stopped here for never having been approved.
+    if state.review.verdict != "approve":
+        state.status = "failed"
+        _log(state, "system", "review", "blocked", verdict=state.review.verdict,
+             summary=f"scanners passed, but the reviewer never approved after "
+                     f"{state.revision_count} revisions; not promoting")
         return state
 
     # 6. GATE 2 -------------------------------------------------------------
-    if auto_approve:
-        state.decisions.append(_auto_gate(state, "gate2"))
+    if not _decide(state, "gate2", ask):
+        return state
 
     # 7. SRE ----------------------------------------------------------------
     state.sre = sre.run(state)
@@ -96,8 +219,8 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
         return state
 
     # 8. GATE 3 + PROMOTE ---------------------------------------------------
-    if auto_approve:
-        state.decisions.append(_auto_gate(state, "gate3"))
+    if not _decide(state, "gate3", ask):
+        return state
     state.status = "promoted"
     _log(state, "system", "promote", "promoted", summary="change promoted")
     return state
@@ -106,8 +229,13 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
 if __name__ == "__main__":
     import sys
     poisoned = "--poisoned" in sys.argv
+    # Without this flag the interactive gate is reachable only by importing
+    # run_pipeline, which makes "the gates are real" a claim nobody can check
+    # from a terminal. The default is unchanged: no flag, no prompts.
+    interactive = "--interactive" in sys.argv
     tid = "DEMO-POISON" if poisoned else "DEMO-CLEAN"
-    final = run_pipeline(tid, "Add a per-IP login rate limit.", poisoned=poisoned)
+    final = run_pipeline(tid, "Add a per-IP login rate limit.", poisoned=poisoned,
+                         auto_approve=not interactive)
     print(f"\nrun_id={final.run_id}")
     print(f"status={final.status}")
     if final.security:

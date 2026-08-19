@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ..common.diff import write_added_files
 from ..state import DevResult, Finding
 
 CONFIG_PATH = (
@@ -33,40 +34,17 @@ def _repo_relative(path: str, temp_dir: str) -> str:
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
-    """Materialize changed files from the unified diff."""
+    """Materialize changed files from the unified diff.
 
-    current_file: Path | None = None
-    content: list[str] = []
+    The parsing lives in agentorg/common/diff.py rather than here, because the
+    developer's poisoned safety net has to ask the same question this answers
+    -- "what does this change contain?" -- and when the two were written out
+    separately they drifted apart and the poisoned demo stopped blocking. This
+    wrapper stays as the name the scanner calls; only added lines are ever
+    written, exactly as before.
+    """
 
-    for line in (dev.diff or "").splitlines():
-        if line.startswith("+++ b/"):
-            if current_file is not None:
-                current_file.parent.mkdir(
-                    parents=True,
-                    exist_ok=True,
-                )
-                current_file.write_text(
-                    "\n".join(content) + "\n",
-                    encoding="utf-8",
-                )
-
-            relative = line[6:].strip()
-            current_file = Path(temp_dir) / relative
-            content = []
-            continue
-
-        if line.startswith("+") and not line.startswith("+++"):
-            content.append(line[1:])
-
-    if current_file is not None:
-        current_file.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-        current_file.write_text(
-            "\n".join(content) + "\n",
-            encoding="utf-8",
-        )
+    write_added_files(dev.diff, temp_dir)
 
 
 def scan(dev: DevResult) -> list[Finding]:
