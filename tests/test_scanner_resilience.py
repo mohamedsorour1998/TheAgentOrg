@@ -19,13 +19,21 @@ WHY THIS FILE EXISTS
     change on its own findings, with no help from the other two.
 """
 
+import importlib.util
+import os
 import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from agentorg import fixtures_loader
 from agentorg.common import config
 from agentorg.security import trivy_tool
+from agentorg.security._run import error_finding, safe_run
 from agentorg.state import SEVERITY_ORDER, DevResult, compute_security_verdict
 
 # A diff that ADDS a dependency manifest pinning two long-known-vulnerable
@@ -180,4 +188,299 @@ def test_trivy_blocks_a_vulnerable_pin_and_stays_silent_on_the_demo_fixtures():
             f"scripts/scan_gate.py's expected-findings pins (gitleaks' two "
             f"criticals on the poisoned diff, nothing blocking on the clean "
             f"one) would go red next."
+        )
+
+
+# ==========================================================================
+# Task 2 -- the shared fail-safe subprocess runner (agentorg/security/_run.py)
+#
+# WHY THESE DO NOT SKIP, UNLIKE THE TEST ABOVE
+#     The trivy test above needs a 161 MB binary and a CVE database, so it
+#     skips when trivy is absent. Nothing below needs a scanner at all: the
+#     fault modes are reproduced with `sys.executable` and a directory path,
+#     both of which exist wherever pytest does. That matters because this
+#     FILE never runs in CI -- verified against .github/workflows/ci.yml: the
+#     `test` job runs pytest with no scanner binaries installed, and the
+#     `scan` job installs all three but runs only scripts/scan_gate.py, never
+#     pytest. So a skip here would be a second layer of "not actually
+#     checked" on top of the first. These run on any machine, in either
+#     scanner mode, and are the part of this file a laptop can trust.
+# ==========================================================================
+
+
+def test_error_finding_is_at_the_block_threshold_so_a_dead_scanner_fails_closed():
+    """A scanner that could not run must BLOCK, on its own error finding alone.
+
+    THIS IS THE LOAD-BEARING ASSERTION OF THE WHOLE RESILIENCE LANE.
+
+    The failure it exists to prevent has a specific shape, and this project has
+    closed it three separate times already: a scanner breaks, its findings list
+    comes back empty, `compute_security_verdict([])` returns ("pass", []), and a
+    poisoned change is promoted while every test in the suite stays green. That
+    is failing OPEN -- the gate reports clean precisely because it did not run.
+
+    `error_finding` is the fix: a fault becomes a FINDING rather than an
+    absence. But a finding only blocks if its severity reaches the threshold,
+    so the severity is not a cosmetic label -- it IS the fail-closed behaviour.
+    Drop it from "high" to "medium" and this lane silently reverts to failing
+    open: findings would still be produced, the verdict would still read
+    "pass", and nothing but this test would notice.
+
+    Both halves below are deliberate:
+      * the literal severity, so a change to it names itself in the failure;
+      * the verdict computed through the REAL compute_security_verdict at the
+        REAL config threshold, so the assertion tracks the rule the pipeline
+        actually runs instead of restating it here. If the two disagree, the
+        messages tell you which one moved.
+    """
+    finding = error_finding("gitleaks", "binary is missing from PATH")
+
+    assert finding.severity == "high", (
+        f"error_finding must be 'high': that is the block threshold, so it is "
+        f"what makes an unrunnable scanner fail CLOSED. Got "
+        f"{finding.severity!r}. Lowering this does not merely weaken a "
+        f"warning -- it restores the silent-pass bug this lane exists to "
+        f"prevent, because compute_security_verdict would then return 'pass' "
+        f"for a scanner that never ran."
+    )
+
+    threshold = config.SECURITY_BLOCK_THRESHOLD
+    assert SEVERITY_ORDER[finding.severity] >= SEVERITY_ORDER[threshold], (
+        f"error_finding severity {finding.severity!r} sits BELOW the "
+        f"configured block threshold {threshold!r}, so a dead scanner would "
+        f"report a finding and still be promoted. If the threshold was raised "
+        f"deliberately, error_finding has to be raised with it."
+    )
+
+    verdict, blocking = compute_security_verdict([finding], threshold=threshold)
+    assert verdict == "block", (
+        f"one scanner-error finding must block on its own at threshold "
+        f"{threshold!r}; got {verdict!r}. A scanner that cannot run is not a "
+        f"clean scan."
+    )
+    assert blocking == [finding], (
+        f"the error finding itself must appear in the blocking list -- it is "
+        f"what the PR comment and the projector name as the reason. Got "
+        f"{_summarize(blocking)}"
+    )
+
+
+def test_error_finding_names_the_tool_that_failed():
+    """The rule id has to identify WHICH scanner died, per tool.
+
+    Task 3 emits one of these per wrapper. If they all rendered the same rule
+    string, the block explanation on screen would say a scanner failed without
+    saying which, and three simultaneous faults would look like one.
+    """
+    for tool in ("gitleaks", "semgrep", "trivy"):
+        finding = error_finding(tool, "exit code 2: database is locked")
+
+        assert finding.tool == tool, (
+            f"error_finding({tool!r}, ...) tagged tool={finding.tool!r}"
+        )
+        assert finding.rule == f"{tool}-scanner-error", (
+            f"Task 3 and the plan both name this rule "
+            f"f'{{tool}}-scanner-error'; got {finding.rule!r}"
+        )
+        assert "database is locked" in finding.description, (
+            f"the reason passed in must survive into the description -- it is "
+            f"the only place an operator learns why the scanner failed. Got "
+            f"{finding.description!r}"
+        )
+
+
+def test_safe_run_returns_none_for_a_missing_binary():
+    """A binary that is not on PATH must return None, not raise.
+
+    MEASURED, not assumed: subprocess.run on an absent binary raises
+    FileNotFoundError, which is an OSError subclass (checked on CPython
+    3.14.6). The point of pinning it from the outside is that `safe_run`'s
+    caller must never have to know that, because the answer has changed before
+    -- see the list of exception types agents/security.py enumerates in its
+    broad except clause.
+    """
+    result = safe_run(
+        ["agentorg-no-such-scanner-binary-4c1d9f"],
+        timeout=config.SCANNER_TIMEOUT_SECONDS,
+    )
+    assert result is None, (
+        f"safe_run must answer a missing binary with None so the caller can "
+        f"decide between the fixture-fallback path and an error_finding. Got "
+        f"{result!r}"
+    )
+
+
+def test_safe_run_returns_none_when_the_command_outruns_its_timeout():
+    """A hung scanner must time out to None, not hang and not raise.
+
+    MEASURED, not assumed: this raises subprocess.TimeoutExpired, which is a
+    SubprocessError and is NOT an OSError (checked on CPython 3.14.6). So a
+    handler catching only OSError -- the obvious guess after the missing-binary
+    case -- would let a timeout escape. This test is what stops that guess from
+    shipping.
+
+    The child sleeps 30s against a 1s timeout: a margin wide enough that a
+    loaded machine cannot make the command finish first, while the test itself
+    still costs about a second. `sys.executable` rather than `sleep(1)` so the
+    test has no dependency on PATH -- the whole point is that it runs
+    everywhere, including the no-binary CI job.
+    """
+    result = safe_run(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout=1,
+    )
+    assert result is None, (
+        f"safe_run must convert a timeout into None. Got {result!r}. If this "
+        f"raised TimeoutExpired instead, note that it is a SubprocessError and "
+        f"not an OSError, so it needs its own except clause."
+    )
+
+
+def test_safe_run_returns_none_for_an_os_error_that_is_not_a_missing_file():
+    """Present-but-unrunnable is a distinct fault, and also returns None.
+
+    MEASURED: handing subprocess.run a DIRECTORY raises PermissionError
+    ([Errno 13]), a different OSError subclass from the missing-binary case.
+    This is the shape of a scanner that is installed but not executable -- a
+    lost +x bit after an unzip, a binary on a noexec mount. The plan's central
+    ruling turns exactly this case into a blocking error_finding while leaving
+    a merely ABSENT binary on the fixture-fallback path, so the two must not
+    collapse into one code path by accident.
+    """
+    result = safe_run(
+        [tempfile.gettempdir()], timeout=config.SCANNER_TIMEOUT_SECONDS
+    )
+    assert result is None, (
+        f"safe_run must answer an OSError other than FileNotFoundError with "
+        f"None too. Got {result!r}"
+    )
+
+
+def test_safe_run_returns_a_real_completed_process_for_a_command_that_works():
+    """The negative control: safe_run must not swallow success.
+
+    Without this, `def safe_run(...): return None` passes every other test in
+    this section -- and Task 3 would report all three scanners as faulted on
+    every run, which fails closed but blocks the clean fixture too, taking the
+    demo's promote path down. Captured output is asserted because the wrappers
+    parse stdout and stderr; a CompletedProcess with output discarded is
+    useless to them.
+    """
+    result = safe_run(
+        [sys.executable, "-c", "print('scanner output')"],
+        timeout=config.SCANNER_TIMEOUT_SECONDS,
+    )
+
+    assert isinstance(result, subprocess.CompletedProcess), (
+        f"a working command must come back as a real CompletedProcess so the "
+        f"wrappers can read returncode/stdout/stderr; got {type(result)}"
+    )
+    assert result.returncode == 0, f"expected rc 0, got {result.returncode}"
+    assert "scanner output" in result.stdout, (
+        f"safe_run must CAPTURE output -- the wrappers parse it. stdout was "
+        f"{result.stdout!r}"
+    )
+    assert isinstance(result.stdout, str), (
+        "output must be decoded text, not bytes: every wrapper calls "
+        ".strip() on stderr and json.loads on report text"
+    )
+
+
+def test_safe_run_reports_a_nonzero_exit_rather_than_hiding_it():
+    """A non-zero exit is the scanner SPEAKING, not failing to run.
+
+    gitleaks exits 1 when it finds secrets and semgrep exits 1 when it finds
+    matches -- the poisoned demo depends on both. If safe_run treated non-zero
+    as "could not run" and returned None, Task 3 would replace two real
+    critical findings with a scanner-error and scripts/scan_gate.py's exact
+    expected-findings pins would go red. `check=False` is therefore part of the
+    contract, not an implementation detail.
+    """
+    result = safe_run(
+        [sys.executable, "-c", "import sys; sys.exit(3)"],
+        timeout=config.SCANNER_TIMEOUT_SECONDS,
+    )
+
+    assert result is not None, (
+        "a non-zero exit is a completed run, not a failure to run; safe_run "
+        "must hand the caller the returncode so the wrapper can judge it"
+    )
+    assert result.returncode == 3, (
+        f"expected the real exit code 3 to survive, got {result.returncode}"
+    )
+
+
+def test_the_shipped_config_defaults_keep_ci_on_the_fixture_fallback_path():
+    """SCANNERS_REQUIRED must default false, or five other tests go red.
+
+    The plan's central ruling distinguishes ABSENT from BROKEN: a missing
+    binary is a CI/dev affordance that keeps the existing fixture-fallback
+    path, and SCANNERS_REQUIRED=true is what promotes it to a fault for the
+    demo machine and production images. If the default flipped, CI's `test`
+    job -- which installs no scanners on purpose -- would start producing
+    three scanner-error findings instead of the fixture's two AWS-key
+    findings, and the five assertions that read `len(blocking) == 2`
+    (tests/test_pipeline_smoke.py, test_agent_fallbacks.py x3,
+    test_gates_cli.py) would fail without anything naming the cause.
+
+    Loaded from source into a THROWAWAY module with the environment cleared,
+    so what is pinned is the shipped default rather than whatever happens to
+    be exported on the machine running the suite. A fresh load is safe here:
+    config.py imports only `os` and has no side effects. Reloading the real
+    module object instead would rebind values under every `from ..common
+    import config` in the package, which is why this does not do that.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_config_defaults_probe", Path(config.__file__)
+    )
+    probe = importlib.util.module_from_spec(spec)
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+        spec.loader.exec_module(probe)
+
+    assert probe.SCANNERS_REQUIRED is False, (
+        f"SCANNERS_REQUIRED must ship defaulting to False -- see this test's "
+        f"docstring for the five assertions that depend on it. Got "
+        f"{probe.SCANNERS_REQUIRED!r}"
+    )
+    assert isinstance(probe.SCANNER_TIMEOUT_SECONDS, int), (
+        f"SCANNER_TIMEOUT_SECONDS is passed straight to subprocess timeout= "
+        f"and must be an int, not the raw string os.environ hands back; got "
+        f"{type(probe.SCANNER_TIMEOUT_SECONDS)}"
+    )
+    assert probe.SCANNER_TIMEOUT_SECONDS > 0, (
+        f"a non-positive scanner timeout makes every scan time out instantly, "
+        f"which under SCANNERS_REQUIRED blocks every change; got "
+        f"{probe.SCANNER_TIMEOUT_SECONDS}"
+    )
+
+
+def test_scanners_required_reads_the_environment_like_the_other_boolean_knobs():
+    """The knob has to be settable, and settable the way the rest of them are.
+
+    OFFLINE and LLM_DISABLED both parse as `== "true"` case-insensitively, and
+    the demo runbook will set SCANNERS_REQUIRED the same way. A knob that
+    ignored its variable, or that treated the string "false" as truthy -- what
+    plain `bool(os.environ.get(...))` does -- would be worse than no knob:
+    the demo machine would believe it had fail-closed scanners and not have
+    them.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "_config_env_probe", Path(config.__file__)
+    )
+
+    for raw, expected in (
+        ("true", True),
+        ("TRUE", True),
+        ("True", True),
+        ("false", False),
+        ("", False),
+        ("0", False),
+    ):
+        probe = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"SCANNERS_REQUIRED": raw}, clear=True):
+            spec.loader.exec_module(probe)
+        assert probe.SCANNERS_REQUIRED is expected, (
+            f"SCANNERS_REQUIRED={raw!r} must parse to {expected}, got "
+            f"{probe.SCANNERS_REQUIRED!r}"
         )
