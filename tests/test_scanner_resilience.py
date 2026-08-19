@@ -130,16 +130,54 @@ def test_trivy_blocks_a_vulnerable_pin_and_stays_silent_on_the_demo_fixtures():
     assert blocking, "a 'block' verdict with an empty blocking list is incoherent"
 
     # --- half 2: the negative control, on both demo fixtures ---------------
+    #
+    # WHY THE FIXTURES YIELD ZERO -- read this before "fixing" a red here.
+    # TWO separate mechanisms produce it, and only one of them is obvious:
+    #
+    #   1. No dependency manifest. Neither fixture adds a requirements.txt, so
+    #      trivy's VULN scanner has nothing to resolve CVEs against.
+    #   2. The wrapper reads only `Results[].Vulnerabilities`. `trivy fs`
+    #      defaults to `--scanners vuln,secret` (verified on 0.74.0: the flag's
+    #      default is `[vuln,secret]`), so the SECRET scanner is active on every
+    #      call the pipeline makes -- and the poisoned fixture is a file full of
+    #      AWS credentials. It reports nothing today only because
+    #      AKIAIOSFODNN7EXAMPLE and its partner are AWS's own documentation
+    #      example keys, which trivy allowlists. Measured on 0.74.0: the same
+    #      two lines with a fake non-example key of identical shape make the RAW
+    #      report emit `Class=secret` with two CRITICAL secret findings -- and
+    #      `trivy_tool.scan` STILL returns zero Finding objects, because
+    #      `Secrets` is not `Vulnerabilities` and the parser never looks at it.
+    #
+    # So the zero does NOT rest on the fixtures being structurally invisible to
+    # trivy, which is what an earlier version of this comment claimed. It rests
+    # on mechanism 2: the wrapper's parse. Mechanism 1 plus the allowlist is
+    # what keeps the raw report empty, and both of those are mutable -- a
+    # fixture refresh that swaps in a different credential placeholder is a far
+    # more plausible trigger than the CVE database drifting.
+    #
+    # That parser-level insulation is itself UNASSERTED anywhere in this repo.
+    # If secret findings should ever start reaching the verdict, this assertion
+    # is the one that goes red first, and the fix is a decision about
+    # trivy_tool's parse -- not a number to relax here. gitleaks already covers
+    # the credentials on the poisoned fixture (two criticals, pinned exactly by
+    # scripts/scan_gate.py), so nothing is being missed meanwhile.
     for poisoned in (False, True):
         fixture_name = "poisoned" if poisoned else "clean"
         findings = trivy_tool.scan(fixtures_loader.dev(poisoned=poisoned))
 
+        # Strictly `== []`, not "nothing at or above the threshold". The strict
+        # form is where the discrimination lives: a loosened variant still
+        # catches a wrapper returning an unconditional `high`, but PASSES one
+        # returning an unconditional `low`, and half 2 is the only assertion in
+        # this repo covering trivy's output at all.
         assert findings == [], (
-            f"the {fixture_name} demo fixture must yield ZERO trivy findings -- "
-            f"it adds no dependency manifest. Got {len(findings)}: "
-            f"{_summarize(findings)}. Without this, a scan() returning "
-            f"everything unconditionally would satisfy the first half of this "
-            f"test, and scripts/scan_gate.py's expected-findings pins "
-            f"(gitleaks' two criticals on the poisoned diff, nothing blocking "
-            f"on the clean one) would go red next."
+            f"the {fixture_name} demo fixture must yield ZERO trivy findings. "
+            f"Got {len(findings)}: {_summarize(findings)}. See the comment "
+            f"above for the two mechanisms that produce the zero -- if this is "
+            f"a `secret`-class finding, the wrapper's parse changed, not the "
+            f"fixture. Without this half, a scan() returning everything "
+            f"unconditionally would satisfy the first half of this test, and "
+            f"scripts/scan_gate.py's expected-findings pins (gitleaks' two "
+            f"criticals on the poisoned diff, nothing blocking on the clean "
+            f"one) would go red next."
         )
