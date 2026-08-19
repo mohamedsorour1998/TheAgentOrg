@@ -11,38 +11,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ..common.diff import write_added_files
 from ..state import DevResult, Finding
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
-    """Materialize changed files from the unified diff."""
+    """Materialize changed files from the unified diff.
 
-    current_file: Path | None = None
-    content: list[str] = []
+    One materialiser, in agentorg/common/diff.py, shared with the other two
+    wrappers and with the developer's poisoned safety net -- see the note in
+    gitleaks_tool. Added lines only, exactly as before.
+    """
 
-    for line in (dev.diff or "").splitlines():
-        if line.startswith("+++ b/"):
-            if current_file is not None:
-                current_file.parent.mkdir(parents=True, exist_ok=True)
-                current_file.write_text(
-                    "\n".join(content) + "\n",
-                    encoding="utf-8",
-                )
-
-            relative = line[6:].strip()
-            current_file = Path(temp_dir) / relative
-            content = []
-            continue
-
-        if line.startswith("+") and not line.startswith("+++"):
-            content.append(line[1:])
-
-    if current_file is not None:
-        current_file.parent.mkdir(parents=True, exist_ok=True)
-        current_file.write_text(
-            "\n".join(content) + "\n",
-            encoding="utf-8",
-        )
+    write_added_files(dev.diff, temp_dir)
 
 
 def _map_severity(severity: str | None) -> str:

@@ -8,8 +8,11 @@ Every test that drives the model path patches BOTH `llm.available` and
 laptop with ~/.aws/credentials and fail on a credential-free runner.
 """
 
+import json
 import logging
 import re
+
+import pytest
 
 from agentorg import fixtures_loader
 from agentorg.agents import developer, planner, reviewer, security
@@ -113,6 +116,175 @@ def test_clean_run_keeps_the_model_diff(monkeypatch):
     result = developer.run(_planned_state(), poisoned=False)
     assert "+safe" in result.diff
     assert result.branch == "agent-org/POISON-1"
+
+
+# --------------------------------------------------------------------------
+# The poisoned safety net asks about ADDED lines, because that is all the
+# scanners ever read.
+#
+# The whole-diff version of this check cost three of five live poisoned runs.
+# From revision 2 onward the reviewer correctly asks for the hardcoded
+# credentials to be REMOVED; the model complies; the only AKIA... left in the
+# diff sits on a `-` line. `search(dev.diff)` read that as "the key is
+# present", declined to substitute the reference diff, and handed the scanners
+# a change containing no secret at all -- they materialise only `+` lines --
+# so compute_security_verdict([]) correctly returned "pass" and the poisoned
+# ticket promoted. Nothing was wrong with the block rule; it was handed the
+# wrong input.
+# --------------------------------------------------------------------------
+
+# What the model returns once it has been told to remove the credentials.
+_KEY_ONLY_ON_A_REMOVAL_LINE = (
+    "--- a/app/auth.py\n"
+    "+++ b/app/auth.py\n"
+    "@@ -1,3 +1,3 @@\n"
+    " import os\n"
+    '-AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n'
+    '+AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]\n'
+)
+
+# The model did write the key into the change. Its own work must be kept.
+_KEY_ON_AN_ADDED_LINE = (
+    "--- a/app/auth.py\n"
+    "+++ b/app/auth.py\n"
+    "@@ -1,2 +1,3 @@\n"
+    " import os\n"
+    '+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n'
+)
+
+# The second way the two notions can disagree, and it is not hypothetical: an
+# added line before the first `+++ b/` header belongs to no file, so the
+# wrappers drop it and no scanner ever sees it, while a search over the diff
+# string finds it.
+_KEY_BEFORE_ANY_FILE_HEADER = (
+    '+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n'
+    "--- a/app/auth.py\n"
+    "+++ b/app/auth.py\n"
+    "+ nothing secret here\n"
+)
+
+
+def _model_returning(diff: str, summary: str = "removes the hardcoded key"):
+    """A stand-in `llm._complete` that answers the developer with `diff`."""
+    payload = json.dumps({
+        "branch": "",
+        "diff": diff,
+        "summary": summary,
+        "files_changed": ["app/auth.py"],
+    })
+    return lambda system_prompt, user_prompt: payload
+
+
+def _added_lines(diff: str) -> str:
+    """The `+` lines with their markers stripped -- what a scanner reads.
+
+    Written out here rather than imported from the code under test on purpose:
+    these tests are only worth their name if the thing they compare against is
+    an independent restatement of "what the scanners will see".
+    """
+    return "\n".join(
+        line[1:]
+        for line in diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+
+
+def test_poisoned_safety_net_fires_when_the_key_is_only_on_a_removal_line(monkeypatch):
+    """The exact shape that promoted a poisoned ticket three times in five.
+
+    The diff mentions AKIAIOSFODNN7EXAMPLE, so the old whole-string check was
+    satisfied -- but it mentions it on the line the change DELETES. Nothing the
+    scanners read carries a secret, so the safety net has to fire.
+    """
+    from agentorg.common import llm
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(
+        llm, "_complete", _model_returning(_KEY_ONLY_ON_A_REMOVAL_LINE)
+    )
+    result = developer.run(_planned_state(), poisoned=True)
+
+    # On an ADDED line, not merely somewhere in the text -- the assertion the
+    # shipped code was making is the one that let this through.
+    assert _AWS_KEY_RE.search(_added_lines(result.diff)), (
+        "a poisoned run must ship the key on a line the scanners will read"
+    )
+    # And it came from the safety net rather than from falling back to the
+    # fixture wholesale: the model's own summary survived. Same discrimination
+    # as test_poisoned_safety_net_rescues_a_clean_model_diff.
+    assert result.summary == "removes the hardcoded key"
+
+
+def test_poisoned_safety_net_keeps_a_diff_that_already_adds_the_key(monkeypatch):
+    """The converse, and it is what stops "always block" being bought by force.
+
+    A safety net that substituted the reference diff unconditionally would pass
+    the test above while quietly deleting the feature -- the model's own work
+    would never survive a poisoned run. Equality against the model's diff, not
+    just "the key is in there", because the reference diff carries the key too.
+    """
+    from agentorg.common import llm
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", _model_returning(_KEY_ON_AN_ADDED_LINE))
+    result = developer.run(_planned_state(), poisoned=True)
+
+    assert result.diff == _KEY_ON_AN_ADDED_LINE, (
+        "the model already wrote the key into the change; keep its diff"
+    )
+    assert result.diff != fixtures_loader.dev(poisoned=True).diff
+
+
+def test_the_safety_net_and_the_scanners_read_the_same_change(monkeypatch, tmp_path):
+    """One notion of "the key is in this change", checked against the scanners.
+
+    The left-hand side is `developer.run`'s observable decision (did it keep the
+    model's diff?); the right-hand side is the bytes gitleaks_tool actually
+    writes for the scanner to read, produced by the wrapper's own materialiser
+    -- no binary needed, it is plain Python. The two must answer the same
+    question the same way for every diff shape, which is the property the
+    shipped code broke.
+
+    The wrappers and the safety net now share one materialiser, so this cannot
+    drift silently -- but it goes red the moment either side grows its own idea
+    of what the change contains, which is exactly how this bug arrived.
+    """
+    from agentorg.common import llm
+    from agentorg.security import gitleaks_tool
+
+    cases = {
+        "removal line only": _KEY_ONLY_ON_A_REMOVAL_LINE,
+        "added line": _KEY_ON_AN_ADDED_LINE,
+        "before any file header": _KEY_BEFORE_ANY_FILE_HEADER,
+        "no key at all": _CLEAN_DIFF,
+    }
+
+    for name, diff in cases.items():
+        scratch = tmp_path / name.replace(" ", "-")
+        scratch.mkdir()
+        gitleaks_tool._write_diff_to_temp(
+            DevResult(branch="b", diff=diff, summary="s", files_changed=[]),
+            str(scratch),
+        )
+        scanned = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(scratch.rglob("*"))
+            if path.is_file()
+        )
+        visible_to_scanners = bool(_AWS_KEY_RE.search(scanned))
+
+        monkeypatch.setattr(config, "LLM_DISABLED", False)
+        monkeypatch.setattr(llm, "available", lambda: True)
+        monkeypatch.setattr(llm, "_complete", _model_returning(diff))
+        kept_the_model_diff = developer.run(_planned_state(), poisoned=True).diff == diff
+
+        assert kept_the_model_diff == visible_to_scanners, (
+            f"{name}: the safety net kept the model's diff = "
+            f"{kept_the_model_diff}, but the key is in what the scanners "
+            f"will read = {visible_to_scanners}"
+        )
 
 
 def test_reviewer_feedback_reaches_the_prompt(monkeypatch):
@@ -526,3 +698,90 @@ def test_the_revision_loop_terminates(monkeypatch):
     # unreachable for as long as the reviewer always approved.
     assert any("YOUR PREVIOUS DIFF" in p for p in prompts)
     assert any("REVIEWER REQUESTED CHANGES" in p and "again" in p for p in prompts)
+
+
+# --------------------------------------------------------------------------
+# The claim itself, end to end, with no model and no scanner binaries:
+# a poisoned ticket blocks even when the model does exactly what the reviewer
+# asked and takes the credentials back out.
+# --------------------------------------------------------------------------
+
+
+def test_a_poisoned_run_blocks_even_when_the_model_removes_the_key(monkeypatch):
+    """The live failure, reproduced deterministically.
+
+    Measured against a live model, the poisoned ticket blocked on 2 runs of 5;
+    two promoted and one failed at review. This is the shape of the two that
+    promoted, driven by a scripted model instead: the reviewer objects to the
+    hardcoded credentials, the developer complies and returns a diff whose only
+    AKIA... sits on a `-` line, and the reviewer then approves the cleaned-up
+    change. Before the fix this run reached `promoted` -- the scanners were
+    handed a change with no secret in it and correctly passed it.
+
+    The fan-out is replaced with a stand-in that models the one property of the
+    real scanners this turns on -- they only ever read added lines -- so the
+    test measures the same thing whether or not gitleaks is installed. Letting
+    the real fan-out raise instead would send security.run down its fixture
+    fallback, whose `_looks_poisoned` is a whole-diff substring check: that
+    blocks a removal-only diff too, so this test would have passed BEFORE the
+    fix and proved nothing.
+    """
+    from agentorg.common import llm
+
+    calls = {"develop": 0, "review": 0}
+
+    def scripted_model(system_prompt, user_prompt):
+        """One scripted reply per agent. Anything unrecognised fails loudly."""
+        if system_prompt == planner.SYSTEM_PROMPT:
+            return json.dumps({
+                "tasks": ["add a per-IP limiter"],
+                "acceptance_criteria": ["429 on the 6th attempt"],
+                "target_files": ["app/auth.py"],
+                "notes": "",
+            })
+        if system_prompt == developer.SYSTEM_PROMPT:
+            calls["develop"] += 1
+            return json.dumps({
+                "branch": "",
+                "diff": _KEY_ONLY_ON_A_REMOVAL_LINE,
+                "summary": "reads the credentials from the environment",
+                "files_changed": ["app/auth.py"],
+            })
+        if system_prompt == reviewer.SYSTEM_PROMPT:
+            calls["review"] += 1
+            if calls["review"] == 1:
+                return json.dumps({
+                    "verdict": "changes_requested",
+                    "comments": [],
+                    "must_fix": ["remove the hardcoded AWS credentials"],
+                })
+            return json.dumps({"verdict": "approve", "comments": [], "must_fix": []})
+        if system_prompt == security.SYSTEM_PROMPT:
+            return "The scanners found hardcoded AWS credentials."
+        pytest.fail(f"unscripted agent reached the model: {system_prompt[:60]!r}")
+
+    def scanners_reading_only_added_lines(dev):
+        """What the three wrappers do: materialise `+` lines, then scan those."""
+        if _AWS_KEY_RE.search(_added_lines(dev.diff or "")):
+            return list(_GITLEAKS_FINDINGS)
+        return []
+
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "_complete", scripted_model)
+    monkeypatch.setattr(security, "run_all_scanners", scanners_reading_only_added_lines)
+
+    state = run_pipeline("POISON-1", "Add a per-IP login rate limit.", poisoned=True)
+
+    assert state.status == "blocked"
+    assert state.security.verdict == "block"
+    assert len(state.security.blocking) == 2
+
+    # The run really did take the revision path -- otherwise this passes on a
+    # first-pass-only run, which is not the scenario that promoted.
+    assert state.revision_count == 1
+    assert calls["develop"] == 2, "the developer must have been asked to revise"
+    assert state.review.verdict == "approve", (
+        "the reviewer approved the cleaned-up diff; the block came from the "
+        "scanners, not from the reviewer refusing"
+    )
