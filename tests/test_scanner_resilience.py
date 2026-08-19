@@ -1824,50 +1824,59 @@ def test_a_boolean_is_not_quietly_read_as_a_line_number(monkeypatch, tmp_path):
 def test_the_fan_out_stops_at_the_first_absent_scanner_and_hides_real_faults(
     monkeypatch, tmp_path
 ):
-    """A KNOWN LIMIT, pinned so it cannot regress further or be rediscovered.
+    """A KNOWN LIMIT, ACCEPTED BY RULING, pinned here so it cannot be forgotten.
 
-    THIS TEST ASSERTS A FAIL-OPEN. It is not describing correct behaviour; it is
-    recording the exact boundary of the plan's central ruling so the limit is
-    visible in the suite rather than living in a review thread.
+    THIS TEST ASSERTS A FAIL-OPEN. It is not describing correct behaviour. It
+    records the exact boundary of the plan's central ruling, decided deliberately
+    rather than discovered later, so the limit lives in the suite instead of in a
+    review thread.
 
-    WHAT IT DEMONSTRATES
-        `run_all_scanners` is a sequential loop, and the ruling makes an ABSENT
-        binary raise. So the first absent scanner aborts the fan-out and the
-        scanners after it never run. With semgrep absent but gitleaks and trivy
-        INSTALLED AND BROKEN, on a clean diff, measured: `verdict=pass,
-        blocking=0`. Two genuine faults go unreported because the absent raise
-        won the race, and the fixture fallback for a clean diff is `pass`.
+    THE CAUSE IS EXCEPTION-SIGNALLING, NOT THE SEQUENTIAL LOOP. That distinction
+        is the whole finding and it is easy to state backwards. `run_all_scanners`
+        does iterate the three scanners in order -- but a sequential loop is
+        harmless on its own. The abort happens because the knob-off ABSENT path
+        signals absence by RAISING (`_run.unrunnable_findings`), and one raise
+        ends the loop. Change nothing about the loop and the limit persists;
+        change how absence is signalled and it disappears, which is exactly what
+        the second half of this test measures.
 
-    IT IS PRE-EXISTING, not introduced here: measured identical on 40f2e56,
-        before any of this task's changes. It follows directly from
-        raise-on-absent, which is the ruling's design and not this task's choice.
+    WHAT IT DEMONSTRATES. With semgrep absent but gitleaks and trivy INSTALLED
+        AND BROKEN, on a clean diff, measured: `verdict=pass, blocking=0`. Two
+        genuine faults go unreported -- semgrep's raise ends the fan-out before
+        they run, and the fixture fallback for a clean diff is `pass`.
 
-    WHY IT IS NOT FIXED HERE. The fix is a decision above this task: either the
-        fan-out collects per-scanner outcomes instead of letting one raise abort
-        it, or absent stops being signalled by an exception. Both change the
-        frozen `run_all_scanners` seam's behaviour and the meaning of the four
-        fallback-dependent `len(blocking) == 2` assertions, so the coordinator
-        rules on it.
+    IT IS PRE-EXISTING: measured identical on 40f2e56, before any of this task's
+        changes. It follows from raise-on-absent, which is the ruling's design.
 
-    WHAT WOULD MAKE THE FIRST HALF GO RED: fixing the limit. That is the intended
-        outcome -- when it does, replace the first half with one asserting that
-        both real faults ARE reported. A red there is good news; it is not a
-        regression to be silenced.
+    THE KNOB DISSOLVES IT, and this was MEASURED rather than assumed -- the
+        measurement is why this docstring reads the way it does. The first version
+        of this test asserted that `SCANNERS_REQUIRED=true` leaves the abort in
+        place, on the reasoning that the knob changes only what the first failure
+        SAYS. That assertion went RED. With the knob on, the absent branch RETURNS
+        a finding instead of raising, so nothing aborts and all three scanners
+        report -- the absent one and both real faults. The second half below pins
+        that.
 
-    SCANNERS_REQUIRED=true DOES rescue it, and that was worth measuring rather
-        than assuming. I expected the knob to change only what the first failure
-        SAYS, leaving the abort in place -- measured, that is wrong, and the
-        reason is structural: with the knob on, the absent branch of
-        `_run.unrunnable_findings` RETURNS a finding instead of raising, so
-        nothing aborts the loop and all three scanners report. The abort exists
-        only because the knob-off path signals absence with an exception.
+    WHY IT IS NOT FIXED -- RULED ON, not left open. Keep the raise. The two
+        candidate fixes (the fan-out collecting per-scanner outcomes, or absence
+        ceasing to be exception-signalled) both change the frozen
+        `run_all_scanners` seam's behaviour and the meaning of the four
+        fallback-dependent `len(blocking) == 2` assertions, days before a judged
+        demo, on the seam that produces the demo's central claim.
 
-        That sharpens what the coordinator has to rule on. The limit is not "the
-        fan-out is sequential"; it is "absence is signalled by an exception, and
-        only when the knob is off". The demo machine and any production image set
-        the knob true, so the configuration that ships is already the one without
-        the limit -- the exposure is CI's binary-free mode and a developer laptop,
-        where a mixed absent/broken environment is most likely to occur.
+        What the exposure actually is, once the knob is accounted for: a machine
+        with SOME scanners installed and OTHERS installed-but-broken, with the
+        knob OFF. That is not CI -- no binaries at all there, which is the plain
+        absent path and the designed behaviour. It is not the demo machine or any
+        production image -- all three installed, knob on, so no raise occurs and
+        this limit does not exist. It is a HALF-PROVISIONED LAPTOP.
+
+        ACCEPTED COST: such a machine under-reports faults until someone sets the
+        knob. This test is what makes that acceptable rather than unknown.
+
+    WHAT WOULD MAKE THE FIRST HALF GO RED: fixing the limit. That is a good
+        outcome, not a regression -- when it happens, replace the first half with
+        one asserting both real faults ARE reported. Do not silence it.
     """
     bin_dir = tmp_path / "bin"
     for tool in ("gitleaks", "trivy"):

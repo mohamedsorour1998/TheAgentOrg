@@ -79,6 +79,42 @@ WHERE THE `SCANNERS_REQUIRED` DECISION LIVES, AND WHY IT MOVED HERE
     So `unrunnable_findings` below owns it, once. The wrappers still choose
     WHETHER to call it -- they alone know a `None` from `run_scanner` is what
     happened -- but not what it means.
+
+THE FIELD READERS COVER TODAY'S DEREFERENCES, AND NOTHING ENFORCES THAT
+
+    READ THIS BEFORE ADDING A FIELD READ TO ANY WRAPPER'S PARSE LOOP. The
+    `report_text` / `report_int` / `report_mapping` / `report_objects` group
+    below exists because a report can parse as valid JSON, satisfy every
+    top-level shape guard, and still carry a wrong-typed INNER field that crashes
+    the loop on dereference. MEASURED, 9 of 9 such cases raised before these
+    readers existed -- ValueError, TypeError, AttributeError, pydantic
+    ValidationError -- and end to end that was a FAIL-OPEN: on a clean diff with
+    all three scanners installed and misbehaving, `security.run` returned
+    `verdict=pass, blocking=0`, because the crash reached agents/security.py's
+    fixture fallback and the fixture verdict for a clean diff is "pass".
+
+    The readers cover exactly the eleven fields the three loops read TODAY. They
+    are not a schema and they are not applied automatically. A new field read
+    written as a bare `container.get("Whatever")` reintroduces the same crash
+    class, in the same fail-open direction, and:
+
+      * ruff will NOT catch it -- a `.get()` is unremarkable code;
+      * no test will catch it either, unless someone writes the wrong-typed case
+        for that specific field;
+      * the crash surfaces at the security gate, which is the worst place for it.
+
+    The only structural hint is the `except ReportShapeError` block wrapping each
+    wrapper's parse loop. If you add a field read, add it through a reader.
+
+    AND THE READERS THEMSELVES WERE MUTATION-TESTED, because one of them was
+    unpinned on first writing: `report_int`'s final fall-through raise -- the
+    branch for a value that is neither int, bool, nor str -- was reached by NO
+    test. Replacing it with `return default` left the entire suite GREEN at 175
+    passed. It was found by mutating the code, not by reading it, in the very
+    round whose purpose was closing this crash class. Two cases were added for
+    it. Treat any change to these readers the same way: mutate the branch and
+    confirm a test goes red, because a silently-defaulting reader is
+    indistinguishable from a working one until a scanner misbehaves.
 """
 
 import logging
