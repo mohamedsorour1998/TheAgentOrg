@@ -241,9 +241,15 @@ jobs:
               --deployment-type container \
               --non-interactive
 
+            # --image-tag pins the deployed image to this commit. Without it the
+            # CLI generates a YYYYMMDD-HHMMSS-mmm timestamp tag, so nothing
+            # afterwards can say which commit a running runtime came from --
+            # exactly what tests/test_deploy_workflow.py asserts against, and it
+            # caught this omission in review rather than after the demo.
             agentcore deploy \
               --agent "theagentorg_${agent}" \
               --env "AGENT_ROLE=${agent}" \
+              --image-tag '${{ github.sha }}' \
               --auto-update-on-conflict
 
             echo "::endgroup::"
