@@ -19,9 +19,12 @@ Two modes:
 The local path is the demo's insurance policy: `OFFLINE=true LLM_DISABLED=true`
 walks the whole pipeline, poisoned ticket included, with the network unplugged.
 
-Still to build:
-    - deploy_note(), co-owned with Sorour                   (week3.md)
-  see docs/plan/mariam/.
+deploy_note() is the third mode, and it is read-only: it asks the AgentCore
+control plane whether the five theagentorg_* runtimes are actually READY and
+says so. Like the two above it degrades rather than raising -- no credentials,
+no network and a half-finished deploy each get an honest sentence -- because it
+is rendered beside the pipeline status and a fabricated deploy claim is worse
+than an admitted unknown.
 """
 
 import hashlib
@@ -348,10 +351,183 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         return _undelivered(f"comment on the PR for branch {branch!r}", exc, body, ref)
 
 
-def deploy_note() -> str:
-    """Placeholder for the AgentCore deploy step you co-own with Sorour.
+# The five AgentCore runtimes this repo deploys, in the order the spec prints
+# them (docs/plan/mariam/week3.md:118-131). UNDERSCORED on purpose: these are
+# AgentCore RUNTIME names, a different namespace from the HYPHENATED ECR
+# REPOSITORY names (theagentorg-shared-<agent>-agent) recorded in
+# docs/plan/week1-verification-log.md, which Tasks 5/6 push images to. Both are
+# real and they name different things, so neither can be derived from the other.
+DEPLOYED_AGENTS = ("planner", "developer", "reviewer", "security", "sre")
+RUNTIME_NAMES = tuple(f"theagentorg_{a}" for a in DEPLOYED_AGENTS)
 
-    See infra/agentcore/ for the Terraform. This function is where the deploy
-    pipeline (build image -> push ECR -> update AgentCore runtime) gets wired in.
+# The one runtime status that means "deployed and serving". AgentCore's own
+# service model also reports CREATING, CREATE_FAILED, UPDATING, UPDATE_FAILED
+# and DELETING -- read out of botocore's bedrock-agentcore-control model rather
+# than guessed:
+#     status enum: ['CREATING', 'CREATE_FAILED', 'UPDATING', 'UPDATE_FAILED',
+#                   'READY', 'DELETING']
+# Accepting any of the others would let a runtime that FAILED to create render
+# as a live deploy, which is the exact fabricated success this function exists
+# to prevent. Existence is not readiness.
+RUNTIME_READY = "READY"
+
+# Bounds on the one network call this module makes. botocore's defaults are
+# connect_timeout=60, read_timeout=60 and legacy retries -- measured, not
+# assumed. deploy_note()'s return value is rendered on the projector during a
+# judged demo, so an unreachable control plane behind those defaults stalls the
+# demo for minutes before it can print anything honest. A fast, honest "not
+# verified" beats a correct answer that arrives after the audience has moved on,
+# so this call gets one attempt and gives up in seconds.
+AGENTCORE_CONNECT_TIMEOUT = 3
+AGENTCORE_READ_TIMEOUT = 5
+
+
+def _aws_credentials_available() -> bool:
+    """True when an AgentCore call is worth attempting. Makes no network call.
+
+    Same shape and same reasoning as llm.available() (common/llm.py:44-61):
+    resolving credentials is local, so this separates "nobody configured AWS"
+    -- routine on CI and on every teammate's laptop -- from "AWS was configured
+    and the call failed", which is an anomaly worth a projector line. The two
+    deserve different log levels, and that is the whole reason they are two
+    branches rather than one try/except around a real API call.
     """
-    return "deploy not wired yet — pair with Sorour on infra/agentcore/"
+    try:
+        import boto3
+
+        session = boto3.Session(region_name=config.AWS_REGION)
+        return session.get_credentials() is not None
+    except Exception:
+        # Routine on a machine with no AWS setup, so this stays at debug level
+        # -- and the exc_info is what satisfies ruff BLE001 for the broad
+        # clause. Broad on purpose: the failure set spans boto3, botocore and
+        # the credential file itself, and deploy_note() must not raise.
+        logging.getLogger(__name__).debug(
+            "AWS credential lookup failed; treating the deploy as unverified",
+            exc_info=True,
+        )
+        return False
+
+
+def _agentcore_client():
+    """Bounded bedrock-agentcore-control client. The seam tests replace.
+
+    boto3 is imported lazily, as in llm.available(): a module-level import here
+    would make every `import agentorg.github_ops` -- including the graph's, and
+    CI's -- pay for botocore whether or not anything asks about the deploy.
+    """
+    import boto3
+    from botocore.config import Config
+
+    return boto3.client(
+        "bedrock-agentcore-control",
+        region_name=config.AWS_REGION,
+        config=Config(
+            connect_timeout=AGENTCORE_CONNECT_TIMEOUT,
+            read_timeout=AGENTCORE_READ_TIMEOUT,
+            retries={"max_attempts": 0},
+        ),
+    )
+
+
+def _unverified(reason: str, detail: str = "", *, routine: bool = False) -> str:
+    """The one honest answer for every path that could not confirm the deploy.
+
+    Three causes reach this -- no credentials, the call failed, and the
+    runtimes are not (all) there -- and they share one function for the reason
+    _undelivered does: one shape cannot drift out of step with itself, and
+    three bespoke messages can. What varies between them is one thing only,
+    the log LEVEL, so that is the only parameter.
+
+    `routine` picks it, and the split is the same one llm.available() makes. No
+    credentials is the COMMON path -- CI has no secrets and neither does a
+    teammate's laptop -- so warning there would put a line on the projector on
+    every single call and train the demo's audience to ignore warnings. That
+    goes to DEBUG. Credentials that exist but do not work is an anomaly nobody
+    has seen yet, and it is worth one bounded WARNING line.
+
+    Bounded is load-bearing, exactly as in _undelivered: a botocore error
+    carries the whole HTTP response, and this string lands on the projector
+    beside the pipeline status, where a wall of text reads as a crash. Both
+    halves go through _one_line -- imported from security, not copied, so the
+    callers' 200-char bound cannot drift.
+
+    The prefix deliberately does NOT reuse the verified message's
+    "AgentCore runtimes (us-east-1): " opening. Sharing it would make the two
+    outcomes indistinguishable to a test asserting on the prefix -- and to a
+    human glancing at the projector, which is worse.
+    """
+    note = f"AgentCore deploy unverified: {_one_line(reason, limit=100)}"
+    if detail:
+        note = f"{note} ({_one_line(detail)})"
+    log = logging.getLogger(__name__)
+    if routine:
+        log.debug("%s", note)
+    else:
+        log.warning("%s", note)
+    # No print(). _undelivered prints because its RETURN value is a ref and the
+    # reason had nowhere else to go; here the return value IS the message the
+    # caller displays, so printing would put it on the projector twice.
+    return note
+
+
+def deploy_note() -> str:
+    """Report the AgentCore deploy target for the log/UI. Never raises.
+
+    Takes no arguments and returns a str, so the spec's done-when
+    (`python -c "... print(github_ops.deploy_note())"`) still calls it bare.
+
+    The spec (week3.md:118-131) writes this as a hardcoded one-liner. That
+    satisfies its done-when while asserting a deploy that may not exist, and
+    plan Task 4 forbids exactly that: "no AWS credentials, no network, or no
+    deployment yet must produce an honest message, never an exception and never
+    a fabricated success." So the spec's string stays REACHABLE -- character
+    for character, on the verified path -- but is not the unconditional return
+    value. Controller Ruling 10.
+
+    Four outcomes, and every one of them returns a non-empty string:
+      * no credentials      -> unverified, DEBUG (the CI and laptop path)
+      * the call failed     -> unverified, WARNING, with the cause bounded
+      * all five are READY  -> the spec's exact string
+      * anything else       -> unverified, naming what is missing or not ready
+
+    The fourth is the `else`, not a fifth branch that forgot to return. An
+    unrecognised state rendering as an empty string would be silence -- which
+    is indistinguishable from the absent deploy note this function replaced.
+    """
+    if not _aws_credentials_available():
+        return _unverified("no AWS credentials", routine=True)
+
+    try:
+        pages = _agentcore_client().get_paginator("list_agent_runtimes").paginate()
+        # Paginated, not a bare list_agent_runtimes(): the five runtimes share
+        # an account with whatever else is deployed there, so a single page is
+        # not a promise of the whole set. Parsing lives inside the try with the
+        # call, so a response shaped differently than expected degrades here
+        # instead of raising out of a function that must not raise.
+        ready = {
+            r.get("agentRuntimeName")
+            for page in pages
+            for r in page.get("agentRuntimes", [])
+            if r.get("status") == RUNTIME_READY
+        }
+    except Exception as exc:
+        # The traceback goes to a separate inline DEBUG call, as in
+        # post_comment (github_ops.py:314-318, 347): that is what BLE001 wants
+        # in the handler itself, and a call to _unverified would not provide
+        # it. Broad on purpose -- the failure set spans boto3, botocore, the
+        # network and the response shape, and any one of them escaping would
+        # turn a status line into a crashed demo.
+        logging.getLogger(__name__).debug("deploy_note failure traceback", exc_info=True)
+        return _unverified(f"could not list runtimes in {config.AWS_REGION}",
+                           f"{type(exc).__name__}: {exc}")
+
+    # Exact set membership, never a substring or prefix test: a runtime called
+    # theagentorg_planner_v2 must not be able to satisfy theagentorg_planner.
+    missing = [name for name in RUNTIME_NAMES if name not in ready]
+    if not missing:
+        return f"AgentCore runtimes (us-east-1): {', '.join(RUNTIME_NAMES)}"
+    return _unverified(
+        f"{len(RUNTIME_NAMES) - len(missing)} of {len(RUNTIME_NAMES)} runtimes ready",
+        f"not ready: {', '.join(missing)}",
+    )
