@@ -90,6 +90,25 @@ jobs:
       - name: Run tests
         run: pytest -q
 
+      # target_repo/ is a separate tiny project: `app` is importable only from
+      # inside it, so the root `pytest -q` (testpaths = ["tests"]) never
+      # collects these five tests. They cover app/auth.py -- the file every
+      # poisoned and clean diff in this repo is written against -- so a change
+      # that breaks the login handler would otherwise reach the demo with CI
+      # green. No `pip install flask` here on purpose: flask is an uncommented
+      # hard dependency in [project].dependencies, so the Install step above
+      # (`pip install -e ".[dev]"`) already provides it, and a second install
+      # would be a second place for the version to drift.
+      # `python -m pytest`, NOT the bare `pytest` used at line 91: `python -m`
+      # prepends cwd to sys.path, the console script does not, and
+      # pythonpath = ["."] resolves against rootdir (the repo root, via
+      # pyproject.toml) rather than cwd. Measured from inside target_repo: the
+      # bare form dies with `ModuleNotFoundError: No module named 'app'` during
+      # collection. Do not harmonise this line with the step above.
+      # Owner of the tests: Reem; owner of this workflow: Mariam.
+      - name: Target app tests
+        run: cd target_repo && python -m pytest tests -q
+
   scan:
     runs-on: ubuntu-latest
     # Budget: three binary installs, a ~108 MB database, and two scans. The
