@@ -25,6 +25,8 @@ See tests/dora_runner.py's module docstring for all three defects.
 Run: pytest -q tests/test_dora_harness.py
 """
 
+import pytest
+
 from tests import dora_runner
 from tests import provenance as prov
 from tests.dora_runner import (
@@ -182,9 +184,54 @@ def test_rows_serialise_for_the_report_file():
 
 
 def test_the_harness_records_the_ambient_provenance_mode():
-    """The label must match the machine, or every row is mislabelled."""
+    """The label must match the machine, or every row is mislabelled.
+
+    THE BRANCH PREDICATE IS `all three`, NOT `any`, AND THE DIFFERENCE IS
+    MEASURED. `answered_from_fixture` only refuses to answer when ALL THREE
+    binaries are installed (provenance.py:106, `len(installed) ==
+    len(SCANNER_TOOLS)`). A truthy `binaries_installed()` here would take the
+    real-scanners arm on a HALF-provisioned machine while the runner correctly
+    returns "fixture", failing on a configuration that is an accepted limit
+    rather than a defect. Measured with one fake gitleaks on PATH:
+
+        installed=['gitleaks']  truthy=True  len==len(SCANNER_TOOLS)=False
+        describe_mode()=HALF-PROVISIONED: only ['gitleaks'] on PATH -- ...
+
+    Not reachable on this machine (no binaries), but it becomes reachable the
+    day the demo machine is provisioned, which is the day it would matter most.
+    """
     row = run_agent_org("POISON-1", TICKET_TEXT, poisoned=True)
-    if prov.binaries_installed():
+    if len(prov.binaries_installed()) == len(prov.SCANNER_TOOLS):
         assert row.provenance in ("real_scanners", "unknown"), prov.describe_mode()
     else:
+        # No binaries, or only some: the fan-out falls back to the fixture.
         assert row.provenance == "fixture", prov.describe_mode()
+
+
+def test_an_unanswerable_provenance_is_recorded_as_unknown_not_guessed():
+    """The `unknown` branch, which Task 8 can render onto a demo slide.
+
+    `provenance.answered_from_fixture` raises rather than guessing when its two
+    signals disagree -- the two line-number sets overlap at line 4, so no single
+    observation can discriminate. run_agent_org catches that and records
+    "unknown" rather than letting the RuntimeError abort a 20-run batch.
+
+    Reached by making the discriminator raise, which needs no scanner binary and
+    no edit to another lane's file. Without this test the branch is dead code
+    that can still reach a judge's eye.
+    """
+    def _raises(state):
+        raise RuntimeError("the two signals disagree; provenance is unknown")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(dora_runner.prov, "answered_from_fixture", _raises)
+        row = run_agent_org("POISON-1", TICKET_TEXT, poisoned=True)
+
+    assert row.provenance == "unknown", (
+        "when the discriminator refuses to answer, the row must say so rather "
+        "than guessing a mode -- a wrong provenance is a fabricated metric"
+    )
+    # The rest of the row must still be real: refusing to label the provenance
+    # is not a reason to lose the measurement.
+    assert row.final_status == "blocked"
+    assert row.bad_change_shipped is False
