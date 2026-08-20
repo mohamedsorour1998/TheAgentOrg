@@ -51,36 +51,74 @@ absent from the target directory:
     -> SPURIOUS SUCCESS from <worktree>/agentorg/agents/security.py
 
 So an in-process import, or any subprocess that loads the venv's site-packages,
-passes against the very defect this file exists to catch. Measured directly:
-revert the declaration AND drop the `-S`, and the three import tests below pass
-3/3 against a tree containing no subpackages at all.
+passes against the very defect this file exists to catch. Measured on a SELECTED
+node -- `pytest "tests/test_packaging.py::test_the_packaged_install_can_be_imported"`
+with the declaration reverted and the `-S` dropped -- that is 3 passed against a
+tree containing no subpackages at all.
 
 `-S` is what defeats it: it skips `site`, so the `.pth` never executes and the
 finder is never installed. The subpackages then have to be really present in the
-target for the import to resolve. Note that the suite stays GREEN if you remove
-the `-S` while the declaration is correct -- the guard test explains why -- so
-this is a line that has to be defended by reading, not by watching CI.
+target for the import to resolve.
+
+Two measurements bound how much protection there is if someone deletes the `-S`,
+and the distinction matters because an earlier version of this docstring got it
+wrong in the pessimistic direction:
+
+  * Whole-file run, declaration broken AND `-S` dropped: `6 failed, 3 passed`.
+    The subpackage and data-file tests read the filesystem directly, so they do
+    not care about `-S`, and `test_the_editable_finder_is_not_what_resolves_these_imports`
+    fires too. CI runs whole files, so CI would catch that pairing.
+  * Whole-file run, declaration CORRECT and `-S` dropped: `10 passed`. Nothing
+    notices, because the finder is only a fallback and the temp install satisfies
+    every import on its own.
+
+The second line is the real risk: a cleanup that drops the `-S` looks harmless
+forever, and only becomes a hole when a later packaging change lands. That is
+what `test_the_isolation_flag_is_actually_set` closes -- it asserts
+`sys.flags.no_site` from inside the subprocess, so it fails on `-S` removal
+regardless of the declaration's state.
 
 `-S` also means the venv's site-packages is not on the path, so pydantic and the
 rest are gone too. Hence the explicit two-entry PYTHONPATH: the temp target
 first, the venv's already-installed dependencies second. That also keeps the
 install itself `--no-deps`, so this test needs no network for dependencies.
 
-WHAT NEEDS NETWORK, AND WHY THAT IS NOT A `--no-index` TEST
------------------------------------------------------------
+WHY THIS FILE MUST NOT SKIP WHEN THE NETWORK IS DOWN
+----------------------------------------------------
 
-`pyproject.toml` declares no `[build-system]`, so pip falls back to a PEP 517
-build that requires `setuptools>=40.8.0` in an isolated env. `setuptools` is NOT
-installed in `.venv-sorour`, so pip fetches it (or serves it from pip's HTTP
-cache). Measured with `--no-index`:
+An isolated PEP 517 build provisions its backend from an index, so on a machine
+with no network and a cold pip cache the build cannot start. The first version of
+this file skipped in that case, reasoning that a missing wheelhouse is not a
+packaging defect. That reasoning was wrong, and measurably so:
 
-    ERROR: Could not find a version that satisfies the requirement
-    setuptools>=40.8.0 (from versions: none)
+    PIP_NO_INDEX=1 pytest tests/test_packaging.py -q   ->  9 skipped, RC=0
 
-So this test can need the network on a cold pip cache, and is skipped rather
-than failed when the build cannot get its backend -- a missing wheelhouse is not
-a packaging defect. `--no-deps` still means it never fetches this project's own
-runtime dependencies.
+RC=0 held even with the declaration reverted to the broken `packages =
+["agentorg"]`. A skip that survives the defect the file exists to catch is not a
+safety net -- CI reports green on a container-breaking bug.
+
+Two changes fix that. `pyproject.toml` now declares `[build-system]` explicitly
+instead of leaning on pip's implicit `setuptools>=40.8.0`, and the fixture RETRIES
+with `--no-build-isolation`, which uses the setuptools already installed here and
+so needs no index at all. Same command with both in place:
+
+    PIP_NO_INDEX=1 pytest tests/test_packaging.py -q   ->  10 passed
+
+and with the declaration reverted as well:
+
+    PIP_NO_INDEX=1 pytest tests/test_packaging.py -q   ->  10 failed
+
+which is the point: offline, the verdict now tracks the declaration.
+
+The retry is GATED, because an ungated one hides a different defect --
+`--no-build-isolation` ignores `[build-system] requires` entirely, so it will
+happily build against a pin no container could satisfy. See
+`_local_backend_satisfies_declared_requires`. `--no-deps` throughout means this
+project's own runtime dependencies are never fetched.
+
+A skip survives for exactly one case: no index reachable AND no setuptools
+importable, i.e. the environment cannot build any package at all and so cannot
+say anything about this declaration either way.
 
 WHY IT BUILDS FROM A COPY AND PASSES `--no-cache-dir`
 -----------------------------------------------------
@@ -102,9 +140,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -135,6 +176,69 @@ REQUIRED_DATA_FILES = (
 VENV_SITE_PACKAGES = Path(sys.prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 
 
+def _pip_install(source: Path, target: Path, *, isolated: bool) -> subprocess.CompletedProcess:
+    """Run one `pip install` of `source` into `target`."""
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--no-deps",       # never fetch this project's runtime deps
+        "--no-cache-dir",  # never serve a previously built wheel
+    ]
+    if not isolated:
+        # Use the setuptools already in this venv instead of provisioning a
+        # fresh one. This is the offline path -- see the fixture below.
+        command.append("--no-build-isolation")
+    command += [f"--target={target}", str(source)]
+
+    return subprocess.run(command, capture_output=True, text=True, check=False)
+
+
+def _is_backend_unobtainable(output: str) -> bool:
+    """True only when pip could not IMPORT a build backend at all.
+
+    Deliberately narrow: it must not match a build that ran and failed. The
+    signal is `--no-build-isolation` being unable to import the declared
+    backend, i.e. it is genuinely not installed here:
+
+        BackendUnavailable: Cannot import 'setuptools.build_meta'
+    """
+    return "BackendUnavailable" in output or "Cannot import 'setuptools.build_meta'" in output
+
+
+def _local_backend_satisfies_declared_requires() -> bool:
+    """Whether the INSTALLED backend satisfies `[build-system] requires`.
+
+    This gates the `--no-build-isolation` retry, and it is the difference
+    between a useful fallback and a fallback that hides defects.
+
+    `--no-build-isolation` does not read `requires` at all -- it just imports
+    whatever backend is installed. So retrying unconditionally makes an
+    UNSATISFIABLE pin build happily: measured, `requires = ["setuptools>=999"]`
+    installed fine and all 10 tests passed, even though an isolated build (what
+    a container does) cannot resolve that pin and every image would fail. That
+    is a genuine packaging defect being masked by the test's own safety net.
+
+    So the retry is only allowed when the local backend is a version the
+    declared pin would actually have accepted. If it is not, the isolated
+    build's failure is the honest answer and it propagates.
+    """
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    requires = pyproject.get("build-system", {}).get("requires", [])
+
+    for raw in requires:
+        requirement = Requirement(raw)
+        try:
+            installed = version(requirement.name)
+        except PackageNotFoundError:
+            return False
+        if not requirement.specifier.contains(installed, prereleases=True):
+            return False
+    return True
+
+
 @pytest.fixture(scope="module")
 def installed_package(tmp_path_factory):
     """`pip install` this project into a throwaway dir and hand back the path.
@@ -157,36 +261,45 @@ def installed_package(tmp_path_factory):
         ignore=shutil.ignore_patterns("__pycache__"),
     )
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-deps",       # never fetch this project's runtime deps
-            "--no-cache-dir",  # never serve a previously built wheel
-            f"--target={target}",
-            str(source),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    # Attempt 1: a normal isolated PEP 517 build, exactly what a container does.
+    result = _pip_install(source, target, isolated=True)
 
     if result.returncode != 0:
-        combined = result.stdout + result.stderr
-        # A PEP 517 build needs setuptools from the network on a cold cache.
-        # That is an environment limitation, not a packaging defect.
-        if "setuptools" in combined and (
-            "No matching distribution" in combined
-            or "Could not find a version" in combined
-        ):
-            pytest.skip(
-                "cannot build a wheel: pip could not obtain the setuptools "
-                f"build backend (needs network on a cold cache).\n{combined}"
+        # Attempt 2: the same build using the setuptools already installed in
+        # this venv. Isolated builds provision the backend from an index, so
+        # attempt 1 fails on a machine with no network and a cold pip cache --
+        # and THAT is what used to make this whole file skip, which meant CI
+        # reported green on the container-breaking defect it exists to catch.
+        # Retrying without isolation removes the network from the equation.
+        if not _local_backend_satisfies_declared_requires():
+            # The declared `requires` cannot be met by what is installed here,
+            # so a --no-build-isolation retry would build with a backend the
+            # declaration does not actually allow -- passing a build that a
+            # container could never perform. Report the isolated failure.
+            pytest.fail(
+                "pip could not build the package, and [build-system] requires "
+                "in pyproject.toml is not satisfied by the installed backend, "
+                "so this cannot be retried without isolation. A container build "
+                f"would fail the same way.\n{result.stdout}{result.stderr}",
+                pytrace=False,
             )
-        pytest.fail(f"pip install failed:\n{combined}", pytrace=False)
+
+        fallback = _pip_install(source, target, isolated=False)
+        if fallback.returncode != 0:
+            combined = (
+                f"isolated build:\n{result.stdout}{result.stderr}\n"
+                f"--no-build-isolation retry:\n{fallback.stdout}{fallback.stderr}"
+            )
+            if _is_backend_unobtainable(fallback.stdout + fallback.stderr):
+                # No network AND no local setuptools. The environment cannot
+                # build any package at all, so it cannot say anything about
+                # THIS package's declaration. Fix: pip install setuptools.
+                pytest.skip(
+                    "cannot build a wheel: no index reachable and no setuptools "
+                    "importable in this environment, so the declaration cannot "
+                    f"be exercised either way.\n{combined}"
+                )
+            pytest.fail(f"pip install failed:\n{combined}", pytrace=False)
 
     return target
 
@@ -198,9 +311,22 @@ def _import_in_clean_subprocess(target: Path, module: str) -> subprocess.Complet
     runs and cannot redirect `agentorg` to the source worktree. See the module
     docstring -- without this the test passes against the very defect it exists
     to catch.
+
+    Prints TWO lines, because the second is what keeps `-S` honest:
+
+      1. the resolved `__file__` of the imported module
+      2. `sys.flags.no_site`, which CPython sets to 1 under `-S` and 0 without it
+
+    Reporting the flag from inside the subprocess is what lets
+    `test_the_isolation_flag_is_actually_set` fail the moment the `-S` is
+    deleted, without any test having to read its own source.
     """
+    probe = (
+        f"import sys; import {module}; "
+        f"print({module}.__file__); print(sys.flags.no_site)"
+    )
     return subprocess.run(
-        [sys.executable, "-S", "-c", f"import {module}; print({module}.__file__)"],
+        [sys.executable, "-S", "-c", probe],
         cwd=target,
         env={
             "PYTHONPATH": os.pathsep.join([str(target), str(VENV_SITE_PACKAGES)]),
@@ -212,37 +338,64 @@ def _import_in_clean_subprocess(target: Path, module: str) -> subprocess.Complet
     )
 
 
+def test_the_isolation_flag_is_actually_set(installed_package):
+    """Fail if the `-S` is ever removed from the import subprocess.
+
+    `-S` is the single line that stops the editable finder from answering these
+    imports out of the source worktree. Losing it does not turn the suite red on
+    its own -- the finder is a fallback, so with a CORRECT declaration everything
+    still resolves from the temp install -- which makes it exactly the kind of
+    line a future cleanup deletes as redundant. The regression only surfaces
+    later, paired with a packaging change, as a test that cannot fail.
+
+    CPython sets `sys.flags.no_site` to 1 under `-S` and 0 without it, and
+    `_import_in_clean_subprocess` reports it on its second output line. Asserting
+    on that closes the gap directly, with no introspection of this file's own
+    source.
+    """
+    result = _import_in_clean_subprocess(installed_package, "agentorg.common.llm")
+    assert result.returncode == 0, (
+        f"import failed, so the isolation flag cannot be read:\n{result.stderr}"
+    )
+
+    no_site = result.stdout.splitlines()[1].strip()
+
+    assert no_site == "1", (
+        "the import subprocess ran WITHOUT -S (sys.flags.no_site == "
+        f"{no_site!r}), so site processing was active and "
+        "__editable__.theagentorg-0.1.0.pth could resolve `agentorg` from the "
+        "source worktree. Restore the -S: it is what makes these tests capable "
+        "of failing."
+    )
+
+
 def test_the_editable_finder_is_not_what_resolves_these_imports(installed_package):
     """Guard on the instrument: assert these imports resolve to the TEMP INSTALL.
 
-    Read the scope of this guard carefully, because it is narrower than it looks
-    and the difference was measured, not assumed.
+    Asserts these imports resolve inside the temp install, so it catches the
+    packaged tree being bypassed entirely -- a `sys.path` order mistake, a stray
+    `cwd`, or an import that silently reads the worktree. It fails with both
+    paths printed.
 
-    It DOES catch the case where the packaged tree is bypassed entirely -- a
-    `sys.path` order mistake, a stray `cwd`, or an import that silently reads the
-    worktree. It fails with both paths printed.
+    On the specific question of a deleted `-S`, this guard fires whenever the
+    finder actually ends up answering the import, which is the case when the
+    declaration is ALSO broken: whole-file run with both mutations gives
+    `6 failed, 3 passed`, and this test is one of the six, reporting "resolved
+    ... to the SOURCE WORKTREE".
 
-    It does NOT, on its own, catch the removal of `-S`. Measured: delete the
-    `-S`, keep the fixed declaration, and all nine tests here still pass. The
-    reason is that the editable finder is a FALLBACK, not an override -- its hook
-    is `if not paths and fullname in MAPPING`, so it only supplies `agentorg`
-    when nothing else did. With the subpackages present in the temp target, the
-    PYTHONPATH entry wins and this assertion sees the temp install either way.
-
-    What actually goes wrong without `-S` is the pairing with a BROKEN
-    declaration, and that combination was measured too: revert the declaration
-    AND drop the `-S`, and `test_the_packaged_install_can_be_imported` passes 3/3
-    against a tree with no subpackages in it at all. That is the silent-coverage
-    failure this file exists to prevent, and `-S` is the only thing preventing
-    it. So `-S` is load-bearing and must not be removed to "simplify" the
-    subprocess call, even though the suite stays green when you do.
+    It does NOT fire when the `-S` is dropped while the declaration is correct
+    (whole-file run: `10 passed`), because the editable finder is a FALLBACK --
+    its hook is `if not paths and fullname in MAPPING`, so with the subpackages
+    present in the temp target the PYTHONPATH entry wins and this assertion sees
+    the temp install either way. `test_the_isolation_flag_is_actually_set` is
+    what covers that case, by reading `sys.flags.no_site` directly.
     """
     result = _import_in_clean_subprocess(installed_package, "agentorg.agents.security")
     assert result.returncode == 0, (
         f"import failed, so the instrument cannot be checked:\n{result.stderr}"
     )
 
-    resolved = Path(result.stdout.strip()).resolve()
+    resolved = Path(result.stdout.splitlines()[0].strip()).resolve()
     worktree_copy = (REPO_ROOT / "agentorg" / "agents" / "security.py").resolve()
 
     assert resolved != worktree_copy, (
@@ -268,6 +421,34 @@ def test_a_non_editable_install_ships_every_subpackage(installed_package, subpac
     )
     assert (shipped / "__init__.py").is_file(), (
         f"agentorg/{subpackage}/ shipped without its __init__.py"
+    )
+
+
+def test_the_install_ships_agentorg_and_nothing_else(installed_package):
+    """Nothing but `agentorg` and its dist-info should land in the target.
+
+    `include = ["agentorg*"]` is a prefix pattern, so the risk in the other
+    direction is over-shipping: a bare `find` with no include, or a widened
+    pattern, sweeps in `tests`, `scripts`, `infra`, `target_repo` and `docs` as
+    top-level importable packages.
+
+    Honest about the limit: this fixture builds from a copy holding only
+    `pyproject.toml` and `agentorg/`, so a mutation to `include = ["*"]` has
+    nothing extra to find and stays green. That hermetic copy is what closes the
+    stale-build/lib trap, so it is deliberately kept. This assertion therefore
+    catches accidental data-file or module sprawl inside the built wheel, not
+    every possible widening of the pattern.
+    """
+    shipped = sorted(p.name for p in installed_package.iterdir())
+    unexpected = [
+        name
+        for name in shipped
+        if name != "agentorg" and not name.endswith(".dist-info")
+    ]
+
+    assert not unexpected, (
+        f"a non-editable install put unexpected entries at the top level: {unexpected}. "
+        "Only agentorg/ and its .dist-info should be there."
     )
 
 
