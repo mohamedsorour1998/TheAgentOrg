@@ -100,6 +100,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Prints the token's actual `sub` claim BEFORE trying to assume the role.
+      # The first run of this workflow failed with "Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity" while the role's trust policy did list
+      # `repo:mohamedsorour1998/TheAgentOrg:*` with StringLike, the OIDC provider
+      # existed, and its ClientIDList held sts.amazonaws.com -- every part
+      # checked and correct. When the policy looks right and the assumption
+      # still fails, the remaining unknown is what the token actually says, and
+      # guessing at it is how an afternoon disappears. This decodes the claim
+      # set so the mismatch is visible rather than inferred. Cheap, and it stays
+      # because the next person to hit this will want the same line.
+      - name: What does our OIDC token actually claim
+        run: |
+          set -euo pipefail
+          tok="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')"
+          # Payload only, decoded with jq -- no heredoc, because the whole run
+          # block is indented inside YAML and an indented terminator does not
+          # match. tr/printf pad the base64 to a multiple of four.
+          body="$(cut -d. -f2 <<<"$tok" | tr '_-' '/+')"
+          case $(( ${#body} % 4 )) in
+            2) body="${body}==" ;;
+            3) body="${body}=" ;;
+          esac
+          printf '%s' "$body" | base64 -d 2>/dev/null \
+            | jq '{iss, aud, sub, repository, repository_owner, ref}'
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
