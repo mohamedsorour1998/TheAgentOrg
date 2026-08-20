@@ -262,3 +262,53 @@ def provenance(tmp_path, monkeypatch):
     from tests.provenance import Provenance
 
     return Provenance(tmp_path / "scanner-bin", monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _scanner_cache_is_per_test_suite_wide():
+    """Clear the fan-out's memo around EVERY test in the suite, not one file.
+
+    THIS GAP WAS PREDICTED AND THEN HIT. The same fixture exists in
+    tests/test_scanner_resilience.py, where it was written, and its docstring
+    states exactly what it does not cover: tests in other files, which "keep a
+    process-lifetime cache between them", harmless only because of a measured
+    accident -- of the fan-out calls in the shipped suite at that time, all but
+    four raised and those four returned only faults, so nothing outside that file
+    ever stored an entry to leak. It then names the condition that would end the
+    accident: "if another lane adds a test whose scanners return clean findings,
+    it will need the same clearing".
+
+    A second lane did exactly that. tests/test_chaos_scanner.py and
+    tests/test_provenance.py install fake scanners that return findings, so
+    entries now get stored outside the original file, and at the merge three
+    tests failed in the full suite while passing alone:
+
+        test_a_broken_scanner_blocks_a_CLEAN_change_too
+        test_the_poisoned_ticket_blocks_with_no_scanners_installed
+        test_scanners_required_with_no_binaries_blocks_the_CLEAN_run_too
+
+    One failure named the mechanism outright -- findings carrying the
+    REAL-SCANNER line numbers [3, 4] in a test that had just made every binary
+    unreachable. A cached answer from an earlier test, served to a later one that
+    could not have produced it.
+
+    Neither lane could close this: the fixture belongs in conftest.py, and each
+    lane was scoped out of the other's files. The merge is the first point where
+    one owner holds both, so it is fixed here.
+
+    It clears on BOTH sides -- before, so no test inherits an entry; after, so
+    nothing escapes into later tests. One side alone leaves the other direction
+    open, and the leak is silent either way: a stale hit looks exactly like a
+    scan.
+
+    This does not weaken the four guards above it. It touches neither the model
+    seam, the GitHub seam, `builtins.input`, nor the workspace redirect, and it
+    catches nothing, so their `pytest.fail` raisers -- deriving from
+    BaseException, which no blind `except Exception` can swallow -- are
+    unaffected.
+    """
+    from agentorg.security import reset_scanner_cache
+
+    reset_scanner_cache()
+    yield
+    reset_scanner_cache()

@@ -40,6 +40,7 @@ IMPORT PATH CONSTRAINT: `tests/` has no `__init__.py`; `pyproject.toml` sets
 and under `python -m` from the repository root, but NOT from any other cwd.
 """
 
+import os
 import pathlib
 import shutil
 
@@ -179,18 +180,50 @@ class Provenance:
     def none_installed(self) -> None:
         """ABSENT for all three: CI's mode, and every laptop on this team.
 
-        Prepends an EMPTY directory and also asserts the real ones are not
-        reachable, because a machine that happens to have them installed would
-        otherwise run a different test than the one that was written.
+        Prepending an empty directory cannot hide a real binary, so on a
+        provisioned machine this REMOVES the directories that hold the three
+        scanners from PATH, then asserts none is reachable.
+
+        WHY REMOVAL IS SAFE HERE AND WHOLESALE REPLACEMENT IS NOT. The trap this
+        class exists to avoid is killing `git`: `github_ops.open_pr` shells out
+        to it, and a test that replaces PATH outright makes run_pipeline die with
+        `FileNotFoundError: 'git'` at github_ops.py:114, before security runs.
+        Removal is surgical -- only directories that actually contain one of the
+        three scanners go, and the assert below refuses to proceed if `git`
+        became unreachable, so this can never silently reintroduce that trap.
+
+        Measured on the demo machine, 2026-08-20: scanners live in
+        /opt/homebrew/bin and git in /usr/bin, so nothing collides. If a machine
+        ever ships git and gitleaks from the SAME directory, the git assert fires
+        and the test says so instead of failing for an unrelated reason.
         """
         self._activate()
+        for tool in SCANNER_TOOLS:
+            found_at = shutil.which(tool)
+            while found_at is not None:
+                holder = str(pathlib.Path(found_at).parent)
+                kept = [
+                    entry
+                    for entry in os.environ.get("PATH", "").split(os.pathsep)
+                    if entry and entry != holder
+                ]
+                self._monkeypatch.setenv("PATH", os.pathsep.join(kept))
+                found_at = shutil.which(tool)
+
+        if shutil.which("git") is None:
+            raise RuntimeError(
+                "none_installed() removed the directory holding `git` along with "
+                "a scanner. run_pipeline would die at github_ops.py:114 for a "
+                "reason that has nothing to do with scanners. This machine ships "
+                "git and a scanner from one directory; use all_broken() instead."
+            )
+
         found = binaries_installed()
         if found:
             raise RuntimeError(
-                f"none_installed() cannot make {found} disappear: they are on "
-                f"PATH behind the fake directory. Prepending cannot hide a real "
-                f"binary. Run this test in a shell without them, or use "
-                f"all_broken(), which shadows them instead."
+                f"none_installed() could not make {found} unreachable even after "
+                f"scrubbing PATH. Something re-adds them; use all_broken(), which "
+                f"shadows them instead."
             )
 
     def all_broken(self) -> None:
