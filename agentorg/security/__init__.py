@@ -47,7 +47,7 @@ THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
         one dead one is still an answer that must be retried.
       * A RAISE. The absent-scanner path signals absence by raising
         (`_run.unrunnable_findings`), and MEASURED over this suite at 1171470,
-        116 of 121 fan-out calls do exactly that -- semgrep is first and no
+        117 of 121 fan-out calls do exactly that -- semgrep is first and no
         binary is installed in CI's `test` job. Nothing is stored on that path,
         and in particular the exception is NOT stored to be re-raised: a
         replayed raise is a memoised fault wearing a different hat, and it would
@@ -60,10 +60,15 @@ THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
         hunting for a construct that was never here; the absence of the handler
         is the stronger property, so it is now what this says.
 
-    CONSEQUENCE WORTH KNOWING BEFORE YOU MEASURE THIS: because 116 calls raise
-    and the remaining few return only faults, a CORRECT cache leaves the shipped
+    CONSEQUENCE WORTH KNOWING BEFORE YOU MEASURE THIS: because 117 calls raise
+    and the remaining 4 return only faults, a CORRECT cache leaves the shipped
     suite's wrapper-invocation count exactly where it was -- measured 129 at
-    1171470, unchanged after this landed. A measurement that shows that number
+    1171470, unchanged after this landed. Check that split rather than trusting
+    it: a raising call costs 1 wrapper invocation because semgrep dies first, a
+    completing one costs 3, and 117 + 4*3 = 129. An earlier version of this
+    paragraph said 116 and 5, which totals 131 and cannot be right -- and
+    `_gitleaks` and `_trivy` are each invoked exactly 4 times, which is the
+    completing-call count. A measurement that shows that number
     DROPPING has found the defect this docstring is about, not a working cache.
     The cache can only be demonstrated against wrappers that return clean
     findings; see tests/test_scanner_resilience.py's Task 4 section.
@@ -148,8 +153,9 @@ def _fault_rules() -> frozenset[str]:
     cache MISS, against three subprocess scanners on the same path.
 
     Both names are read THROUGH the `_run` module rather than imported as bare
-    names, for the reason _run.py's own docstring gives about
-    `config.SCANNERS_REQUIRED`: a `from ._run import error_finding` binds the
+    names, for the reason `unrunnable_findings`'s docstring in _run.py gives
+    about `config.SCANNERS_REQUIRED` (that rationale is in the FUNCTION's
+    docstring, not the module's): a `from ._run import error_finding` binds the
     value at import, before any test can substitute it, so the coupling would
     again be unobservable.
     """

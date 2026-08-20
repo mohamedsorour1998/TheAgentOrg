@@ -1949,9 +1949,9 @@ def test_exception_signalled_absence_hides_real_faults_when_the_knob_is_off(
 #
 # WHY THESE TESTS CANNOT USE A FAKE SCANNER ON PATH, WHICH EVERY FAULT TEST
 # ABOVE DOES USE. Measured over the whole suite at 1171470, before any cache
-# existed: 121 run_all_scanners calls, and NOT ONE of them is cacheable. 116
+# existed: 121 run_all_scanners calls, and NOT ONE of them is cacheable. 117
 # RAISE FileNotFoundError (semgrep is first in the fan-out and no binary is
-# installed), and the 5 that return, return only `*-scanner-error` faults --
+# installed), and the 4 that return, return only `*-scanner-error` faults --
 # which this task's central rule says must never be memoised. A cache that is
 # working therefore leaves the shipped suite's wrapper count UNCHANGED at 129.
 #
@@ -2309,7 +2309,7 @@ def test_a_raising_fan_out_is_not_memoised_and_the_next_call_really_retries(
 ):
     """A raise is not a result, AND it is not a stored exception to replay.
 
-    116 of the 121 shipped run_all_scanners calls RAISE FileNotFoundError -- the
+    117 of the 121 shipped run_all_scanners calls RAISE FileNotFoundError -- the
     absent-scanner path, which agents/security.py catches and answers from the
     fixture. So this is not an edge case in this repository; it is the ordinary
     path, and getting it wrong is the difference between a cache that does
@@ -2540,7 +2540,7 @@ def _scanner_cache_is_per_test():
     WHAT IT DOES NOT COVER, STATED RATHER THAN IMPLIED: tests in OTHER files.
     They keep a process-lifetime cache between them. That is currently harmless
     for a measured reason and not a designed one -- of the 121 fan-out calls in
-    the shipped suite, 116 raise and the rest return only faults, so nothing
+    the shipped suite, 117 raise and the other 4 return only faults, so nothing
     outside this file ever stores an entry to leak. If another lane adds a test
     whose scanners return clean findings, it will need the same clearing, and
     conftest.py is where that belongs.
@@ -2587,8 +2587,9 @@ def test_the_fault_rule_set_is_derived_from_the_tool_type_and_not_restated(
     A `Literal` is not patchable in place, so `_run.ScannerTool` is REBOUND to a
     four-member Literal. The implementation must read both names through the
     `_run` module for that to be visible -- which is why it does, and is the same
-    reason _run.py's own docstring gives for reading `config.SCANNERS_REQUIRED`
-    through `config` rather than importing the value.
+    reason `unrunnable_findings`'s docstring in _run.py gives for reading
+    `config.SCANNERS_REQUIRED` through `config` rather than importing the value
+    (that rationale is in the FUNCTION's docstring, not the module's).
     """
     from agentorg.security import _run
 
