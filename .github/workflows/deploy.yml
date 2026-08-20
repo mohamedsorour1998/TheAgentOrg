@@ -183,107 +183,119 @@ jobs:
 
       # The CLI is installed here rather than expected on a laptop. Version
       # printed so a run records which CLI produced its runtimes -- when the
-      # deploy behaviour changes, that line is the first thing to check.
-      # The toolkit provides the `agentcore` CLI. It has no --version flag, so
-      # the install is confirmed by asking for help and checking that the
-      # subcommands this job actually calls are present. The first version of
-      # this step ran `agentcore --version || agentcore --help | head -5`, which
-      # failed twice over: --version does not exist, and `| head -5` SIGPIPEs
-      # under `set -o pipefail`, so the fallback failed too.
-      - name: Install the agentcore CLI
-        run: |
-          set -euo pipefail
-          pip install --quiet bedrock-agentcore-starter-toolkit
-          help="$(agentcore --help 2>&1)"
-          for cmd in configure deploy status invoke; do
-            grep -q "$cmd" <<<"$help" || {
-              echo "::error::agentcore CLI has no '$cmd' subcommand; its interface changed"
-              exit 1
-            }
-          done
-          echo "agentcore CLI present with configure, deploy, status, invoke"
-
-      # Configure and deploy each runtime. Sequential, not parallel: the CLI
-      # keeps per-project state under .bedrock_agentcore.yaml and five concurrent
-      # configures would race on it.
+      # NO agentcore CLI. It builds the image itself in CodeBuild, and that path
+      # cannot work here: `agentcore configure` OVERWRITES
+      # agentorg/agents/Dockerfile with a rendered template, and the build then
+      # pulls its base image from Docker Hub anonymously. Measured across three
+      # runs -- CodeBuild died every time with
       #
-      # WHAT THIS DOES AND DOES NOT USE. The CLI builds and pushes the image
-      # itself from --entrypoint, into the --ecr repository it is given. It has no
-      # flag for "deploy this already-built image URI" -- the first version of
-      # this job invented `--container-uri` and `--env` on `configure`, and
-      # neither exists. So the build job above is not redundant: it is the check
-      # that the Dockerfile and the arm64 target are correct, and it fails fast
-      # and cheaply if either regresses. What CodeBuild produces here must agree
-      # with it.
+      #   429 Too Many Requests
+      #   failed to resolve source metadata for docker.io/library/python:3.12-slim
       #
-      # --env belongs to `deploy`, not `configure`. AGENT_ROLE is what makes one
-      # image serve five different agents, so it is passed at deploy time.
+      # The tell that it was not our Dockerfile: our build job transferred 5.01kB
+      # while CodeBuild transferred 4.07kB of the same path.
       #
-      # `|| true` appears nowhere: a failed configure or deploy must fail the job.
-      # Reporting a deploy that did not happen is the one outcome the task
-      # forbids, because the fallback plan depends on knowing the truth.
-      - name: Configure and deploy the five runtimes
+      # bedrock-agentcore-control create-agent-runtime takes an ECR containerUri
+      # directly, so the image the build job above already pushed -- arm64,
+      # verified in the OCI index, tagged with this commit -- is what runs. No
+      # second build, no Docker Hub, one artifact from build to runtime.
+      #
+      # AgentCore Runtime requires arm64 (AWS Graviton); an amd64 image deploys
+      # and then fails to start. That is why the build job pins --platform.
+      - name: Create or update the five runtimes from the ECR images
         run: |
           set -euo pipefail
           account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+
+          # Existing runtimes are updated, absent ones created. Without this the
+          # second deploy of any agent fails on a name conflict, and a workflow
+          # that only works once is not a deploy pipeline.
+          existing="$(aws bedrock-agentcore-control list-agent-runtimes \
+            --query 'agentRuntimes[].[agentRuntimeName,agentRuntimeId]' --output text || true)"
 
           for agent in planner developer reviewer security sre; do
-            repo="${{ env.ECR_PREFIX }}-${agent}-agent"
-            echo "::group::${agent}"
+            name="theagentorg_${agent}"
+            uri="${registry}/${{ env.ECR_PREFIX }}-${agent}-agent:${{ github.sha }}"
+            echo "::group::${name}"
 
-            agentcore configure \
-              --name "theagentorg_${agent}" \
-              --entrypoint agentorg/agents/server.py \
-              --execution-role "${{ env.RUNTIME_ROLE }}" \
-              --ecr "${account}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${repo}" \
-              --requirements-file agentorg/agents/requirements.txt \
-              --region "${{ env.AWS_REGION }}" \
-              --deployment-type container \
-              --non-interactive
+            id="$(awk -v n="$name" '$1 == n {print $2}' <<<"$existing" | head -1)"
 
-            # --image-tag pins the deployed image to this commit. Without it the
-            # CLI generates a YYYYMMDD-HHMMSS-mmm timestamp tag, so nothing
-            # afterwards can say which commit a running runtime came from --
-            # exactly what tests/test_deploy_workflow.py asserts against, and it
-            # caught this omission in review rather than after the demo.
-            agentcore deploy \
-              --agent "theagentorg_${agent}" \
-              --env "AGENT_ROLE=${agent}" \
-              --image-tag '${{ github.sha }}' \
-              --auto-update-on-conflict
+            if [ -n "$id" ]; then
+              aws bedrock-agentcore-control update-agent-runtime \
+                --agent-runtime-id "$id" \
+                --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${uri}\"}}" \
+                --role-arn "${{ env.RUNTIME_ROLE }}" \
+                --environment-variables "AGENT_ROLE=${agent}" \
+                --network-configuration '{"networkMode":"PUBLIC"}' \
+                --query 'agentRuntimeArn' --output text
+            else
+              aws bedrock-agentcore-control create-agent-runtime \
+                --agent-runtime-name "$name" \
+                --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${uri}\"}}" \
+                --role-arn "${{ env.RUNTIME_ROLE }}" \
+                --environment-variables "AGENT_ROLE=${agent}" \
+                --network-configuration '{"networkMode":"PUBLIC"}' \
+                --description "The ${agent} agent of The Agent Org, from ${{ github.sha }}" \
+                --query 'agentRuntimeArn' --output text
+            fi
 
             echo "::endgroup::"
           done
 
-      # The task's done-when: READY for each runtime, and a real completion from
-      # at least one invoke. Reported, not assumed -- a fabricated READY is worse
-      # than an honest blocker.
-      - name: Status must be READY for all five
+      # A runtime reports CREATING before it is usable, so this waits rather than
+      # reading the status once and calling it done.
+      - name: Wait for all five to reach READY
         run: |
           set -euo pipefail
-          failed=0
-          for agent in planner developer reviewer security sre; do
-            out="$(agentcore status --agent "theagentorg_${agent}" 2>&1 || true)"
-            echo "--- ${agent}"
+          # shellcheck disable=SC2016  # the JMESPath backticks are literal, not
+          # shell expansion: single quotes are exactly what this query needs.
+          for attempt in $(seq 1 40); do
+            out="$(aws bedrock-agentcore-control list-agent-runtimes \
+              --query 'agentRuntimes[?starts_with(agentRuntimeName, `theagentorg`)].[agentRuntimeName,status]' \
+              --output text)"
+            echo "--- attempt ${attempt}"
             echo "$out"
-            if ! grep -qi 'READY' <<<"$out"; then
-              echo "::error::theagentorg_${agent} is not READY"
-              failed=1
+            total="$(wc -l <<<"$out" | tr -d ' ')"
+            ready="$(grep -c 'READY' <<<"$out" || true)"
+            if [ "$ready" = "5" ]; then
+              echo "::notice::all five runtimes READY"
+              exit 0
             fi
+            # Fail fast on a terminal state rather than waiting out the loop.
+            if grep -qE 'CREATE_FAILED|UPDATE_FAILED|DELETING' <<<"$out"; then
+              echo "::error::a runtime reached a terminal failure state"
+              exit 1
+            fi
+            sleep 15
           done
-          [ "$failed" = "0" ]
+          echo "::error::timed out waiting for five READY runtimes (last: ${ready:-0}/${total:-0})"
+          exit 1
 
+      # The done-when: a real completion, not merely a 200. Asserts on content,
+      # because a runtime returning an empty body still exits 0 and "the call
+      # succeeded" is exactly the reassuring non-answer this project keeps having
+      # to distinguish from a real one.
       - name: Invoke the planner and require a real completion
         run: |
           set -euo pipefail
+          arn="$(aws bedrock-agentcore-control list-agent-runtimes \
+            --query "agentRuntimes[?agentRuntimeName=='theagentorg_planner'].agentRuntimeArn | [0]" \
+            --output text)"
+          echo "planner runtime: ${arn}"
+
           payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
-          out="$(agentcore invoke --agent theagentorg_planner "$payload" 2>&1)"
-          echo "$out"
-          # Asserts on content, not on exit status. A runtime that returns 200
-          # with an empty body exits 0, and "the call succeeded" is exactly the
-          # reassuring non-answer this project keeps having to distinguish from
-          # a real one.
-          grep -q '"tasks"' <<<"$out" || {
-            echo "::error::planner returned no tasks; the response is not a real completion"
+
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "$arn" \
+            --payload "$payload" \
+            --content-type application/json \
+            /tmp/invoke-out.json
+
+          echo "--- response"
+          cat /tmp/invoke-out.json
+          grep -q '"tasks"' /tmp/invoke-out.json || {
+            echo "::error::planner returned no tasks; that is not a real completion"
             exit 1
           }
+          echo "::notice::planner returned a real plan"

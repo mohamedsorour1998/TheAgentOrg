@@ -504,12 +504,16 @@ def test_the_deploy_workflow_runs_no_terraform_at_all():
 
 def test_the_runtime_role_passed_to_agentcore_is_the_recorded_arn():
     """A wrong execution role either fails or grants the runtime someone else's."""
-    configure = [s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s]
-    assert configure, "no agentcore configure step in deploy.yml"
+    # The runtime is created through bedrock-agentcore-control, not the agentcore
+    # CLI: the CLI overwrites agentorg/agents/Dockerfile and rebuilds in
+    # CodeBuild, which died on a Docker Hub 429 three runs in a row. The API
+    # takes our own ECR image, so the flag carrying the role is --role-arn.
+    configure = [s for s in _all_run_scripts(DEPLOY) if "create-agent-runtime" in s]
+    assert configure, "no create-agent-runtime step in deploy.yml"
     for script in configure:
         resolved = _resolve_env(DEPLOY, script)
-        match = re.search(r"--execution-role\s+\"?([^\s\"\\]+)", resolved)
-        assert match, f"no --execution-role in the configure step: {resolved!r}"
+        match = re.search(r"--role-arn\s+\"?([^\s\"\\]+)", resolved)
+        assert match, f"no --role-arn in the runtime-creating step: {resolved!r}"
         assert match.group(1) == RECORDED_RUNTIME_ROLE_ARN, (
             f"--execution-role is {match.group(1)!r}, recorded is {RECORDED_RUNTIME_ROLE_ARN!r}"
         )
@@ -541,7 +545,10 @@ def test_every_agent_loop_in_the_deploy_workflow_covers_all_five_agents():
         )
     # A loop that stops being reached is as bad as one that lost an agent, so pin
     # the count too -- re-measured from this file, not carried forward.
-    assert len(loops) == 4, f"expected 4 agent loops in deploy.yml, found {len(loops)}"
+    # Re-measured after the deploy step moved from the agentcore CLI to the
+    # runtime API: the status wait no longer loops per agent, it polls the whole
+    # set at once, so there are three loops rather than four.
+    assert len(loops) == 3, f"expected 3 agent loops in deploy.yml, found {len(loops)}"
 
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -584,9 +591,13 @@ def test_every_agent_gets_its_role_from_the_environment_not_from_the_image():
     If configure stopped passing AGENT_ROLE, all five runtimes would run whatever
     the image defaults to -- five runtimes serving one agent, all reporting READY.
     """
-    configure = "\n".join(s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s)
+    configure = "\n".join(s for s in _all_run_scripts(DEPLOY) if "create-agent-runtime" in s)
     assert "AGENT_ROLE=" in configure, (
-        "configure does not pass AGENT_ROLE; all five runtimes would be identical"
+        "the runtime-creating step does not pass AGENT_ROLE; all five runtimes "
+        "would serve whatever agent the image defaults to, all reporting READY"
+    )
+    assert "--environment-variables" in configure, (
+        "AGENT_ROLE must travel as --environment-variables on the runtime API"
     )
 
 
@@ -682,10 +693,22 @@ def test_images_are_tagged_with_the_commit_sha_not_only_latest():
             f"no image tag carries the commit SHA: {tag_lines}"
         )
 
-    launch = "\n".join(s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s)
-    assert "${{ github.sha }}" in launch or "${sha}" in launch, (
-        "the runtime is not pinned to the SHA-tagged image; it would deploy :latest"
-    )
+    # The runtime API takes the image URI directly, so the pin lives in the
+    # containerUri the create/update step builds rather than in a CLI --image-tag.
+    #
+    # THIS ASSERTS ON THE URI LINE, NOT ON THE WHOLE SCRIPT. The first version
+    # searched the entire step for "github.sha" and passed against a mutation
+    # that pinned the image to :latest -- because the SHA also appears in the
+    # runtime's --description two lines below. A test that any nearby mention
+    # satisfies is not a test of the pin.
+    launch = "\n".join(s for s in _all_run_scripts(DEPLOY) if "create-agent-runtime" in s)
+    uri_lines = [line for line in launch.splitlines() if "uri=" in line]
+    assert uri_lines, f"no containerUri assembled in the runtime step: {launch!r}"
+    for line in uri_lines:
+        assert "${{ github.sha }}" in line or "${sha}" in line, (
+            f"the image URI is not pinned to the commit; it would deploy "
+            f"whatever :latest resolves to: {line.strip()!r}"
+        )
 
 
 def test_the_env_block_holds_the_recorded_identifiers():
@@ -771,13 +794,22 @@ def test_the_status_check_fails_the_job_when_a_runtime_is_not_ready():
     ::error:: lines and still exit 0 -- an honest-looking log on a green run,
     which is worse than a red one.
     """
-    status = [s for s in _all_run_scripts(DEPLOY) if "agentcore status" in s]
-    assert status, "no status step; a deploy could report success with nothing READY"
+    # The wait polls list-agent-runtimes until all five report READY. It asserts
+    # by exiting non-zero on timeout and on any terminal state, rather than by a
+    # failure flag -- the same property, expressed by the loop's own exits, and
+    # both are pinned here so a rewrite cannot drop either one silently.
+    status = [s for s in _all_run_scripts(DEPLOY) if "list-agent-runtimes" in s and "READY" in s]
+    assert status, "no status wait; a deploy could report success with nothing READY"
     for script in status:
-        assert "failed=1" in script, "the status loop never records a failure"
-        assert '[ "$failed" = "0" ]' in script, (
-            "the status step never asserts on the failure flag; "
-            "it would exit 0 while printing errors"
+        assert 'ready" = "5"' in script or "ready\" = \"5\"" in script, (
+            "the wait never requires all five runtimes to be READY"
+        )
+        assert "CREATE_FAILED" in script, (
+            "the wait does not fail fast on a terminal state; it would poll out "
+            "the whole timeout on a runtime that can never become READY"
+        )
+        assert "exit 1" in script, (
+            "the wait never exits non-zero; it would report success on timeout"
         )
 
 
