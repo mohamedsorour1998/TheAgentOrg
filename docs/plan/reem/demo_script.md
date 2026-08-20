@@ -54,9 +54,17 @@ narration **B** in Beats 2 and 3.
 
 On the machine this script was written on, step 4 **fails**: `scan_gate.py` exits
 **1** with a `FileNotFoundError` traceback (`semgrep is not installed…`), because
-all three binaries are absent from PATH. It does not print a tidy "SCAN OK"
-line — check the **exit code**, not the text. So as of today the demo is a
+all three binaries are absent from PATH. So as of today the demo is a
 **narration B** demo. If you provision the machine, re-run step 4 and switch to A.
+
+**Judge step 4 by its exit code, not by the text on screen.** The script *does*
+print `SCAN OK` when all three scanners are installed and the findings match its
+pins (`scripts/scan_gate.py:217`) — that is the line you are hoping to see. But on
+an unprovisioned machine it never gets that far: it dies in a wrapper with a
+traceback, and a traceback is easy to mistake for a different kind of failure. So
+run `python scripts/scan_gate.py; echo "exit=$?"` and read the number. `exit=0`
+means narration A is available; anything else means narration B, whatever the
+output looks like.
 
 Also before the room fills: terminal in the repo root, font large enough for the
 back row, scrollback cleared.
@@ -294,6 +302,12 @@ Note for the driver: the **last** event's actor is `system`, not `security`. The
 
 Point at the table (regenerate before the demo with
 `cd <repo root> && LLM_DISABLED=true python -m tests.dora_batch && python -m tests.dora_table`):
+
+> **Always in that order, chained with `&&`.** The renderer cannot tell a fresh
+> batch report from a stale one — `runs/dora_batch.json` carries no generation
+> timestamp — so running `dora_table` alone will happily render numbers from an
+> earlier run with no sign that it did. The `&&` also means a failed batch stops
+> before the render rather than leaving the previous table on screen.
 
 ```
 | Metric | Baseline (no checks) | The Agent Org |
