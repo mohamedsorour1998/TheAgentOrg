@@ -18,7 +18,23 @@
 # from a non-editable install. The image built green and died on import. The
 # smoke test at the end of this file is what keeps that from recurring.
 
-FROM --platform=linux/arm64 python:3.12-slim
+# ECR Public, not Docker Hub. CodeBuild pulls anonymously and Docker Hub
+# rate-limits that: the first real deploy died with
+#
+#   ERROR: failed to solve: python:3.12-slim: failed to resolve source metadata
+#   for docker.io/library/python:3.12-slim: unexpected status from HEAD request
+#   to https://registry-1.docker.io/v2/library/python/manifests/3.12-slim:
+#   429 Too Many Requests
+#
+# after CodeBuild had already provisioned, downloaded source and started the
+# build -- so it fails late, and it fails for a reason that has nothing to do
+# with this repository. public.ecr.aws mirrors the same official images with no
+# anonymous pull limit, and AWS-to-AWS pulls do not leave the region.
+#
+# Verified before switching, via the registry API rather than assumed: the
+# mirror's 3.12-slim manifest is an OCI image index carrying arm64 among
+# ['386','amd64','arm','arm64','ppc64le','riscv64','s390x'].
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
 # Fail fast on a missing directory, and keep every later path relative to here.
 WORKDIR /app
