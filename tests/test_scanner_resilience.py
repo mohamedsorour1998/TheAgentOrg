@@ -1939,3 +1939,595 @@ def test_exception_signalled_absence_hides_real_faults_when_the_knob_is_off(
         f"the knob, which reintroduces the abort in the configuration the demo "
         f"machine runs."
     )
+
+
+# ==========================================================================
+# Task 4 -- the fan-out memoises by diff hash
+#
+# WHY THESE TESTS CANNOT USE A FAKE SCANNER ON PATH, WHICH EVERY FAULT TEST
+# ABOVE DOES USE. Measured over the whole suite at 1171470, before any cache
+# existed: 121 run_all_scanners calls, and NOT ONE of them is cacheable. 116
+# RAISE FileNotFoundError (semgrep is first in the fan-out and no binary is
+# installed), and the 5 that return, return only `*-scanner-error` faults --
+# which this task's central rule says must never be memoised. A cache that is
+# working therefore leaves the shipped suite's wrapper count UNCHANGED at 129.
+#
+# So the case under test -- a repeated scan that is genuinely skipped -- does
+# not exist anywhere in the shipped suite and cannot be reached with a fake
+# binary on PATH either, because every fake binary above is deliberately broken.
+# These tests rebind the three module-level wrapper names instead, so a wrapper
+# can return CLEAN findings. That is a weaker seam than a real subprocess and it
+# is the right one here: the subject is whether the fan-out is RE-ENTERED, not
+# what a broken binary does.
+# ==========================================================================
+
+# The lane module itself, so a test can rebind the three names run_all_scanners
+# reads out of its own globals at call time. Fetched with import_module rather
+# than a second `import` statement because this file's imports are at the top
+# and a module-level import down here is E402. It also re-exports `Finding`
+# (see agentorg/security/__init__.py), which is how the stubs below build clean
+# findings without a new top-level import.
+_LANE = importlib.import_module("agentorg.security")
+
+# The names the fan-out iterates, in fan-out order. semgrep FIRST matters to
+# test_a_raising_fan_out_..., which counts how far the loop got.
+_WRAPPER_NAMES = ("_semgrep", "_gitleaks", "_trivy")
+
+
+def _stub_wrappers(monkeypatch, answer) -> list[str]:
+    """Replace the three wrapper names; return the live invocation log.
+
+    The returned list gets one tool name appended per wrapper invocation, so a
+    test reads it as the COST counter: `[]` after a second call means the
+    fan-out was skipped. `answer(tool, dev)` supplies that wrapper's findings,
+    so a stub can be clean, faulting, or raising.
+    """
+    calls: list[str] = []
+
+    def make(tool: str):
+        def stub(dev):
+            calls.append(tool)
+            return answer(tool, dev)
+
+        return stub
+
+    for name in _WRAPPER_NAMES:
+        monkeypatch.setattr(_LANE, name, make(name.removeprefix("_")))
+    return calls
+
+
+def _clean_finding(tool: str, dev) -> list:
+    """One harmless `low` finding -- a CLEAN scan that is NOT an empty list.
+
+    Deliberately not `[]`. Every assertion below would also pass against a
+    cache that stored nothing and returned nothing, because `[] == []`. A
+    non-empty clean answer makes "the cache returned the right thing" and "the
+    cache returned nothing" different observations.
+    """
+    return [
+        _LANE.Finding(
+            tool=tool,
+            severity="low",
+            rule=f"{tool}-noop",
+            file="app/noop.py",
+            line=1,
+            description="a clean scan that found something harmless",
+        )
+    ]
+
+
+_CLEAN_RULES = {"semgrep-noop", "gitleaks-noop", "trivy-noop"}
+_FAULT_RULES = {
+    "semgrep-scanner-error",
+    "gitleaks-scanner-error",
+    "trivy-scanner-error",
+}
+
+
+def _verdict_of(findings: list) -> str:
+    return compute_security_verdict(
+        findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+    )[0]
+
+
+def test_the_fan_out_scans_a_repeated_diff_only_once(monkeypatch):
+    """The cache exists at all: a second ask for the same diff re-enters nothing.
+
+    Both halves are asserted, because either alone is satisfiable by a bug. The
+    COST assertion alone passes against a cache that answers everything from one
+    entry; the RESULT assertion alone passes against no cache at all.
+
+    The second call passes a FRESH DevResult carrying the same diff text. The
+    key is the diff, not the object -- agents/security.py builds its DevResult
+    from the graph state and a repeat of the demo hands over a different object
+    every time, so an identity-keyed cache would never hit where it matters.
+    """
+    calls = _stub_wrappers(monkeypatch, _clean_finding)
+
+    first = run_all_scanners(_dev())
+    assert calls == ["semgrep", "gitleaks", "trivy"], (
+        f"the first call must actually fan out to all three, in order; got "
+        f"{calls!r}"
+    )
+
+    second = run_all_scanners(_dev())
+
+    assert calls == ["semgrep", "gitleaks", "trivy"], (
+        f"the second call re-entered the fan-out: {calls!r}. The whole point of "
+        f"the cache is that a repeated diff costs nothing -- the demo scans the "
+        f"same two fixtures over and over."
+    )
+    assert second == first, (
+        f"a cache hit must return the same findings the fan-out produced. "
+        f"first={_summarize(first)} second={_summarize(second)}"
+    )
+    assert {f.rule for f in second} == _CLEAN_RULES, (
+        f"got {_summarize(second)}; an empty or partial hit would pass a bare "
+        f"equality check against an equally empty first result"
+    )
+
+
+def test_a_caller_mutating_the_returned_list_cannot_corrupt_a_later_result(
+    monkeypatch,
+):
+    """The cache hands out COPIES, in both directions, at both levels.
+
+    A cache that returns its own list lets any caller edit what every later
+    caller sees, and `findings` is handed straight to compute_security_verdict.
+    FOUR distinct defects, and this test's structure is the cross product,
+    because each half is fixed by a different line of the implementation:
+
+      * copy on the way IN vs. copy on the way OUT. The first protects the list
+        the fan-out built on a MISS; the second protects what a HIT hands over.
+        MEASURED that these are independent: replacing `return _copy(cached)`
+        with `return cached` left the first half of this test GREEN, because a
+        miss-path result was all it had ever mutated. The demo's repeats are all
+        hits, so the OUT half is the one that matters on stage.
+      * the LIST vs. the ELEMENTS. `del`, `append` and `clear` on the returned
+        list must not change the cached contents; and `finding.severity = "low"`
+        on a returned Finding must not either. The element half is the
+        security-relevant one -- severity is the only field the block rule reads,
+        so a shared Finding object is one assignment away from turning a cached
+        `critical` into a pass, which is why `_copy` is DEEP.
+    """
+    _stub_wrappers(monkeypatch, _clean_finding)
+
+    first = run_all_scanners(_dev())
+    baseline = [f.model_copy(deep=True) for f in first]
+    assert len(baseline) == 3, f"expected one finding per tool, got {len(baseline)}"
+
+    first[0].severity = "critical"
+    first[0].rule = "tampered-by-the-caller"
+    del first[1:]
+    first.append(
+        _LANE.Finding(
+            tool="trivy",
+            severity="critical",
+            rule="injected-by-the-caller",
+            file="x",
+            line=0,
+            description="not from any scanner",
+        )
+    )
+
+    second = run_all_scanners(_dev())
+
+    assert second == baseline, (
+        f"the FIRST caller's edits reached the cache. expected "
+        f"{_summarize(baseline)}, got {_summarize(second)}. If "
+        f"'tampered-by-the-caller' or 'injected-by-the-caller' appears here, "
+        f"what went INTO the cache was the very list the fan-out handed the "
+        f"caller, so the security gate now reads whatever that caller left "
+        f"behind."
+    )
+
+    # AND NOW THE SAME ABUSE FROM A CACHE HIT, which is a SEPARATE defect with a
+    # separate fix: the paragraph above is protected by copying on the way IN,
+    # this one by copying on the way OUT. MEASURED that the distinction is real
+    # -- with `return cached` in place of `return _copy(cached)`, everything
+    # above still PASSED, because `first` came from a miss. A hit is also the
+    # common case in the demo, where every repeat after the first is one.
+    hit = run_all_scanners(_dev())
+    hit[0].severity = "critical"
+    hit[0].rule = "tampered-via-a-cache-hit"
+    hit.clear()
+
+    third = run_all_scanners(_dev())
+
+    assert third == baseline, (
+        f"a caller that mutated a CACHE HIT corrupted the cache. expected "
+        f"{_summarize(baseline)}, got {_summarize(third)}. An empty list here "
+        f"is the worst case: compute_security_verdict([]) returns ('pass', []), "
+        f"so one caller's `.clear()` turns every later scan of this diff into a "
+        f"silent pass."
+    )
+
+
+def test_the_clean_and_poisoned_fixtures_never_share_a_cache_entry(monkeypatch):
+    """A collision here promotes the poisoned diff. Both directions are asserted.
+
+    The stub answers by INSPECTING the diff it was handed, so a collision shows
+    up as the wrong ANSWER rather than merely a wrong count -- and both answers
+    are non-empty, so "poisoned got clean's entry" and "clean got poisoned's
+    entry" are each positively detectable rather than one of them being the
+    indistinguishable empty list.
+
+    The second pair of calls is issued in the REVERSE order, after both entries
+    exist, which is the arrangement a single-slot cache survives least well.
+    """
+
+    def answer(tool: str, dev) -> list:
+        if "AKIA" in (dev.diff or ""):
+            return [
+                _LANE.Finding(
+                    tool=tool,
+                    severity="critical",
+                    rule=f"{tool}-secret",
+                    file="app/auth.py",
+                    line=3,
+                    description="a committed credential",
+                )
+            ]
+        return _clean_finding(tool, dev)
+
+    _stub_wrappers(monkeypatch, answer)
+
+    clean = fixtures_loader.dev(poisoned=False)
+    poisoned = fixtures_loader.dev(poisoned=True)
+
+    first_clean = run_all_scanners(clean)
+    first_poisoned = run_all_scanners(poisoned)
+
+    again_poisoned = run_all_scanners(poisoned)
+    again_clean = run_all_scanners(clean)
+
+    assert {f.rule for f in again_poisoned} == {
+        "semgrep-secret",
+        "gitleaks-secret",
+        "trivy-secret",
+    }, (
+        f"the poisoned diff came back with {_summarize(again_poisoned)}. If "
+        f"those are the clean fixture's findings, the two diffs share a cache "
+        f"entry and the demo's blocked ticket promotes."
+    )
+    assert again_poisoned == first_poisoned
+    assert _verdict_of(again_poisoned) == "block", (
+        f"a cached poisoned scan must still BLOCK at threshold "
+        f"{config.SECURITY_BLOCK_THRESHOLD!r}; got {_summarize(again_poisoned)}"
+    )
+
+    assert {f.rule for f in again_clean} == _CLEAN_RULES, (
+        f"the clean diff came back with {_summarize(again_clean)}. If those are "
+        f"the poisoned fixture's findings, the cache blocks the demo's promote "
+        f"half."
+    )
+    assert again_clean == first_clean
+    assert _verdict_of(again_clean) == "pass"
+
+
+def test_a_scanner_fault_is_never_memoised_so_one_timeout_cannot_stick(
+    monkeypatch,
+):
+    """The rule this task exists for: a fault is not a result worth remembering.
+
+    One transient timeout, memoised, would answer every later scan of that diff
+    in the process with the same blocking scanner-error -- including the demo's
+    next repeat, on a machine where the scanner is now perfectly healthy. The
+    fault is still returned; it is simply not REMEMBERED.
+    """
+    healthy = {"yes": False}
+
+    def answer(tool: str, dev) -> list:
+        if healthy["yes"]:
+            return _clean_finding(tool, dev)
+        return [error_finding(tool, "connection reset while downloading the db")]
+
+    calls = _stub_wrappers(monkeypatch, answer)
+
+    faulted = run_all_scanners(_dev())
+    assert {f.rule for f in faulted} == _FAULT_RULES, (
+        f"expected a fault from every tool, got {_summarize(faulted)}"
+    )
+    assert _verdict_of(faulted) == "block", "a fault must still fail CLOSED"
+
+    healthy["yes"] = True
+    recovered = run_all_scanners(_dev())
+
+    assert len(calls) == 6, (
+        f"the fan-out ran {len(calls)} wrapper(s) over two calls ({calls!r}); "
+        f"six is what a genuine retry costs. Fewer means the fault was served "
+        f"from the cache."
+    )
+    assert {f.rule for f in recovered} == _CLEAN_RULES, (
+        f"a failing scan followed by a working one must produce the WORKING "
+        f"result; got {_summarize(recovered)}. A memoised fault poisons every "
+        f"later run of this diff in this process."
+    )
+    assert _verdict_of(recovered) == "pass"
+
+
+def test_a_result_that_is_only_partly_a_fault_is_not_memoised_either(monkeypatch):
+    """One dead scanner among three still makes the whole result unrememberable.
+
+    The realistic shape, and the one an `all()` test for faultiness gets wrong:
+    semgrep and trivy parse their reports fine, gitleaks times out. Two thirds
+    of that answer is worth keeping and the third is a transient fault -- so the
+    answer as a whole must not be. Caching it would pin gitleaks' timeout to
+    this diff for the life of the process while looking, in the findings list,
+    mostly correct.
+    """
+    healthy = {"yes": False}
+
+    def answer(tool: str, dev) -> list:
+        if tool == "gitleaks" and not healthy["yes"]:
+            return [error_finding(tool, "timed out")]
+        return _clean_finding(tool, dev)
+
+    calls = _stub_wrappers(monkeypatch, answer)
+
+    mixed = run_all_scanners(_dev())
+    assert {f.rule for f in mixed} == {
+        "semgrep-noop",
+        "gitleaks-scanner-error",
+        "trivy-noop",
+    }, f"expected two clean and one fault, got {_summarize(mixed)}"
+    assert _verdict_of(mixed) == "block"
+
+    healthy["yes"] = True
+    recovered = run_all_scanners(_dev())
+
+    assert len(calls) == 6, (
+        f"a partly-faulted result was memoised: {len(calls)} wrapper call(s) "
+        f"over two calls ({calls!r}), where a retry costs six"
+    )
+    assert {f.rule for f in recovered} == _CLEAN_RULES, (
+        f"got {_summarize(recovered)}; gitleaks' transient timeout is still "
+        f"pinned to this diff"
+    )
+    assert _verdict_of(recovered) == "pass"
+
+
+def test_a_raising_fan_out_is_not_memoised_and_the_next_call_really_retries(
+    monkeypatch,
+):
+    """A raise is not a result, AND it is not a stored exception to replay.
+
+    116 of the 121 shipped run_all_scanners calls RAISE FileNotFoundError -- the
+    absent-scanner path, which agents/security.py catches and answers from the
+    fixture. So this is not an edge case in this repository; it is the ordinary
+    path, and getting it wrong is the difference between a cache that does
+    nothing and a cache that breaks CI.
+
+    THE MIDDLE ASSERTION IS THE WHOLE TEST. Asserting only that the second call
+    raises is satisfied by an implementation that stored the exception object
+    and re-raised it -- which would be a memoised fault by another name, and
+    would keep re-raising "semgrep is not installed" after semgrep was
+    installed. Counting wrapper invocations is what separates a genuine retry
+    from a replay.
+    """
+    mode = {"raise": True}
+
+    def answer(tool: str, dev) -> list:
+        if mode["raise"]:
+            raise FileNotFoundError(f"{tool} is not installed")
+        return _clean_finding(tool, dev)
+
+    calls = _stub_wrappers(monkeypatch, answer)
+
+    with pytest.raises(FileNotFoundError):
+        run_all_scanners(_dev())
+    assert calls == ["semgrep"], (
+        f"semgrep is first in the fan-out and it raised, so the loop must have "
+        f"ended there; got {calls!r}"
+    )
+
+    with pytest.raises(FileNotFoundError):
+        run_all_scanners(_dev())
+    assert calls == ["semgrep", "semgrep"], (
+        f"the second call did not re-enter the fan-out ({calls!r}). Either the "
+        f"raise was stored and replayed, or a partial result was cached -- and "
+        f"if that result was the empty list, compute_security_verdict([]) "
+        f"returns ('pass', []) and this is the silent pass."
+    )
+
+    mode["raise"] = False
+    findings = run_all_scanners(_dev())
+
+    assert {f.rule for f in findings} == _CLEAN_RULES, (
+        f"once the scanners work, the fan-out must produce their real answer; "
+        f"got {_summarize(findings)}"
+    )
+
+
+def test_dev_is_none_stays_uncached_and_is_not_confused_with_an_empty_diff(
+    monkeypatch,
+):
+    """`dev is None` has no diff to hash, so it gets no cache entry.
+
+    Two reasons, and the second is the dangerous one:
+
+      * There is nothing to memoise. The None path scans nothing, so a hit saves
+        no work -- it only adds a shared mutable list for callers to edit.
+      * `None` and a DevResult whose diff is `""` are DIFFERENT QUESTIONS. Give
+        the None path the empty-diff key and they collide, and an empty diff is
+        one that must still be SCANNED. That is the same defect as clean and
+        poisoned colliding, in miniature, and it fails open: `[]` makes
+        compute_security_verdict return ('pass', []).
+    """
+    calls = _stub_wrappers(monkeypatch, _clean_finding)
+
+    first = run_all_scanners(None)
+    second = run_all_scanners(None)
+
+    assert first == [] and second == [], f"got {first!r} and {second!r}"
+    assert first is not second, (
+        "each None call must get its OWN list. A shared cached list is mutable "
+        "and every caller holds the same one."
+    )
+    assert calls == [], f"the None path must scan nothing; it ran {calls!r}"
+
+    empty_diff = DevResult(
+        branch="feat/empty", diff="", summary="s", files_changed=[]
+    )
+    findings = run_all_scanners(empty_diff)
+
+    assert calls == ["semgrep", "gitleaks", "trivy"], (
+        f"a DevResult carrying an empty diff must be SCANNED, not answered from "
+        f"the None path's entry; wrappers ran {calls!r}"
+    )
+    assert {f.rule for f in findings} == _CLEAN_RULES, (
+        f"got {_summarize(findings)} -- an empty diff that comes back empty "
+        f"because it collided with `dev is None` is a scan that never happened"
+    )
+
+
+def test_a_repeat_scan_returns_the_same_findings_in_well_under_a_second(
+    monkeypatch,
+):
+    """The brief's timing clause, with the instrument proved against the slow case.
+
+    A timing assertion that only ever sees the fast path cannot tell a working
+    cache from a stopped clock. So the FIRST assertion here is that the same
+    timer reports the UNCACHED call as slow: each stub sleeps, so a real fan-out
+    cannot come in under the sleep budget. Only then is the second call's number
+    worth anything.
+
+    `time.sleep` in a rebound wrapper, not a shell script on PATH -- the fake
+    scanners above cannot sleep, because nothing external resolves under the
+    replaced PATH and `sleep` is not a shell builtin. That trap already made one
+    timeout test pass without a timeout; see _fake_scanner.
+    """
+    import time
+
+    per_wrapper_seconds = 0.05
+    budget = per_wrapper_seconds * len(_WRAPPER_NAMES)
+
+    def answer(tool: str, dev) -> list:
+        time.sleep(per_wrapper_seconds)
+        return _clean_finding(tool, dev)
+
+    _stub_wrappers(monkeypatch, answer)
+
+    started = time.perf_counter()
+    first = run_all_scanners(_dev())
+    uncached = time.perf_counter() - started
+
+    assert uncached >= budget * 0.8, (
+        f"the uncached fan-out took {uncached:.4f}s, under the {budget:.2f}s "
+        f"this test's stubs sleep for. The timer or the stubs are not measuring "
+        f"the real call, so the cached number below would mean nothing."
+    )
+
+    started = time.perf_counter()
+    second = run_all_scanners(_dev())
+    cached = time.perf_counter() - started
+
+    assert second == first, (
+        f"a repeat must return IDENTICAL findings, not merely fast ones. "
+        f"first={_summarize(first)} second={_summarize(second)}"
+    )
+    assert cached < 1.0, (
+        f"the repeat took {cached:.4f}s; the brief's bar is well under a second"
+    )
+    assert cached < uncached / 5, (
+        f"the repeat took {cached:.4f}s against an uncached {uncached:.4f}s. "
+        f"That is not a cache hit -- it re-ran the scanners."
+    )
+
+
+def test_the_poisoned_loop_still_blocks_ten_out_of_ten_with_the_cache_in_place(
+    monkeypatch,
+):
+    """The demo's central claim, ten times, through the real security agent.
+
+    No stubs: this is whatever path the machine actually takes. With no scanners
+    installed (CI's `test` job, and this worktree) the fan-out RAISES on every
+    iteration and the fixture fallback answers -- which is the path the cache
+    must leave completely alone, and the one a cache that memoised the raise
+    would break in the fail-OPEN direction: `[]` reaches
+    compute_security_verdict and returns ('pass', []).
+
+    Ten iterations rather than one because the failure this guards against
+    appears only from the SECOND call onward. Iteration 0 passes under every
+    broken cache in this file's RED steps.
+
+    The two blocking findings are the same two on either path -- the fixture
+    fallback's AWS-key pair, or real gitleaks' pinned pair from
+    scripts/scan_gate.py's EXPECTED_BLOCKING -- so this asserts the same number
+    the five shipped `len(blocking) == 2` assertions do.
+    """
+    state = RunState(
+        ticket_id="POISON-CACHE",
+        ticket_text="add a per-IP login rate limit",
+        plan=PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["x"]),
+        dev=fixtures_loader.dev(poisoned=True),
+    )
+
+    for attempt in range(10):
+        result = security_agent.run(state)
+        assert result.verdict == "block", (
+            f"attempt {attempt}: the poisoned diff must block every time, got "
+            f"{result.verdict!r}. A cache that remembered a fault, a raise, or "
+            f"an empty list breaks exactly this, and only from attempt 1 on."
+        )
+        assert len(result.blocking) == 2, (
+            f"attempt {attempt}: expected 2 blocking findings, got "
+            f"{_summarize(result.blocking)}"
+        )
+
+
+# ==========================================================================
+# Task 4 -- test isolation for a PROCESS-LIFETIME cache
+# ==========================================================================
+
+
+@pytest.fixture(autouse=True)
+def _scanner_cache_is_per_test():
+    """Clear the fan-out's memo around every test in this file. NOT optional.
+
+    THIS WAS MEASURED, NOT ANTICIPATED. With the cache landed and this fixture
+    absent, FIVE tests in this file failed -- and the way they failed is the
+    argument for the fixture:
+
+        E  expected a fault from every tool, got semgrep:semgrep-noop(low);
+           gitleaks:gitleaks-noop(low); trivy:trivy-noop(low)
+        E  the uncached fan-out took 0.0000s, under the 0.15s this test's stubs
+           sleep for
+        E  attempt 0: expected 2 blocking findings, got semgrep:semgrep-secret
+           (critical); gitleaks:gitleaks-secret(critical); ...
+
+    Every one of those is an earlier test's answer being served to a later test.
+    The diffs here are SHARED -- `_dev()`'s harmless diff and the two demo
+    fixtures -- so collision is the default, not bad luck, and note the third
+    line: a leaked entry reached the real security agent and took a
+    `len(blocking) == 2` assertion red. That is the shape of the five shipped
+    assertions this task must not break.
+
+    IT CLEARS ON BOTH SIDES. Before, so no test inherits an entry -- from this
+    file or from any file that ran earlier. After, so nothing this file stored
+    escapes into the rest of the suite. One side alone leaves the other
+    direction open, and the leak is silent either way: a stale hit looks exactly
+    like a scan.
+
+    WHY A PUBLIC RESET RATHER THAN monkeypatch ON THE DICT. `reset_scanner_cache`
+    is the lane's own function, so this fixture pins no private shape; swapping
+    in a fresh dict with `monkeypatch.setattr(_LANE, "_CACHE", {})` would work
+    today and break the moment the cache stops being a bare module-level dict.
+    It also gives a long-running caller the same hook.
+
+    WHY IT DOES NOT WEAKEN THE CONFTEST GUARDS: it touches neither the model
+    seam, the GitHub seam, `builtins.input`, nor the workspace redirect, and it
+    catches nothing -- so the four autouse raisers in tests/conftest.py, whose
+    `pytest.fail` derives from BaseException, are unaffected.
+
+    WHAT IT DOES NOT COVER, STATED RATHER THAN IMPLIED: tests in OTHER files.
+    They keep a process-lifetime cache between them. That is currently harmless
+    for a measured reason and not a designed one -- of the 121 fan-out calls in
+    the shipped suite, 116 raise and the rest return only faults, so nothing
+    outside this file ever stores an entry to leak. If another lane adds a test
+    whose scanners return clean findings, it will need the same clearing, and
+    conftest.py is where that belongs.
+    """
+    _LANE.reset_scanner_cache()
+    yield
+    _LANE.reset_scanner_cache()
