@@ -1,0 +1,46 @@
+# Runtime dependencies for the five AgentCore containers. OWNER: Sorour.
+#
+# Pinned, not floating. An AgentCore image built in September must contain the
+# same code as the one demonstrated in August, and `>=` does not promise that.
+#
+# Every version below was read from `pip index versions <pkg>` on 2026-08-20,
+# not recalled. The first draft of this file guessed bedrock-agentcore==0.1.9;
+# the current release is 1.22.0, so the guess would have pinned an image
+# twenty-one minor versions behind and the error would have surfaced as a
+# runtime contract mismatch inside a container, which is the worst place to
+# find it.
+#
+# THE THREE LINES THE SPEC ASKED FOR ARE A FLOOR, NOT THE LIST. The week-3 spec
+# names strands-agents, bedrock-agentcore and pydantic>=2. Reconciled against
+# the actual import sites, that list builds an image that dies at import:
+#
+#   agentorg/github_ops.py:32   from github import Auth, Github, GithubException
+#
+# That is module level and unconditional, and agentorg/graph.py:42 imports
+# github_ops, so any container that imports the graph needs PyGithub whether or
+# not it ever opens a PR. Omitting it reproduces exactly the defect Task 1 fixed
+# one layer up: a container that builds green and fails on import.
+#
+#   agentorg/common/llm.py:52   import boto3
+#
+# Lazy, inside the Bedrock handler, so an import-time smoke test would pass
+# without it and every model call would then fall back to the fixture. A runtime
+# whose whole purpose is to invoke Bedrock must not depend on that accident.
+#
+# flask is deliberately absent: it belongs to target_repo/, the demo's subject
+# repository, not to the agents.
+
+# The agent framework.
+strands-agents==1.52.0
+
+# AgentCore runtime SDK -- the HTTP contract agentorg/agents/server.py serves.
+bedrock-agentcore==1.22.0
+
+# The frozen result contract in agentorg/state.py.
+pydantic==2.13.4
+
+# Bedrock. Lazy-imported at llm.py:52; required in the image regardless.
+boto3==1.43.75
+
+# github_ops.py:32, module level and unconditional. See above.
+PyGithub==2.10.0
