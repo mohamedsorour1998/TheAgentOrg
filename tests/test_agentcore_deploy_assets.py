@@ -109,6 +109,21 @@ def _declared_requirements() -> list[Requirement]:
     ]
 
 
+def _exact_pins(requirement: Requirement) -> list[str]:
+    """The exact versions a requirement pins, if any.
+
+    `==2.13.4` pins one; `>=2.0` and a bare name pin none; `==2.*` pins none
+    either, since a wildcard still leaves the installed version open. Used by
+    both the pinning test and the pyproject-containment test, which ask
+    different questions of the same distinction and must not disagree on it.
+    """
+    return [
+        spec.version
+        for spec in requirement.specifier
+        if spec.operator in ("==", "===") and "*" not in spec.version
+    ]
+
+
 def _declared_names() -> set[str]:
     """Normalised distribution names declared in requirements.txt."""
     return {r.name.lower().replace("_", "-") for r in _declared_requirements()}
@@ -266,55 +281,115 @@ def test_pygithub_and_boto3_are_declared_with_their_import_sites_documented():
     )
 
 
-def test_no_requirement_is_unbounded_except_the_one_with_a_stated_reason():
-    """Pinning is the house style; the one exception must say why in the file.
+def test_no_requirement_is_unpinned_without_a_stated_reason():
+    """Pinning is the house style; any exception must justify itself in the file.
 
-    pyproject.toml pins `ruff>=0.16,<0.17` and `setuptools>=61,<85`, and CI pins
-    all three scanner versions. bedrock-agentcore is deliberately unpinned
-    because it is not installed on the authoring machine and nothing in this
-    tree imports it, so there is no measured version -- and inventing one is
-    exactly what this task forbids. That reasoning has to live in the file, not
-    only in a report nobody reads at 2am.
+    All five lines are `==` now. bedrock-agentcore used to be the one exception,
+    unpinned because no version had been measured and inventing one was
+    forbidden -- but 1.22.0 was then read from `pip index versions`, so the
+    exception has dissolved and nothing in this file is unpinned any more.
+
+    The exception MACHINERY is kept rather than deleted, because the property
+    worth pinning was never "bedrock-agentcore specifically". It is that an
+    unpinned line is only acceptable when the file says why. A future dependency
+    whose version genuinely cannot be measured may be added unpinned, but only
+    beside the marker `DELIBERATELY UNPINNED: <name>`; added without one, this
+    test goes red. That is the point of the file's own header -- an image built
+    in September must contain the code demonstrated in August, and `>=` does not
+    promise that -- and it matches the rest of the repo, where pyproject.toml
+    bounds `ruff>=0.16,<0.17` and `setuptools>=61,<85` and CI pins all three
+    scanner versions.
+
+    "Unpinned" here means "does not name one exact version", so a pin loosened to
+    a floor is caught too, not just a line with no specifier at all. Those are
+    the same defect: a container whose contents are decided at build time.
     """
-    unbounded = [r.name for r in _declared_requirements() if not r.specifier]
-    assert unbounded == ["bedrock-agentcore"], (
-        f"unexpected unpinned requirements: {unbounded}. Pin them, or state the "
-        "reason in requirements.txt and update this test deliberately."
-    )
     body = REQUIREMENTS.read_text()
-    assert "DELIBERATELY UNPINNED" in body, (
-        "bedrock-agentcore is unpinned but requirements.txt does not say why"
+    unpinned = [r.name for r in _declared_requirements() if not _exact_pins(r)]
+    unjustified = [
+        name for name in unpinned if f"DELIBERATELY UNPINNED: {name}" not in body
+    ]
+    assert not unjustified, (
+        f"these requirements name no exact version and requirements.txt states no "
+        f"reason: {unjustified}. Pin each with `==<version>` read from `pip index "
+        "versions`, or write `DELIBERATELY UNPINNED: <name>` beside it saying why "
+        "the version cannot be measured."
     )
 
 
-def test_requirements_does_not_contradict_pyproject_on_shared_dependencies():
+def test_every_container_pin_satisfies_the_range_pyproject_declares():
     """Two declarations of the same dependency must not disagree.
 
     requirements.txt is what the container installs; pyproject.toml is what a
-    developer installs. A container on a floor BELOW what pyproject declares
-    would run code the project never tested -- a divergence invisible until
-    runtime.
+    developer installs and what this suite runs against. The defect worth
+    catching is a container running a version the project never tested --
+    invisible until runtime, and invisible on the authoring machine entirely,
+    because nothing here installs from requirements.txt.
+
+    So the question is CONTAINMENT, not spelling: does the container's exact pin
+    fall inside every range pyproject declares for that dependency? An `==` pin
+    inside a `>=` floor is not a contradiction -- `pydantic==2.13.4` is a
+    strictly narrower choice than `pydantic>=2.0`, and an earlier version of this
+    test called it one by comparing OPERATORS and demanding a matching `>=`.
+    Asked with `SpecifierSet.contains`, `==2.13.4` passes and `==1.10.13` fails,
+    which is the distinction that matters.
+
+    Pre-releases are admitted deliberately: whether a pin like `2.14.0b1` should
+    ship is a real question, but it is not a disagreement between two ranges, and
+    reporting it under this name would misdescribe it.
+
+    This test judges CONTAINMENT ONLY, and deliberately does not also demand that
+    the container pin exactly -- test_no_requirement_is_unpinned_without_a_stated_reason
+    owns that rule, including its justified-exception escape hatch. An earlier
+    draft of THIS test failed an unpinned shared dependency here too, which made
+    the two tests contradict each other: a dependency carrying the documented
+    `DELIBERATELY UNPINNED` marker satisfied one and failed the other, with no
+    way to satisfy both. It also flagged `pydantic>=2.13.4` under pyproject's
+    `>=2.0` as a disagreement -- repeating, one layer down, the exact operator-
+    comparing mistake this rewrite exists to remove, since a narrower floor
+    cannot admit a version the wider one excludes.
+
+    A container RANGE is therefore checked by containment of its own bounds: every
+    version the container would allow must be one pyproject allows too. `>=2.13.4`
+    passes under `>=2.0`; `>=1.0` does not.
     """
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     project_deps = {
         Requirement(d).name.lower().replace("_", "-"): Requirement(d)
         for d in pyproject["project"]["dependencies"]
     }
+    violations: list[str] = []
     for requirement in _declared_requirements():
         name = requirement.name.lower().replace("_", "-")
         if name not in project_deps:
             continue
-        pyproject_requirement = project_deps[name]
-        for pyproject_spec in pyproject_requirement.specifier:
-            if pyproject_spec.operator != ">=":
+        declared = project_deps[name].specifier
+        if not declared:
+            continue  # pyproject bounds nothing, so nothing can contradict it.
+        # Exact pins are checked directly; a range is checked at the versions it
+        # names as bounds, which is where a range can escape pyproject's.
+        probes = _exact_pins(requirement) or [
+            spec.version for spec in requirement.specifier
+        ]
+        if not probes:
+            continue  # bare name: unbounded, and the pinning test owns that.
+        for version in probes:
+            if declared.contains(version, prereleases=True):
                 continue
-            container_floors = [
-                s.version for s in requirement.specifier if s.operator == ">="
-            ]
-            assert container_floors, (
-                f"{name}: pyproject declares a floor {pyproject_spec} but "
-                "requirements.txt declares none"
+            outside = ", ".join(
+                str(spec)
+                for spec in declared
+                if not spec.contains(version, prereleases=True)
             )
+            violations.append(
+                f"{name}: requirements.txt allows {version} (from "
+                f"'{requirement.specifier}'), outside pyproject's {outside} -- the "
+                "container would run a version the project never tested"
+            )
+    assert not violations, (
+        "agentorg/agents/requirements.txt and pyproject.toml disagree:\n  "
+        + "\n  ".join(violations)
+    )
 
 
 # --------------------------------------------------------------------------
