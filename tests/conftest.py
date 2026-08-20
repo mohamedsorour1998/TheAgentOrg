@@ -249,3 +249,16 @@ def _unpatched_input(prompt: str = "") -> NoReturn:
 def _terminal_blocked_by_default(monkeypatch):
     """Start every test with the terminal blocked, so nothing can hang."""
     monkeypatch.setattr(builtins, "input", _unpatched_input)
+
+
+@pytest.fixture()
+def provenance(tmp_path, monkeypatch):
+    """Put this test into a chosen scanner-provenance mode. See tests/provenance.py.
+
+    NOT autouse: a test that does not ask for it keeps the ambient mode, which is
+    what the existing suite relies on. Asking for it is how a test declares that
+    its result depends on which mode produced the verdict.
+    """
+    from tests.provenance import Provenance
+
+    return Provenance(tmp_path / "scanner-bin", monkeypatch)
