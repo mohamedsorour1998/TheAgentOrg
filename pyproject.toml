@@ -30,6 +30,13 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.16,<0.17",
+    # tests/test_packaging.py builds a wheel, so it needs the build backend
+    # DECLARED, not merely present by accident. Undeclared, that test silently
+    # skips on any freshly built venv -- the exact hole ab1d5c8 closed for the
+    # network case. CI installs `.[dev]` and nothing else (ci.yml:39, :70, :116),
+    # so this is the only lever that pins it there. Kept in step with the
+    # [build-system] bound above: bump both together, deliberately.
+    "setuptools>=61,<85",
 ]
 
 [tool.setuptools.packages.find]
