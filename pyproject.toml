@@ -1,3 +1,16 @@
+# Pinned deliberately: without this table pip falls back to an implicit
+# setuptools>=40.8.0 fetched over the NETWORK for every build, which made
+# tests/test_packaging.py skip (and so report green on a broken declaration)
+# on any machine with a cold pip cache. >=61 is the floor for PEP 621
+# ([project]) metadata plus the [tool.setuptools.packages.find] form used
+# below. The upper bound keeps a future major from silently changing what
+# ships: 84.0.0 is what `pip list` reports in .venv-sorour and is what the
+# packaging tests were verified against, so <85 admits that and no new
+# major. Bump both together, deliberately, and re-run tests/test_packaging.py.
+[build-system]
+requires = ["setuptools>=61,<85"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "theagentorg"
 version = "0.1.0"
@@ -17,10 +30,20 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.16,<0.17",
+    # tests/test_packaging.py builds a wheel, so it needs the build backend
+    # DECLARED, not merely present by accident. Undeclared, that test silently
+    # skips on any freshly built venv -- the exact hole ab1d5c8 closed for the
+    # network case. CI installs `.[dev]` and nothing else (ci.yml:39, :70, :116),
+    # so this is the only lever that pins it there. Kept in step with the
+    # [build-system] bound above: bump both together, deliberately.
+    "setuptools>=61,<85",
 ]
 
-[tool.setuptools]
-packages = ["agentorg"]
+[tool.setuptools.packages.find]
+include = ["agentorg*"]
+
+[tool.setuptools.package-data]
+"agentorg.security" = ["gitleaks.toml", "semgrep_rules.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

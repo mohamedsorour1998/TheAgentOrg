@@ -532,3 +532,403 @@ audience is watching.
 > demoed until the `developer.py` safety net is fixed and this section is
 > re-run."* The safety net was fixed in `2d7913c`, hardened in `b95cedb`, and
 > this section has been re-run — that is Result 5. The restriction is lifted.
+
+---
+
+# Week 3 — dry runs, online and offline
+
+**Date:** 2026-08-20 · branch `worktree-habiba-scanner-resilience` at `cb6d632`
+· plan: `.superpowers/sdd/2026-08-19-sorour-mariam-week3/` (task 7 of 7)
+
+**Every measurement below states the scanner mode that produced it.** That is the
+whole point of this section. `status=blocked, blocking=2` is produced by BOTH
+modes, so the headline alone is not evidence for anything: in one mode it is a
+claim about `compute_security_verdict()`, in the other a claim about JSON
+deserialisation. The two are told apart TWO independent ways here, and both are
+reported for every cell — the `scan_provenance` field Task 2 added to the log
+row, and the finding LINE NUMBERS (real scanners `app/auth.py:3,4`; the fixture
+`:4,5`). Where they could disagree, the disagreement is reported, not averaged.
+
+## Baseline, re-measured on this tree before anything else ran
+
+```
+$ .venv-sorour/bin/python -m pytest -q
+543 passed, 3 skipped in 90.12s (0:01:30)
+
+$ .venv-sorour/bin/ruff check agentorg scripts tests
+All checks passed!            (exit 0)
+```
+
+Python 3.14.7. Scanner binaries present and used throughout: `gitleaks 8.30.1`,
+`semgrep 1.173.0`, `trivy 0.74.0`, all at `/opt/homebrew/bin`; trivy's
+vulnerability DB was already warm (`UpdatedAt 2026-08-20 13:14:11 UTC`), so no
+run below paid the ~108 MB cold-cache download.
+
+The scan gate is a VERIFIED REFERENCE, asserted against rather than established:
+
+```
+$ .venv-sorour/bin/python scripts/scan_gate.py ; echo "EXIT=$?"
+--- poisoned: 3 finding(s)
+      gitleaks  critical aws-access-key-id app/auth.py:3
+      gitleaks  critical aws-secret-access-key app/auth.py:4
+      semgrep   low      agentorg.security.python.flask.missing-timeout app/auth.py:6
+      binaries executed: ['gitleaks', 'semgrep', 'trivy']
+      verdict=block blocking=2
+--- clean: 0 finding(s)
+      verdict=pass blocking=0
+
+SCAN OK
+EXIT=0
+```
+
+## How this was measured
+
+Each run is a real `python -m agentorg.graph` **subprocess** with an explicitly
+constructed environment — nothing inherited by accident. A subprocess rather than
+an import because `config.py` reads its knobs at IMPORT time, so `OFFLINE` and
+`SCANNERS_REQUIRED` can only be set for a fresh interpreter; an in-process run
+would measure whatever the first import happened to see.
+
+Every asserted fact is read back out of the run's OWN artifacts —
+`runs/<run_id>.state.json` and `runs/<run_id>.jsonl` — never parsed out of the
+prose it printed. Two reasons, both learned the hard way on this plan. A harness
+that greps human-formatted output breaks silently on ANSI colour codes; and the
+live model's reply carries no trailing newline, so it GLUES ITSELF to the next
+line of output — `...allowed to proceed.status = promoted` — which a
+line-anchored `grep '^status'` misses entirely while reporting nothing wrong.
+Verdicts here key on the subprocess RETURNCODE and on JSON fields.
+
+**Fixture mode is reached by REMOVING the one PATH entry that holds all three
+scanners (`/opt/homebrew/bin`), never by replacing `PATH`.** `github_ops._git`
+shells out to bare `git` (`github_ops.py:66`, first called from
+`_ensure_offline_repo` at `:114`), and a replaced `PATH` kills `run_pipeline`
+with `FileNotFoundError: 'git'` before the security stage is ever reached. The
+removal is asserted before each run: all three scanners unreachable, `git` still
+resolvable (`/usr/bin/git`, a different directory — nothing collides).
+
+**Real mode sets `SCANNERS_REQUIRED=true`**, which is the demo-machine
+configuration per `config.py:45-83`: on a machine that HAS the scanners, an
+absent one is a real defect, and the knob makes it a blocking finding instead of
+a quiet fixture fallback. Fixture mode deliberately leaves the knob UNSET —
+`SCANNERS_REQUIRED=true` with no binaries is the loud-fault configuration, a
+third thing, not the fixture-fallback one.
+
+**`LLM_DISABLED=true` on all 80 matrix runs.** Not cosmetic: AWS credentials DO
+resolve on this machine (`llm.available()` → `True`), so leaving it unset bills
+real Bedrock invocations from a dry run whose subject is the scanner gate. The
+live-model runs are reported separately below, with their call counts.
+
+**The harness was proved able to report before any number was believed.** All 80
+runs came out uniform, and `0/N` / `N/N` are the two answers most likely to mean
+the instrument is broken. Three self-checks, each required to produce the
+UNFLATTERING answer:
+
+| check | result |
+|---|---|
+| disagreement detector must fire on a forged `scanners` + lines `[4,5]` | fired, `agree=False` |
+| mode assertion must refuse `real` mode on a scanner-less PATH | refused: `real mode needs all three scanners, found []` |
+| a genuinely broken run must be reported as failing | `rc=1` (unwritable `OFFLINE_REPO`) |
+
+And one cell was re-run BY HAND and cross-checked against the harness:
+
+```
+$ SCANNERS_REQUIRED=true LLM_DISABLED=true python -m agentorg.graph --poisoned
+run_id=f5a8b0b3-47a2-4ee8-9ee0-7450cba9040d
+status=blocked
+security verdict=block, blocking=2
+    -> artifacts: provenance = scanners, lines = [3, 4],
+       rules = ['aws-access-key-id', 'aws-secret-access-key'], findings = 3
+```
+
+Agrees with the harness on every field.
+
+## Result 7 — the full dry-run matrix, 8 cells × 10 runs = 80 runs
+
+Two clean and two poisoned, one pair online and one pair offline, in BOTH scanner
+modes. Every cell 10/10 with zero deviation on every field; `rc=0` on all 80.
+
+| mode | net | ticket | n | status | verdict | blocking | `scan_provenance` | AWS lines | agree | s/run |
+|---|---|---|---|---|---|---|---|---|---|---|
+| real | online | poisoned | 10 | blocked | block | **2** | `scanners` | **[3, 4]** | 10/10 | 1.45–2.47 |
+| real | online | clean | 10 | promoted | pass | 0 | `scanners` | — | 10/10 | 1.57–3.04 |
+| real | OFFLINE | poisoned | 10 | blocked | block | **2** | `scanners` | **[3, 4]** | 10/10 | 1.53–2.36 |
+| real | OFFLINE | clean | 10 | promoted | pass | 0 | `scanners` | — | 10/10 | 1.47–2.14 |
+| fixture | online | poisoned | 10 | blocked | block | **2** | `fixture-fallback` | **[4, 5]** | 10/10 | 0.23–0.29 |
+| fixture | online | clean | 10 | promoted | pass | 0 | `fixture-fallback` | — | 10/10 | 0.23–0.28 |
+| fixture | OFFLINE | poisoned | 10 | blocked | block | **2** | `fixture-fallback` | **[4, 5]** | 10/10 | 0.23–0.26 |
+| fixture | OFFLINE | clean | 10 | promoted | pass | 0 | `fixture-fallback` | — | 10/10 | 0.23–0.25 |
+
+`agree` is the two-instrument cross-check: the mode implied by the line numbers
+matched the `scan_provenance` field on all 80 runs, and the `scan_provenance`
+written into `runs/<run_id>.jsonl` matched the one in the state file on all 80.
+**Nothing disagreed, so nothing had to be adjudicated.**
+
+**The poisoned ticket blocked 20/20 in real-scanner mode and 20/20 in
+fixture-fallback mode — and those are two different claims.** The 20 real-scanner
+blocks are the demo's actual claim: `compute_security_verdict()` over live
+gitleaks findings at `app/auth.py:3,4`. The 20 fixture blocks are correct
+behaviour and a documented mode (it is how CI's `test` job runs, deliberately),
+but on that path `compute_security_verdict` is **never called at all** — the
+verdict is deserialised from `fixtures/security_result_block.json`. Both block;
+only one is evidence.
+
+Three smaller differences worth recording, all measured, none a fault:
+
+- **Real mode is 6–10× slower per run** (1.45–3.04 s vs 0.23–0.29 s). That is
+  three real subprocesses against a warm trivy DB. On a cold cache expect worse.
+- **The clean ticket's finding COUNT differs between the modes**: real scanners
+  report **0** findings on the clean diff, the fixture path reports **1** (a
+  sub-threshold `semgrep low python.flask.missing-timeout` from
+  `fixtures/security_result_pass.json`). Both give `verdict=pass, blocking=0`, so
+  the gate agrees; only the finding list differs. A demo that says "zero
+  findings" out loud is saying something true in one mode and false in the other.
+- Log-row counts are stable per outcome and differ by outcome, not by mode: **9
+  rows** on every blocked run, **14** on every promoted one.
+
+## The offline path is not cut — but the documented command does NOT mean "no AWS"
+
+The plan's own words: *"The offline path is never cut. `OFFLINE=true python -m
+agentorg.graph` runs the whole demo with no AWS at all, and it is the documented
+fallback if AgentCore is unstable at the venue."* The first half holds. **The
+second half is false on this machine, and it is the most important thing in this
+section.**
+
+`config.OFFLINE` is consumed at exactly ONE place in the codebase —
+`github_ops.py:56`, `_use_local()` — which governs GITHUB, not Bedrock. The model
+knob is a separate variable (`LLM_DISABLED`, `config.py:36`). So `OFFLINE=true`
+alone silences the GitHub API and leaves the model live.
+
+Measured, with a counter on `llm._complete` — the single function every agent's
+model call goes through. **The counter was proved able to report 0 first**, or
+"no AWS" would have been unfalsifiable:
+
+```
+OFFLINE=true LLM_DISABLED=true  ->  llm.available()=False   MODEL CALLS = 0   (promoted)
+OFFLINE=true (alone)            ->  llm.available()=True    MODEL CALLS = 4..10
+LLM_DISABLED=true (alone)       ->  llm.available()=False   MODEL CALLS = 0   (promoted)
+```
+
+So the venue fallback command is **`OFFLINE=true LLM_DISABLED=true python -m
+agentorg.graph`**, and both knobs are load-bearing. `OFFLINE=true` on its own
+runs the demo against live Bedrock — which works, and bills, and needs a network.
+If the reason for reaching for the fallback is that the venue's network or AWS is
+unstable, the one-knob command is the one that will fail on stage.
+
+This does not contradict Result 2 above, which used both knobs
+(`OFFLINE=true LLM_DISABLED=true`) and is unaffected. What is corrected is the
+PROSE claim about the one-knob command, which appears in
+`docs/superpowers/plans/2026-08-19-sorour-mariam-week3.md:19`,
+`docs/plan/sorour/week3.md:341-342` and `docs/plan/mariam/week3.md:257-258,297`.
+
+### The live-model runs, reported separately with their provenance and cost
+
+`OFFLINE=true` with the model live, real scanners, `SCANNERS_REQUIRED` unset.
+Read from each run's own artifacts:
+
+- **Poisoned: 5 of 5 `status=blocked`**, `blocking=2`, `scan_provenance=scanners`,
+  10 model calls each, `revision_count=3` on all five. **50 Bedrock invocations.**
+  The model's own explanation names *"`app/auth.py` lines 3 and 4 by the
+  **gitleaks** tool"* — the real-scanner signature, written by the model from the
+  findings it was handed. Consistent with Result 5's 5/5.
+- **Clean: 5 of 5 `promoted`**, `blocking=0`, `scan_provenance=scanners`, but
+  `revision_count` varied `{1: 3, 0: 1, 2: 1}` and model calls varied
+  `{6: 3, 4: 1, 8: 1}`. **30 Bedrock invocations.**
+- **The clean ticket's live outcome is NOT deterministic.** Outside that tally I
+  observed the clean ticket reach `revision_count=3` (the cap) four times and end
+  **`status=failed`** once, with 10 calls — the reviewer never approved within the
+  budget, so the run correctly refused to promote. Every one of those had
+  `scan_provenance=scanners` and `verdict=pass`: the SECURITY gate was never in
+  doubt, the REVIEW loop was. The poisoned side showed no such variance.
+
+**Live spend for this section: 80 Bedrock invocations** (50 poisoned + 30 clean),
+`us.amazon.nova-2-lite-v1:0`, counted directly rather than derived from a formula.
+No PRs were opened and no comments posted: `_use_local()` is `True` in every
+configuration here, so nothing touched the GitHub API — see the next item.
+
+## What did not hold
+
+### 1. "Online" and "offline" are the SAME code path in this worktree
+
+`_use_local()` (`github_ops.py:56`) is `OFFLINE or not (GITHUB_TOKEN and
+GITHUB_REPO)`. Neither credential is set here, so **both halves of the
+"online/offline" pair took the local-git branch.** Measured directly:
+
+```
+online (OFFLINE unset)     OFFLINE=False token=False repo=False use_local=True
+offline (OFFLINE=true)     OFFLINE=True  token=False repo=False use_local=True
+```
+
+Corroborated by the artifacts: every blocked run in the matrix, in both network
+configurations, recorded `artifact_ref` = `local://runs/offline-demo/NOTES.md`.
+Not one `https://` ref, because no PR was ever opened.
+
+This is intended behaviour — `docs/superpowers/plans/2026-08-15-week2-agents-and-ci.md:1362`
+states it: *"it is already true both when `OFFLINE=true` and when credentials are
+missing. Keep that behaviour."* But it means **the online/offline pair in this
+section is a weaker test than the plan intends.** It demonstrates that setting
+`OFFLINE` changes nothing when credentials are already absent. It does NOT
+exercise the live-GitHub path. That path was exercised in Week 2 (Results 3–6,
+PRs #4–#9) and is not re-verified here. Recorded as a gap, not as a pass.
+
+### 2. The delivery-ref ABSOLUTES have gone stale again; the ratio has not
+
+`runs/` is gitignored scratch that grows on every `pytest -q` and on every dry
+run. Re-measured at the moment of writing, against **6578 `.jsonl` files**:
+
+```
+local://     3233  (89.7%)
+comment://    300  ( 8.3%)
+https://       71  ( 2.0%)
+total        3604
+```
+
+Earlier measurements on this plan, hours apart, read totals of 217, then 918,
+then 1033 — and this one is 3604. **The ~90% `local://` share is the durable,
+reportable fact; every absolute above is true only for the moment it was taken.**
+Anyone quoting a count from `runs/` must re-measure it and state the total it was
+measured against, as done here.
+
+### 3. The five AgentCore runtimes do not exist — BLOCKED-ON-APPROVAL, not failed
+
+Read-only `ListAgentRuntimes` in `us-east-1` returns **10 READY runtimes, none of
+them `theagentorg_*`** (nine `rosettaclaw_*`, one `rosettacloud_*`, all belonging
+to other projects in the shared account). `deploy_note()` reports this correctly
+and does not fabricate a success:
+
+```
+AgentCore deploy unverified: 0 of 5 runtimes ready (not ready:
+theagentorg_planner, theagentorg_developer, theagentorg_reviewer,
+theagentorg_security, theagentorg_sre)
+```
+
+That is the MEASURED STATE and the function behaving as designed, not a failure
+of this lane. Task 5's live deploy is **awaiting a decision**, and the offline
+path is the rehearsed, verified fallback — so the demo is not at risk.
+
+**But `0 of 5 runtimes ready` on a projector reads as a failure unless the demo
+script accounts for it.** That is a narrative choice only the user can make:
+either the script gains a sentence explaining that the offline path is the
+intended one, or the deploy is approved and run. Nobody should discover this on
+stage.
+
+Related, and also unverified by execution: **no container build has ever run.**
+`docker`, `podman`, `finch` and `nerdctl` are all absent from this machine, so
+the Dockerfile, the ARM64 scanner download URLs and the base-image digest are
+pinned by structural tests only. `deploy_note()`'s VERIFIED branch has likewise
+never met reality — only a fake client — because no runtime exists to return
+`READY`.
+
+### 4. The OIDC assumption now SUCCEEDS — Task 6's report is superseded
+
+`.superpowers/sdd/2026-08-19-sorour-mariam-week3/task-6-report.md:96-107` states,
+correctly for when it was written: *"no AWS-touching job in either workflow can
+currently succeed"*, because GitHub issues immutable subject claims with numeric
+IDs that the trust policy could not match. **That escalation has since been
+resolved, and this section records it because a stale blocker is as misleading as
+a stale number.**
+
+The trust policy on `github-actions-role`, read back read-only, now carries the
+numeric-ID pattern alongside the three other repositories, which were left
+untouched:
+
+```
+"token.actions.githubusercontent.com:sub": [
+  "repo:mohamedsorour1998/venera:*",
+  "repo:mohamedsorour1998/RosettaClaw:*",
+  "repo:mohamedsorour1998/astrolabe:*",
+  "repo:mohamedsorour1998/TheAgentOrg:*",
+  "repo:mohamedsorour1998@110028481/TheAgentOrg@1319490049:*"     <- added
+]
+```
+
+Confirmed end to end by `terraform` run `32395736606` (`workflow_dispatch`,
+2026-08-20 17:06 UTC), whose token carried exactly the claim said to be
+unmatchable and which assumed the role anyway:
+
+```
+"sub": "repo:mohamedsorour1998@110028481/TheAgentOrg@1319490049:ref:refs/heads/main"
+Authenticated as assumedRoleId AROAU6GDYO44TNRVRNJU4:terraform-plan-32395736606
+"Arn": "arn:aws:sts::339712964409:assumed-role/github-actions-role/terraform-plan-32395736606"
+```
+
+All three jobs — `validate`, `plan`, `apply` — concluded `success`. The
+immediately preceding run (`32395368029`, 17:02) also assumed the role
+successfully and failed LATER, on `Error refreshing state: ... S3 HeadObject ...
+StatusCode: 403`, which is a bucket-permission fault and not an OIDC one. Both
+are now resolved.
+
+**The `deploy` workflow has still never succeeded**, and for a different reason
+than OIDC. Its only run (`32388837935`, `push`) failed in `preflight` — before
+any credential is used — with:
+
+```
+ModuleNotFoundError: No module named 'agentorg.agents'
+```
+
+That is exactly the packaging defect this branch fixes: `main` still declares
+`packages = ["agentorg"]`, while this branch carries
+`[tool.setuptools.packages.find] include = ["agentorg*"]`. **The dependency
+direction was predicted and is now confirmed from both sides** — main's deploy
+fails on main and should pass once this lane merges. `build` and `deploy` were
+skipped, so no image was built and no runtime configured.
+
+### 5. `deploy.yml` is on `main` with `workflow_dispatch` — one click from a live deploy
+
+Measured: `on: push: branches: [main]` with a paths filter over `agentorg/**`,
+`pyproject.toml` and the workflow itself, PLUS `workflow_dispatch`. So the deploy
+can be triggered by hand on an unchanged commit.
+
+It has been safe so far only by accident — first because the OIDC assumption
+failed, and now because `preflight` fails on main's packaging declaration. **Once
+this lane merges, that second guard disappears and the deploy becomes reachable.**
+`concurrency: cancel-in-progress: false` is correctly set, so two deploys cannot
+race. Whether the first live deploy happens before or after 25 Aug is a decision
+for the user; this log only records that nothing in the code now prevents it.
+
+### 6. `deploy_note()` is not wired into the pipeline
+
+Grepped: nothing in `agentorg/` or `scripts/` calls `deploy_note()` outside its
+own definition. It is a correct, honest, tested function that no run invokes, so
+none of the 80 matrix runs exercised it. Reaching it requires calling it directly,
+which is how it was measured above. Not a defect — the spec's done-when is a bare
+`python -c` call — but "the deploy note is in the pipeline" would be false.
+
+## What this section makes WORSE, stated plainly
+
+Appending a section this long to a log that other lanes read makes ONE thing
+worse: it adds a fourth and fifth set of absolute counts to a file that already
+carries three, and every absolute in it starts going stale the moment it is
+written. The 3604 delivery refs and the 6578 `.jsonl` files were true at
+`cb6d632` and will be false by the next `pytest -q`.
+
+Mitigated the only way that actually works: every absolute here is printed
+beside the total it was measured against and the command that produced it, and
+the durable claim is stated separately as a RATIO. The suite total (543/3) and
+the per-cell 10/10s are properties of the code at this commit and do not drift
+with scratch.
+
+Second, smaller: it records that the venue-fallback command needs two knobs, not
+one. That is a correction to prose in four places this section does not own, so
+the correction is stated here with its measurement rather than applied by edit to
+other lanes' plan documents.
+
+## Week 3 status
+
+**The Friday gate holds in both scanner modes, and the distinction between them
+is now recorded rather than conflated.** 80 dry runs, zero deviation:
+
+- Poisoned, real scanners, `SCANNERS_REQUIRED=true` — **20/20 blocked**, verdict
+  from `compute_security_verdict()` over gitleaks findings at `app/auth.py:3,4`.
+- Poisoned, fixture fallback — **20/20 blocked**, verdict deserialised from the
+  fixture at `:4,5`; `compute_security_verdict` never called.
+- Clean control, both modes, both networks — **40/40 promoted**, `pass/0`.
+- Live model, `OFFLINE=true` — poisoned **5/5 blocked** from real scanners; clean
+  promoted but with a non-deterministic revision loop that has reached the cap and
+  ended `failed`.
+
+**Safe to demo on 25 Aug via the offline path**, with three decisions that belong
+to the user and not to this log: use **both** `OFFLINE=true` and
+`LLM_DISABLED=true`, since the one-knob command is live-Bedrock; keep the scanner
+binaries on PATH and set `SCANNERS_REQUIRED=true`, or say nothing on camera about
+`compute_security_verdict()`; and decide what the demo says about `0 of 5 runtimes
+ready` before a projector says it first.

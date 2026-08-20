@@ -23,6 +23,36 @@ Severity = Literal["low", "medium", "high", "critical"]
 Actor = Literal["planner", "developer", "reviewer", "security", "sre", "human", "system"]
 Stage = Literal["plan", "gate1", "develop", "review", "security", "gate2", "sre", "gate3", "promote"]
 
+# WHERE A SECURITY VERDICT CAME FROM. Added in week 3 for the timeline UI.
+#
+# "blocked" proves two different things depending on this value, and until it
+# existed nothing on disk told them apart: agents/security.py answers a scanner
+# raise with the FIXTURE verdict, which still blocks a diff carrying an AWS key,
+# so a fixture block and a real gitleaks block wrote byte-identical log rows.
+# On a machine with no scanners on PATH -- which is CI, and was the demo laptop --
+# the fixture path is the DEFAULT, not an edge case.
+#
+# Inferring this after the fact is not possible: the block fixture's explanation
+# is "Two AWS credentials are hardcoded in app/auth.py. Move them to the
+# environment and rotate the key before merging." -- specific, plausible, naming
+# a real file and a real remediation, and indistinguishable from real gitleaks
+# output. So it is RECORDED at the call site when the run happens, and the
+# renderer reports absence as unknown rather than guessing.
+#
+#   "scanners"          run_all_scanners returned; compute_security_verdict decided.
+#   "fixture-fallback"  a scanner RAISED; the fixture verdict stood in. A fault.
+#   "fixture-stub"      use_real_scanners=False; nobody asked for a scan. A choice.
+#
+# The last two are kept apart deliberately. Both are fixture verdicts, but one is
+# a scanner that failed and one is a scan that was never requested -- collapsing
+# them would hide a broken gate behind a deliberate demo setting.
+ScanProvenance = Literal["scanners", "fixture-fallback", "fixture-stub"]
+
+# "" is the fourth, unnameable state: a row written before this field existed.
+# Typed as a Literal union rather than a bare str so a typo at a call site is a
+# ValidationError when the row is written, not a mystery in the renderer.
+ScanProvenanceOrUnknown = ScanProvenance | Literal[""]
+
 SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
@@ -75,6 +105,11 @@ class SecurityResult(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     blocking: list[Finding] = Field(default_factory=list)
     explanation: str = ""           # LLM writes this; it does NOT set the verdict
+    # Which of agents/security.run's three paths produced the verdict above.
+    # It rides on the RESULT rather than being handed back separately because
+    # graph.py reaches this agent through `security.run(state)` and tests
+    # monkeypatch that exact name -- a second entry point would slip the seam.
+    scan_provenance: ScanProvenanceOrUnknown = ""
 
 
 class SLOCheck(BaseModel):
@@ -157,3 +192,7 @@ class LogEvent(BaseModel):
     verdict: str = ""
     summary: str = ""
     artifact_ref: str = ""          # PR url, branch, path to findings json
+    # Set on the security rows only. The timeline reads ONLY log.read(run_id),
+    # so a fact that stays on the in-memory SecurityResult is a fact the judges
+    # never see. Absent on every run logged before week 3; see ScanProvenance.
+    scan_provenance: ScanProvenanceOrUnknown = ""
