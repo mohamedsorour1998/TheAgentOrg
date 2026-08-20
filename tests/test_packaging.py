@@ -64,17 +64,19 @@ Two measurements bound how much protection there is if someone deletes the `-S`,
 and the distinction matters because an earlier version of this docstring got it
 wrong in the pessimistic direction:
 
-  * Whole-file run, declaration broken AND `-S` dropped: `6 failed, 3 passed`.
+  * Whole-file run, declaration broken AND `-S` dropped: `7 failed, 4 passed`.
     The subpackage and data-file tests read the filesystem directly, so they do
     not care about `-S`, and `test_the_editable_finder_is_not_what_resolves_these_imports`
     fires too. CI runs whole files, so CI would catch that pairing.
-  * Whole-file run, declaration CORRECT and `-S` dropped: `10 passed`. Nothing
-    notices, because the finder is only a fallback and the temp install satisfies
-    every import on its own.
+  * Whole-file run, declaration CORRECT and `-S` dropped: `1 failed, 10 passed`.
+    The single failure is `test_the_isolation_flag_is_actually_set`, and it is
+    the ONLY thing that notices -- every import still resolves from the temp
+    install, because the finder is a fallback and the packaged tree satisfies
+    them on its own.
 
-The second line is the real risk: a cleanup that drops the `-S` looks harmless
-forever, and only becomes a hole when a later packaging change lands. That is
-what `test_the_isolation_flag_is_actually_set` closes -- it asserts
+That second measurement is why that test exists. Before it was added the same
+mutation was a fully green run, so a cleanup dropping the `-S` looked harmless
+forever and only became a hole when a later packaging change landed. It asserts
 `sys.flags.no_site` from inside the subprocess, so it fails on `-S` removal
 regardless of the declaration's state.
 
@@ -116,9 +118,29 @@ happily build against a pin no container could satisfy. See
 `_local_backend_satisfies_declared_requires`. `--no-deps` throughout means this
 project's own runtime dependencies are never fetched.
 
-A skip survives for exactly one case: no index reachable AND no setuptools
-importable, i.e. the environment cannot build any package at all and so cannot
-say anything about this declaration either way.
+A skip survives for exactly one case: no index reachable AND no build backend
+installed, i.e. the environment cannot build any package at all and so cannot say
+anything about this declaration either way. Verified with a deps directory
+holding pytest and packaging but no setuptools: `11 skipped`.
+
+Getting that boundary right took two goes, because pip reports a bad declaration
+and a bare environment with the SAME words -- `BackendUnavailable: Cannot import
+'<backend>'`. Two defects hid in the gap:
+
+  * `build-backend = "setuptools.build_metaa"` (a typo, fatal to every container
+    build) gave `11 skipped`, RC=0 -- with the network UP, and still `11 skipped`
+    with the broken `packages = ["agentorg"]` declaration alongside it.
+  * A `requires` whose marker excludes this interpreter gave `11 passed` while
+    the real isolated build died with `BackendUnavailable`.
+
+Both are decided structurally now, never from pip's message text:
+`_declared_backend_is_importable` resolves the declared module with `find_spec`,
+and `_local_backend_satisfies_declared_requires` evaluates markers and URL pins
+as well as version specifiers. Each of those checks is scoped to the case where
+the backend distribution is actually INSTALLED here -- otherwise a bare
+environment would be reported as a packaging defect, which is the same
+conflation in the opposite direction (measured: it turned the legitimate skip
+into `11 errors` before that scoping was added).
 
 WHY IT BUILDS FROM A COPY AND PASSES `--no-cache-dir`
 -----------------------------------------------------
@@ -136,6 +158,7 @@ up. It also keeps the working tree clean -- building in place leaves `build/` an
 `theagentorg.egg-info/` behind. `--no-cache-dir` closes the wheel-cache half.
 """
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -197,15 +220,70 @@ def _pip_install(source: Path, target: Path, *, isolated: bool) -> subprocess.Co
 
 
 def _is_backend_unobtainable(output: str) -> bool:
-    """True only when pip could not IMPORT a build backend at all.
+    """Whether pip failed because it could not IMPORT a build backend.
 
-    Deliberately narrow: it must not match a build that ran and failed. The
-    signal is `--no-build-isolation` being unable to import the declared
-    backend, i.e. it is genuinely not installed here:
-
-        BackendUnavailable: Cannot import 'setuptools.build_meta'
+    Necessary but NOT sufficient for a skip. pip emits this for two opposite
+    causes -- nothing installed (environment limitation) versus a `build-backend`
+    naming a nonexistent module (packaging defect) -- so this predicate cannot
+    decide on its own. The caller must first rule out the defect with
+    `_declared_backend_is_importable`.
     """
-    return "BackendUnavailable" in output or "Cannot import 'setuptools.build_meta'" in output
+    return "BackendUnavailable" in output or "Cannot import" in output
+
+
+def _declared_backend() -> str | None:
+    """The `build-system.build-backend` string, or None if the table omits it."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    return pyproject.get("build-system", {}).get("build-backend")
+
+
+def _declared_backend_is_importable() -> bool:
+    """Whether the module named by `build-backend` can be imported HERE.
+
+    This is asked BEFORE any decision to skip, and it is what separates the two
+    opposite situations pip reports with the same words.
+
+    pip raises `BackendUnavailable: Cannot import '<backend>'` both when the
+    environment simply has no setuptools (an environment limitation, and a
+    legitimate skip) and when `build-backend` NAMES A MODULE THAT DOES NOT
+    EXIST (a packaging defect that breaks every container build). Matching on
+    the message text cannot tell those apart, which is how a one-character typo
+    came to produce a green run: `build-backend = "setuptools.build_metaa"` gave
+    `11 skipped`, RC=0, with the network up, and stayed at `11 skipped` with the
+    broken `packages = ["agentorg"]` declaration ALSO in place.
+
+    So the question is answered structurally instead: resolve the declared name
+    with `importlib.util.find_spec`. A typo'd or missing module is False here
+    while the real `setuptools.build_meta` is True, independent of anything pip
+    prints. `find_spec` raises rather than returning None when an intermediate
+    package is absent, so both outcomes are folded into False.
+    """
+    backend = _declared_backend()
+    if backend is None:
+        # No `build-backend` key: pip falls back to setuptools legacy. There is
+        # no declared name to validate, so this cannot be the failure.
+        return True
+
+    # PEP 517 allows "module:object"; only the module part is importable.
+    module = backend.split(":", 1)[0]
+    root = module.split(".", 1)[0]
+
+    # Only meaningful when the DISTRIBUTION is here to be judged. If even the
+    # root package is missing, this is a backend-less environment, and the right
+    # answer is the skip below -- not "your declaration is wrong". Measured, this
+    # is what separates them: with setuptools installed, a typo'd
+    # `setuptools.build_metaa` resolves root=True/module=False; in an
+    # environment with no setuptools at all, root itself is False.
+    try:
+        if importlib.util.find_spec(root) is None:
+            return True
+    except (ImportError, ValueError):
+        return True
+
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _local_backend_satisfies_declared_requires() -> bool:
@@ -224,16 +302,62 @@ def _local_backend_satisfies_declared_requires() -> bool:
     So the retry is only allowed when the local backend is a version the
     declared pin would actually have accepted. If it is not, the isolated
     build's failure is the honest answer and it propagates.
+
+    Three details that each hid a defect, all now covered:
+
+      * MARKERS. A requirement whose environment marker excludes this
+        interpreter will never be installed by an isolated build, so the backend
+        will be ABSENT there -- it is not "satisfied", it is inapplicable.
+        Evaluating only `.specifier` missed that: measured,
+        `requires = ["setuptools>=61,<85; python_version < \"3.12\""]` -- the
+        wrong side of this project's own `requires-python = ">=3.12"`, so it can
+        never apply -- gave `11 passed` while the real isolated build died with
+        `BackendUnavailable: Cannot import 'setuptools.build_meta'`. A marker
+        that evaluates False therefore means "this pin cannot vouch for the
+        retry", i.e. False.
+      * DIRECT REFERENCES. `setuptools @ https://...` pins an exact artifact.
+        Whatever is installed locally is not knowably that artifact, so a
+        direct reference can never justify the retry either.
+      * Extras (`setuptools[core]>=61`) and case (`Setuptools`) need no special
+        handling: `Requirement` strips extras from `.name`, and
+        `importlib.metadata.version` normalises the name.
     """
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
     requires = pyproject.get("build-system", {}).get("requires", [])
 
     for raw in requires:
         requirement = Requirement(raw)
+
+        # Markers and URL pins are only worth judging when the distribution is
+        # actually installed here. On a machine with no setuptools at all there
+        # is nothing to compare against, and the skip branch owns that case.
+        try:
+            present = version(requirement.name)
+        except PackageNotFoundError:
+            present = None
+
+        if present is not None:
+            # A marker that excludes this environment means the isolated build
+            # would not install this requirement at all, so the backend would be
+            # ABSENT there. Not satisfied -- inapplicable.
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                return False
+
+            # A URL pin names an exact artifact. Whatever is installed locally
+            # is not knowably that artifact, so it cannot justify the retry.
+            if requirement.url is not None:
+                return False
+
         try:
             installed = version(requirement.name)
         except PackageNotFoundError:
-            return False
+            # Not installed at all. That is a backend-less ENVIRONMENT, not a
+            # bad declaration, and the two must not share a verdict -- the
+            # caller's ordering means returning False here would report a
+            # packaging defect on a machine that simply has no setuptools.
+            # Measured: it turned the legitimate skip into 11 errors. Let the
+            # skip branch below own this case.
+            return True
         if not requirement.specifier.contains(installed, prereleases=True):
             return False
     return True
@@ -290,14 +414,30 @@ def installed_package(tmp_path_factory):
                 f"isolated build:\n{result.stdout}{result.stderr}\n"
                 f"--no-build-isolation retry:\n{fallback.stdout}{fallback.stderr}"
             )
+            # The ONLY defensible skip: the environment cannot obtain a build
+            # backend at all, so it cannot say anything about this declaration
+            # either way. Both halves are required.
+            #
+            # The second half is load-bearing and was missing. pip says
+            # `BackendUnavailable: Cannot import '<backend>'` both when nothing
+            # is installed AND when `build-backend` names a module that does not
+            # exist -- and the latter is a defect that must fail. Asking
+            # find_spec, rather than reading pip's words, tells them apart. See
+            # _declared_backend_is_importable.
+            if not _declared_backend_is_importable():
+                pytest.fail(
+                    "the build-backend declared in pyproject.toml "
+                    f"({_declared_backend()!r}) cannot be imported, so no build "
+                    "can start. This is a packaging defect, not an environment "
+                    f"limitation: every container build would fail.\n{combined}",
+                    pytrace=False,
+                )
+
             if _is_backend_unobtainable(fallback.stdout + fallback.stderr):
-                # No network AND no local setuptools. The environment cannot
-                # build any package at all, so it cannot say anything about
-                # THIS package's declaration. Fix: pip install setuptools.
                 pytest.skip(
-                    "cannot build a wheel: no index reachable and no setuptools "
-                    "importable in this environment, so the declaration cannot "
-                    f"be exercised either way.\n{combined}"
+                    "cannot build a wheel: no index reachable and no build "
+                    "backend importable in this environment, so the declaration "
+                    f"cannot be exercised either way.\n{combined}"
                 )
             pytest.fail(f"pip install failed:\n{combined}", pytrace=False)
 
@@ -380,7 +520,7 @@ def test_the_editable_finder_is_not_what_resolves_these_imports(installed_packag
     On the specific question of a deleted `-S`, this guard fires whenever the
     finder actually ends up answering the import, which is the case when the
     declaration is ALSO broken: whole-file run with both mutations gives
-    `6 failed, 3 passed`, and this test is one of the six, reporting "resolved
+    `7 failed, 4 passed`, and this test is one of the seven, reporting "resolved
     ... to the SOURCE WORKTREE".
 
     It does NOT fire when the `-S` is dropped while the declaration is correct
