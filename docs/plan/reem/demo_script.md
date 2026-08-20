@@ -323,10 +323,17 @@ too — if `SCANNERS_REQUIRED=true` is set while the binaries are missing. That 
 the exact failure Beat 0's ordering exists to prevent.
 
 Both modes print `blocked / block / blocking=2` and differ only in the finding
-line numbers: fixture reports lines **4 and 5**, real gitleaks 8.21.2 reports
-**3 and 4**. If someone asks you on stage which mode you are in and you do not
-remember, that is the discriminator — and it is not visible in this beat's
-output, so answer from Beat 0, not from the screen.
+line numbers: fixture reports lines **4 and 5**, real gitleaks reports **3 and
+4**. Re-measured on 2026-08-20 with gitleaks **8.30.1** installed (this line
+previously cited 8.21.2): still lines 3 and 4, so the discriminator survived the
+version change.
+
+If someone asks on stage which mode you are in, you no longer have to answer from
+memory. Two independent tells now exist: the `scan_provenance` field, which the
+timeline renders in words (`↳ scan: real scanners ran`), and these line numbers.
+Prefer the timeline — it is on screen in Beat 5. If the two ever disagree, say so
+rather than picking one: two instruments that agree are evidence, two that
+disagree mean one is broken.
 
 ---
 
