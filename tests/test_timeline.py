@@ -16,6 +16,29 @@ WHAT THESE ARE TESTED AGAINST, AND WHY IT IS NOT A FIXTURE
     It is built by writing a LogEvent with `scan_provenance=""` -- which is the
     literal shape of every pre-week-3 row on disk -- through `log.append`, the
     same writer the graph uses. See `_legacy_run`.
+
+EVERY PIPELINE-DRIVEN TEST HERE DECLARES ITS SCANNER MODE. IT MUST.
+
+    `run_pipeline`'s security stage fans out to real scanners when the three
+    binaries are on PATH and falls back to the fixture verdict when they are
+    not, and the two paths produce DIFFERENT provenance for the same headline
+    verdict. A test that just calls the pipeline therefore reads whatever the
+    laptop happens to have installed. Four tests in this file were written on a
+    machine with no scanners, asserted the fixture wording, and began failing
+    the day gitleaks, semgrep and trivy were brewed -- measured on this tree:
+    with /opt/homebrew/bin on PATH `4 failed, 25 passed`, with it removed
+    `29 passed`. The tests did not change; the machine did.
+
+    So the mode is now an ARGUMENT, not an ambience: `_blocked_run` and
+    `_promoted_run` require the `provenance` fixture (tests/conftest.py) and
+    pin it through `Provenance.none_installed()`, and the three tests that
+    reach the pipeline or the security agent directly pin it themselves. An
+    ambient call is a TypeError rather than a test that passes on one laptop
+    and fails on another.
+
+    The tests that build LogEvents by hand and call `_delivery`/`_annotations`
+    take no provenance argument, and that is not an oversight: they never run a
+    scanner, so there is no mode for them to declare.
 """
 
 import json
@@ -29,13 +52,34 @@ from agentorg.state import LogEvent
 TICKET_TEXT = "Add a per-IP login rate limit."
 
 
-def _blocked_run():
+def _blocked_run(provenance):
+    """A blocked run in a DECLARED scanner mode, never the machine's.
+
+    `provenance` is required rather than defaulted on purpose. The whole failure
+    this closes is a helper that could be called with no mode at all, so the
+    only way to keep it closed is to make the omission unspellable: every caller
+    names the fixture, and a future test that forgets gets a TypeError at
+    collection instead of a verdict from whatever is on PATH.
+
+    `none_installed()` REMOVES the directories holding the three scanners from
+    PATH and asserts none is reachable while `git` still is. It is the fixture's
+    job and not this file's: replacing PATH wholesale would kill the real `git`
+    that `github_ops.open_pr` shells out to, and run_pipeline would die with
+    `FileNotFoundError: 'git'` before the security stage ran at all. See
+    tests/provenance.py, which is owned by another lane and consumed here.
+
+    Idempotent, so a test may build both runs: the second call finds nothing
+    left to scrub.
+    """
+    provenance.none_installed()
     state = run_pipeline("POISON-1", TICKET_TEXT, poisoned=True)
     assert state.status == "blocked", "the fixture for these tests must be a blocked run"
     return state
 
 
-def _promoted_run():
+def _promoted_run(provenance):
+    """A promoted run in the same DECLARED mode. See `_blocked_run`."""
+    provenance.none_installed()
     state = run_pipeline("CLEAN-1", TICKET_TEXT, poisoned=False)
     assert state.status == "promoted", "the fixture for these tests must be a promoted run"
     return state
@@ -46,8 +90,8 @@ def _promoted_run():
 # the demo script and docs/plan/sorour/week3.md's done-when are written against.
 # =========================================================================
 
-def test_render_text_names_the_run_and_ticket():
-    state = _promoted_run()
+def test_render_text_names_the_run_and_ticket(provenance):
+    state = _promoted_run(provenance)
     out = timeline.render_text(state.run_id)
     assert f"Timeline for run {state.run_id}" in out
     assert "ticket CLEAN-1" in out
@@ -249,7 +293,7 @@ def test_every_action_the_log_can_write_has_a_glyph():
     )
 
 
-def test_the_specs_done_when_strings_render_verbatim():
+def test_the_specs_done_when_strings_render_verbatim(provenance):
     """The two lines docs/plan/sorour/week3.md's done-when names, exactly.
 
     Pinned because the demo script and the judges' expectations are built on
@@ -257,11 +301,11 @@ def test_the_specs_done_when_strings_render_verbatim():
     a `★ promote system promoted` line", and a poisoned run whose last line is
     `⛔ security ... blocked`.
     """
-    clean = timeline.render_text(_promoted_run().run_id).splitlines()
+    clean = timeline.render_text(_promoted_run(provenance).run_id).splitlines()
     assert "• plan     system    opened" in clean[2], clean[2]
     assert "★ promote  system    promoted" in clean[-1], clean[-1]
 
-    poisoned = [line for line in timeline.render_text(_blocked_run().run_id).splitlines()
+    poisoned = [line for line in timeline.render_text(_blocked_run(provenance).run_id).splitlines()
                 if not line.lstrip().startswith("↳")]
     assert "⛔ security" in poisoned[-1] and "blocked" in poisoned[-1], poisoned[-1]
 
@@ -275,7 +319,7 @@ def test_the_specs_done_when_strings_render_verbatim():
 # are not equal.
 # =========================================================================
 
-def test_a_blocked_run_and_a_promoted_run_are_distinguishable_at_a_glance():
+def test_a_blocked_run_and_a_promoted_run_are_distinguishable_at_a_glance(provenance):
     """One screen, one word, no prose. The two runs must not read alike.
 
     Asserts on the SECOND line of each -- above the rows -- because an outcome
@@ -283,8 +327,8 @@ def test_a_blocked_run_and_a_promoted_run_are_distinguishable_at_a_glance():
     Both halves are asserted, not just the block: a renderer that stamped
     "BLOCKED" on everything would pass a blocked-only test.
     """
-    blocked = timeline.render_text(_blocked_run().run_id).splitlines()
-    promoted = timeline.render_text(_promoted_run().run_id).splitlines()
+    blocked = timeline.render_text(_blocked_run(provenance).run_id).splitlines()
+    promoted = timeline.render_text(_promoted_run(provenance).run_id).splitlines()
 
     assert "BLOCKED" in blocked[1], blocked[1]
     assert "PROMOTED" in promoted[1], promoted[1]
@@ -295,26 +339,33 @@ def test_a_blocked_run_and_a_promoted_run_are_distinguishable_at_a_glance():
     assert "BLOCKED" not in promoted[1]
 
 
-def test_the_html_outcome_is_not_signalled_by_colour_alone():
+def test_the_html_outcome_is_not_signalled_by_colour_alone(provenance):
     """A washed-out projector and a colour-blind judge must both still read it.
 
     The banner carries the word and the glyph as TEXT, so the CSS class is an
     enhancement rather than the signal.
     """
-    html_out = timeline.render_html(_blocked_run().run_id)
+    html_out = timeline.render_html(_blocked_run(provenance).run_id)
     assert "BLOCKED" in html_out
     assert "⛔" in html_out
     assert "banner blocked" in html_out
 
 
-def test_an_unfinished_run_is_not_reported_as_either_outcome():
+def test_an_unfinished_run_is_not_reported_as_either_outcome(provenance):
     """A run with no ending must not be given one.
 
     `_outcome` reads the last event's action. A run abandoned at a gate ends on
     `opened`, and forcing that into PROMOTED or BLOCKED would be the renderer
     inventing an ending the pipeline never wrote -- the same class of error as
     guessing provenance.
+
+    Pins the mode even though the assertion is about the BANNER and not about
+    provenance: this test reaches the pipeline, so leaving it ambient would let
+    a scanner fault on a provisioned machine change the run's status out from
+    under it. Declaring costs one line; the standing rule is that no test in
+    this file reads the machine's mode.
     """
+    provenance.none_installed()
     state = run_pipeline("CLEAN-1", TICKET_TEXT)
     log.append(LogEvent(run_id=state.run_id, ticket_id=state.ticket_id,
                         actor="system", stage="gate2", action="opened",
@@ -357,21 +408,21 @@ def test_each_of_the_three_delivery_refs_renders_distinctly(ref, expect_reported
     assert expect_phrase in detail
 
 
-def test_the_offline_delivery_is_rendered_as_a_success_on_a_real_run():
+def test_the_offline_delivery_is_rendered_as_a_success_on_a_real_run(provenance):
     """local:// is a DELIVERY. This is the case the demo actually produces.
 
     github_ops returns `local://` only after the bytes reach disk, so calling it
     undelivered would mark a working offline demo as a failure on a projector.
     Run through the real pipeline, so the ref is the one github_ops produced.
     """
-    state = _blocked_run()
+    state = _blocked_run(provenance)
     out = timeline.render_text(state.run_id)
     assert "delivery: reported" in out, out
     assert "offline notes file" in out
     assert "NOT REPORTED" not in out
 
 
-def test_an_undelivered_block_reason_is_rendered_as_not_reported(monkeypatch):
+def test_an_undelivered_block_reason_is_rendered_as_not_reported(monkeypatch, provenance):
     """A block nobody was told about is a different outcome. Say so.
 
     The failure is injected at `github_ops.post_comment`'s return value rather
@@ -382,13 +433,13 @@ def test_an_undelivered_block_reason_is_rendered_as_not_reported(monkeypatch):
     from agentorg import github_ops
     monkeypatch.setattr(github_ops, "post_comment",
                         lambda state, body, finding=None: f"comment://{state.run_id}")
-    state = _blocked_run()
+    state = _blocked_run(provenance)
     out = timeline.render_text(state.run_id)
     assert "delivery: NOT REPORTED" in out, out
     assert "reached nobody" in out
 
 
-def test_a_promoted_run_claims_no_delivery_at_all():
+def test_a_promoted_run_claims_no_delivery_at_all(provenance):
     """The PR row's summary contains `local://` too -- and it is NOT a delivery.
 
     `PR local://agent-org/CLEAN-1-6361c5b` is a branch. A renderer keying on the
@@ -397,7 +448,7 @@ def test_a_promoted_run_claims_no_delivery_at_all():
     case that must still work, and it is the mirror image of the bug that
     rendering three states invites.
     """
-    out = timeline.render_text(_promoted_run().run_id)
+    out = timeline.render_text(_promoted_run(provenance).run_id)
     assert "local://agent-org/" in out, "the PR row must still be rendered"
     assert "delivery:" not in out, out
     assert "block reason" not in out
@@ -466,32 +517,51 @@ def test_an_unrecognised_ref_scheme_is_reported_as_unrecognised():
 #
 # `agents/security.run` answers a scanner raise with the FIXTURE verdict, which
 # still blocks a poisoned diff. So "blocked" proves two different things, and
-# the log row was identical either way. On this machine gitleaks, semgrep and
-# trivy are all absent from PATH, so the fixture fallback is the DEFAULT.
+# the log row was identical either way.
+#
+# NO TEST BELOW RELIES ON WHAT IS INSTALLED. This block used to end "on this
+# machine gitleaks, semgrep and trivy are all absent from PATH, so the fixture
+# fallback is the DEFAULT" -- an ambient fact, true when written and false the
+# day the three were brewed. Each test now pins its own mode through the
+# `provenance` fixture, so the pair below tests BOTH directions on ANY machine:
+# `none_installed()` for the fixture path, a returning fan-out for the real one.
 # =========================================================================
 
-def test_a_fixture_verdict_is_not_rendered_as_a_real_scan():
+def test_a_fixture_verdict_is_not_rendered_as_a_real_scan(provenance):
     """The gap this closes: a fixture block must not look like a scanned block.
 
-    No scanners are installed here, so the pipeline takes the fallback and the
-    row must say so in words rather than only carrying a blocking COUNT -- the
-    count is produced identically by both paths.
+    DECLARES the fallback mode rather than assuming it. The docstring used to
+    open "No scanners are installed here, so the pipeline takes the fallback" --
+    which was an observation about the laptop, not a property of the test, and it
+    stopped being true. `none_installed()` makes the sentence true by
+    construction, so the row must say so in words rather than only carrying a
+    blocking COUNT -- the count is produced identically by both paths.
     """
-    out = timeline.render_text(_blocked_run().run_id)
+    out = timeline.render_text(_blocked_run(provenance).run_id)
     assert "scan: FIXTURE verdict" in out, out
     assert "scanners did not run" in out
     assert "real scanners ran" not in out
 
 
-def test_a_real_scan_is_rendered_as_a_real_scan(monkeypatch):
+def test_a_real_scan_is_rendered_as_a_real_scan(monkeypatch, provenance):
     """The case that must still WORK -- the mirror of the test above.
 
     Without this, a renderer hardcoded to say "FIXTURE" would pass every other
     provenance assertion in this file. Drives the real scanner path by replacing
     the fan-out with one that RETURNS rather than raises, which is the only path
     on which compute_security_verdict actually runs.
+
+    Takes `provenance` and scrubs PATH FIRST, which looks backwards for the
+    real-scanner case and is the point: replacing `run_all_scanners` is what
+    makes this the real path, so the binaries are irrelevant to the outcome --
+    and pinning proves that. Without it this test passes on a provisioned
+    machine for two possible reasons and the test cannot say which; with it, the
+    only thing on the real path is the stubbed fan-out. So this half is
+    mode-independent BY CONSTRUCTION rather than by luck, exactly like its
+    mirror above.
     """
     from agentorg.agents import security
+    provenance.none_installed()
     monkeypatch.setattr(security, "run_all_scanners", lambda dev: [])
     state = run_pipeline("CLEAN-1", TICKET_TEXT)
     out = timeline.render_text(state.run_id)
@@ -499,17 +569,24 @@ def test_a_real_scan_is_rendered_as_a_real_scan(monkeypatch):
     assert "FIXTURE" not in out
 
 
-def test_the_stub_path_is_told_apart_from_the_fallback_path():
+def test_the_stub_path_is_told_apart_from_the_fallback_path(provenance):
     """Two fixture paths, two different meanings, and they must not collapse.
 
     `use_real_scanners=False` is a CHOICE nobody asked to scan for; a scanner
     raise is a FAULT. Collapsing them would hide a broken gate behind a
     deliberate demo setting.
+
+    This one calls `security.run` directly rather than the pipeline, so it needs
+    the mode for the SECOND assertion: with binaries on PATH the knob-on call
+    reaches a real fan-out and returns "scanners", and the test read the laptop
+    instead of the fault path it names. `none_installed()` makes the raise the
+    reason the fallback happens, which is the distinction being drawn.
     """
     from agentorg import fixtures_loader
     from agentorg.agents import security
     from agentorg.state import RunState
 
+    provenance.none_installed()
     state = RunState(ticket_id="STUB-1", ticket_text=TICKET_TEXT)
     state.dev = fixtures_loader.dev(poisoned=True)
     assert security.run(state, use_real_scanners=False).scan_provenance == "fixture-stub"
@@ -518,7 +595,7 @@ def test_the_stub_path_is_told_apart_from_the_fallback_path():
             != timeline._PROVENANCE["fixture-fallback"])
 
 
-def test_a_passed_row_names_the_cause_and_a_blocked_row_keeps_its_wording():
+def test_a_passed_row_names_the_cause_and_a_blocked_row_keeps_its_wording(provenance):
     """Same fact, two phrasings, keyed on the row's action.
 
     On a blocked row "FIXTURE verdict -- scanners did not run" is the caveat a
@@ -529,8 +606,8 @@ def test_a_passed_row_names_the_cause_and_a_blocked_row_keeps_its_wording():
     and every provenance assertion in this file are written against those exact
     words, so the passed-row rewording must not have touched them.
     """
-    clean = timeline.render_text(_promoted_run().run_id)
-    blocked = timeline.render_text(_blocked_run().run_id)
+    clean = timeline.render_text(_promoted_run(provenance).run_id)
+    blocked = timeline.render_text(_blocked_run(provenance).run_id)
 
     assert "scan: no scanners installed — verdict from the built-in fixture rules" in clean
     assert "scanners did not run" not in clean, (
@@ -614,7 +691,7 @@ def test_a_run_logged_before_provenance_existed_is_rendered_as_unknown():
     assert "FIXTURE" not in out
 
 
-def test_provenance_reaches_the_log_on_disk_not_only_the_runstate():
+def test_provenance_reaches_the_log_on_disk_not_only_the_runstate(provenance):
     """The timeline may read nothing but log.read, so the log must carry it.
 
     Read back off the raw JSONL rather than through log.read: the claim is about
@@ -622,7 +699,7 @@ def test_provenance_reaches_the_log_on_disk_not_only_the_runstate():
     in-memory model would satisfy every renderer assertion above while leaving
     the artifact the judges are handed unchanged.
     """
-    state = _blocked_run()
+    state = _blocked_run(provenance)
     rows = [json.loads(line) for line
             in log._path(state.run_id).read_text().splitlines()]
     security_rows = [r for r in rows if (r["actor"], r["stage"]) == ("security", "security")]
@@ -633,3 +710,119 @@ def test_provenance_reaches_the_log_on_disk_not_only_the_runstate():
             == ("system", "security", "blocked")]
     assert len(halt) == 1
     assert halt[0]["artifact_ref"].startswith("local://"), halt[0]
+# =========================================================================
+# WHAT PINNING THE MODE MAKES WORSE, AND THE TWO GUARDS FOR IT.
+#
+# Declaring the mode fixes four tests and costs two things.
+#
+#   1. THE RULE IS NOW CONVENTION. Nothing stopped the old tests from reading
+#      the machine, and nothing stops a new one either: a test added next week
+#      that calls `run_pipeline` directly, without the fixture, is back to
+#      passing on one laptop and failing on another -- and it will LOOK right,
+#      because it matches what the four broken tests looked like for weeks. The
+#      structural guard below is the only thing that makes the rule enforceable
+#      rather than remembered.
+#
+#   2. THE PIN COULD BECOME A NO-OP. Both helpers rely on
+#      `Provenance.none_installed()` actually scrubbing PATH. If that call were
+#      dropped in a refactor, or the fixture's removal stopped working on some
+#      future machine, every test here would go back to reading the ambient mode
+#      while still LOOKING declared -- the fixture requested, the mode named, and
+#      no effect. That is strictly worse than the bug being fixed, because the
+#      declaration reads as evidence that the mode was controlled.
+# =========================================================================
+
+_PIPELINE_ENTRY_POINTS = ("run_pipeline", "_blocked_run", "_promoted_run")
+
+
+def test_every_pipeline_driven_test_declares_its_scanner_mode():
+    """STRUCTURAL: reaching a scanner without naming a mode is a finding.
+
+    Walks this module's own AST and requires every `test_*` that reaches the
+    pipeline or the security agent to take `provenance`. That is what turns "no
+    test reads the ambient mode" from a habit into a checked property -- the same
+    reason `test_no_unescaped_interpolation_reaches_the_html` walks the AST
+    instead of trusting a reviewer to spot a missing `html.escape`.
+
+    The four tests this file was fixed for were not wrong in a way review
+    catches. They read correctly, asserted the right words, and passed for weeks;
+    what was missing was invisible in the source. This test makes it visible.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(inspect.getmodule(test_render_text_names_the_run_and_ticket)))
+    offenders = []
+    for fn in (n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")):
+        calls = {ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        reaches = calls & set(_PIPELINE_ENTRY_POINTS) or {
+            c for c in calls if c.endswith("security.run")
+        }
+        if reaches and "provenance" not in {a.arg for a in fn.args.args}:
+            offenders.append(f"{fn.name} (calls {sorted(reaches)})")
+    assert not offenders, (
+        "these tests reach a scanner but do not request the `provenance` "
+        "fixture, so their result depends on what is installed on the machine "
+        f"running them: {offenders}"
+    )
+
+
+def test_the_structural_mode_check_is_actually_inspecting_tests():
+    """Guard on the guard: the walk must SEE the pipeline-driven tests.
+
+    Without this, a walk that stopped matching -- a renamed helper, an AST shape
+    it no longer unparses the same way -- would pass by inspecting nothing, the
+    failure mode of every assertion on an empty collection. Mirrors
+    `test_the_structural_escape_check_covers_every_escape_site`.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(inspect.getmodule(test_render_text_names_the_run_and_ticket)))
+    declared = [
+        fn.name for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef) and fn.name.startswith("test_")
+        and {ast.unparse(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        & set(_PIPELINE_ENTRY_POINTS)
+    ]
+    assert len(declared) >= 10, (
+        f"the AST walk found only {len(declared)} pipeline-driven tests in this "
+        "module; it is no longer inspecting what it claims to"
+    )
+
+
+def test_the_helpers_pin_the_mode_rather_than_only_claiming_to(provenance):
+    """The pin must have an EFFECT, not just a name.
+
+    Asserts the provenance of the runs the two helpers return. On a machine with
+    the three binaries installed this passes only if `none_installed()` really
+    scrubbed PATH; on a bare machine it passes trivially. Same assertion, sound
+    either way -- which is the property the whole change is about.
+
+    This is the guard for the worse-thing: a dropped `none_installed()` call
+    leaves every test in this file looking declared while reading the ambient
+    mode again, and a declaration that reads as evidence without being evidence
+    is the exact failure this file exists to prevent, one level up.
+    """
+    from tests.provenance import answered_from_fixture
+
+    blocked = _blocked_run(provenance)
+    assert blocked.security is not None, "the blocked run must carry a verdict"
+    assert blocked.security.scan_provenance == "fixture-fallback", (
+        "_blocked_run did not end up in the fallback mode it declares; "
+        "none_installed() had no effect"
+    )
+    # And cross-checked against the line-number discriminator, which is derived
+    # from the FINDINGS rather than from the field the renderer reads -- so a
+    # wrongly-stamped provenance cannot satisfy both.
+    assert answered_from_fixture(blocked), (
+        "the blocked run's findings do not carry the fixture's line numbers, so "
+        "the real scanners answered despite the declared fallback mode"
+    )
+
+    promoted = _promoted_run(provenance)
+    assert promoted.security is not None, "the promoted run must carry a verdict"
+    assert promoted.security.scan_provenance == "fixture-fallback", (
+        "_promoted_run did not end up in the fallback mode it declares"
+    )
