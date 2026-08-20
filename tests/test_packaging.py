@@ -64,11 +64,11 @@ Two measurements bound how much protection there is if someone deletes the `-S`,
 and the distinction matters because an earlier version of this docstring got it
 wrong in the pessimistic direction:
 
-  * Whole-file run, declaration broken AND `-S` dropped: `7 failed, 4 passed`.
+  * Whole-file run, declaration broken AND `-S` dropped: `7 failed, 24 passed`.
     The subpackage and data-file tests read the filesystem directly, so they do
     not care about `-S`, and `test_the_editable_finder_is_not_what_resolves_these_imports`
     fires too. CI runs whole files, so CI would catch that pairing.
-  * Whole-file run, declaration CORRECT and `-S` dropped: `1 failed, 10 passed`.
+  * Whole-file run, declaration CORRECT and `-S` dropped: `1 failed, 30 passed`.
     The single failure is `test_the_isolation_flag_is_actually_set`, and it is
     the ONLY thing that notices -- every import still resolves from the temp
     install, because the finder is a fallback and the packaged tree satisfies
@@ -121,7 +121,9 @@ project's own runtime dependencies are never fetched.
 A skip survives for exactly one case: no index reachable AND no build backend
 installed, i.e. the environment cannot build any package at all and so cannot say
 anything about this declaration either way. Verified with a deps directory
-holding pytest and packaging but no setuptools: `11 skipped`.
+holding pytest and packaging but no setuptools: `17 passed, 14 skipped` -- the 11
+integration tests skip, three predicate rows that need setuptools present defer
+via `_requires_installed`, and nothing fails.
 
 Getting that boundary right took two goes, because pip reports a bad declaration
 and a bare environment with the SAME words -- `BackendUnavailable: Cannot import
@@ -160,6 +162,7 @@ up. It also keeps the working tree clean -- building in place leaves `build/` an
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -168,7 +171,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pytest
-from packaging.requirements import Requirement
+from packaging.requirements import InvalidRequirement, Requirement
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -220,60 +223,182 @@ def _pip_install(source: Path, target: Path, *, isolated: bool) -> subprocess.Co
 
 
 def _is_backend_unobtainable(output: str) -> bool:
-    """Whether pip failed because it could not IMPORT a build backend.
+    """Whether pip failed because it could not obtain a build backend.
 
-    Necessary but NOT sufficient for a skip. pip emits this for two opposite
-    causes -- nothing installed (environment limitation) versus a `build-backend`
-    naming a nonexistent module (packaging defect) -- so this predicate cannot
-    decide on its own. The caller must first rule out the defect with
-    `_declared_backend_is_importable`.
+    Necessary but NOT sufficient for a skip, and deliberately the LAST question
+    asked. pip reports the same words for two opposite causes -- nothing
+    installed (environment limitation) versus a declaration naming a backend
+    nothing can supply (packaging defect) -- so this predicate cannot decide
+    alone. `_declared_build_system_is_coherent` rules out the defect first.
+
+    Both alternatives are needed and neither is redundant:
+    `BackendUnavailable` is the exception type pip raises when a declared backend
+    will not import, and "Could not find a version" / "No matching distribution"
+    is what an isolated build prints when it cannot even provision `requires`.
+    Kept anchored to those specific phrasings rather than a bare "Cannot import",
+    which would match any import error anywhere in arbitrary pip output --
+    including one raised by the project's own code during a build.
     """
-    return "BackendUnavailable" in output or "Cannot import" in output
+    return (
+        "BackendUnavailable" in output
+        or "Cannot import 'setuptools.build_meta'" in output
+        or "No matching distribution found for setuptools" in output
+        or "Could not find a version that satisfies the requirement setuptools" in output
+    )
+
+
+def _build_system_table() -> dict:
+    """The `[build-system]` table as declared, or an empty dict if absent."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
+    return pyproject.get("build-system", {})
 
 
 def _declared_backend() -> str | None:
     """The `build-system.build-backend` string, or None if the table omits it."""
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    return pyproject.get("build-system", {}).get("build-backend")
+    return _build_system_table().get("build-backend")
 
 
-def _declared_backend_is_importable() -> bool:
-    """Whether the module named by `build-backend` can be imported HERE.
+def _declared_requires() -> list[str]:
+    """The `build-system.requires` list as declared, or empty if absent."""
+    return _build_system_table().get("requires", [])
 
-    This is asked BEFORE any decision to skip, and it is what separates the two
-    opposite situations pip reports with the same words.
 
-    pip raises `BackendUnavailable: Cannot import '<backend>'` both when the
-    environment simply has no setuptools (an environment limitation, and a
-    legitimate skip) and when `build-backend` NAMES A MODULE THAT DOES NOT
-    EXIST (a packaging defect that breaks every container build). Matching on
-    the message text cannot tell those apart, which is how a one-character typo
-    came to produce a green run: `build-backend = "setuptools.build_metaa"` gave
-    `11 skipped`, RC=0, with the network up, and stayed at `11 skipped` with the
-    broken `packages = ["agentorg"]` declaration ALSO in place.
+def _normalised_parts(name: str) -> tuple[str, ...]:
+    """Split a distribution or module name into comparable pieces.
 
-    So the question is answered structurally instead: resolve the declared name
-    with `importlib.util.find_spec`. A typo'd or missing module is False here
-    while the real `setuptools.build_meta` is True, independent of anything pip
-    prints. `find_spec` raises rather than returning None when an intermediate
-    package is absent, so both outcomes are folded into False.
+    PEP 503 treats runs of `-`, `_` and `.` as equivalent and folds case, so
+    `poetry-core` and `poetry.core` are the same name written two ways. Reducing
+    both sides to a tuple of lowercase pieces is what lets `_requires_can_supply`
+    below match a distribution against the module path it provides.
+    """
+    return tuple(piece for piece in re.split(r"[-_.]+", name.strip().lower()) if piece)
+
+
+def _requires_can_supply(backend: str, requires: list[str]) -> bool:
+    """Whether some entry in `requires` could plausibly provide `backend`.
+
+    This is the COHERENCE question, and it is the only one of these checks that
+    needs neither the network nor any local state -- which is exactly why it is
+    the right instrument. `build-backend = "flit_core.buildapi"` under
+    `requires = ["setuptools>=61,<85"]` is broken on its face: no isolated build
+    could ever satisfy that pairing, on any machine, however well stocked.
+
+    Root-presence cannot answer this. It reports the same thing for "a backend
+    that exists on PyPI but is absent here" and "a backend that exists nowhere at
+    all", so it separates a typo'd submodule from everything else rather than
+    separating a defect from an environment. Measured, all three of
+    `nosuchpkg.api`, `flit_core.buildapi` and `poetry.core.masonry.api` gave
+    `11 skipped` while the real isolated build died with `BackendUnavailable`.
+
+    THIS IS A HEURISTIC, not an exact test, and the imprecision is one-sided.
+    Matching is by normalised name prefix: a distribution is taken to supply a
+    backend when its name equals the leading segments of the backend's module
+    path, so `setuptools` supplies `setuptools.build_meta`, `poetry-core`
+    supplies `poetry.core.masonry.api` (PEP 503 folds `-`, `_` and `.`), and
+    `wheel` supplies neither.
+
+    What it CANNOT do, stated plainly rather than implied away:
+
+      * It never opens the distribution to see which modules it actually ships.
+        A `requires` entry named `foo` will vouch for
+        `build-backend = "foo.bar.baz"` even when that distribution contains no
+        such module. Nothing here would catch that.
+      * It cannot see a backend re-exported under an unrelated name, so a
+        legitimate but unconventional pairing would read as incoherent. No such
+        pairing is known in this project's dependencies.
+      * It says nothing about VERSIONS. `_local_backend_satisfies_declared_requires`
+        owns that question.
+
+    The bias is deliberate: false-negative (accepting an incoherent pairing)
+    rather than false-positive (rejecting a valid one), so this predicate can
+    only ever fail to accuse -- never accuse wrongly. Anything it lets through
+    still has to survive the real build, which is what reports the typo'd
+    submodule case. Making it exact would mean importing or unpacking candidate
+    distributions, which reintroduces exactly the local-state and network
+    dependence that makes this check trustworthy on a bare machine.
+
+    An empty `requires` is not incoherent -- pip then falls back to implicit
+    setuptools, which is the documented deleted-table boundary, so it returns
+    True and leaves that case alone.
+    """
+    if not requires:
+        return True
+
+    module = backend.split(":", 1)[0]
+    backend_parts = _normalised_parts(module)
+
+    for raw in requires:
+        try:
+            name = Requirement(raw).name
+        except InvalidRequirement:
+            # Unparseable entries are out of scope (pip rejects them too); do not
+            # let one turn into a false accusation of incoherence.
+            return True
+        dist_parts = _normalised_parts(name)
+        if backend_parts[: len(dist_parts)] == dist_parts:
+            return True
+
+    return False
+
+
+def _declared_build_system_is_coherent() -> bool:
+    """Whether `[build-system]` could build ANYWHERE, independent of this machine.
+
+    Asked BEFORE any decision to skip. Two failure modes pip reports with the
+    same words -- `BackendUnavailable: Cannot import '<backend>'` -- have to be
+    told apart here, because one is a legitimate skip and the other is a defect
+    that breaks every container build:
+
+      * The environment simply has no build backend installed. Nothing about the
+        declaration is wrong, so the fixture skips.
+      * The declaration names a backend nothing in `requires` can ever provide.
+        No container could build it. That must FAIL.
+
+    Coherence is what distinguishes them, and it keeps holding on a bare machine:
+    `setuptools.build_meta` under `requires = ["setuptools..."]` stays coherent
+    with nothing installed at all, so the backend-less case still skips.
+
+    TWO questions are asked, because neither alone is sufficient and each covers
+    the other's blind spot. Measured on the final tree, which is how this was caught:
+    coherence ALONE let `setuptools.build_metaa` skip (`20 passed, 11 skipped`),
+    because `setuptools` genuinely does supply the `setuptools.*` namespace --
+    prefix matching cannot see a typo below the distribution name.
+
+      1. COHERENCE (`_requires_can_supply`): could this pairing build anywhere?
+         Catches a backend nothing in `requires` provides -- `nosuchpkg.api`,
+         `flit_core.buildapi` -- and keeps holding on a bare machine, so the
+         backend-less case still skips.
+      2. LOCAL RESOLUTION: given that the supplying distribution IS installed
+         here, does the exact declared module resolve? Catches the typo. Scoped
+         to "the distribution is present", because asking it unscoped is what
+         made a bare machine look like a defect in an earlier round.
+
+    The scoping in (2) is the whole reason both can coexist. If the supplying
+    distribution is absent, this says nothing and defers to the skip.
     """
     backend = _declared_backend()
     if backend is None:
         # No `build-backend` key: pip falls back to setuptools legacy. There is
-        # no declared name to validate, so this cannot be the failure.
+        # no declared name to be incoherent with.
         return True
 
-    # PEP 517 allows "module:object"; only the module part is importable.
+    if not isinstance(backend, str):
+        # Wrong type is out of scope for this predicate; the generic failure path
+        # reports it. Do not claim incoherence on something unparseable.
+        return True
+
+    requires = _declared_requires()
+
+    # (1) Could this pairing ever build, on any machine?
+    if not _requires_can_supply(backend, requires):
+        return False
+
+    # (2) The supplying distribution is declared. If it is also INSTALLED here,
+    # the exact module must resolve -- otherwise the declaration names something
+    # that distribution does not contain. If it is absent, stay silent: that is
+    # the bare-machine case and the skip owns it.
     module = backend.split(":", 1)[0]
     root = module.split(".", 1)[0]
-
-    # Only meaningful when the DISTRIBUTION is here to be judged. If even the
-    # root package is missing, this is a backend-less environment, and the right
-    # answer is the skip below -- not "your declaration is wrong". Measured, this
-    # is what separates them: with setuptools installed, a typo'd
-    # `setuptools.build_metaa` resolves root=True/module=False; in an
-    # environment with no setuptools at all, root itself is False.
     try:
         if importlib.util.find_spec(root) is None:
             return True
@@ -322,45 +447,297 @@ def _local_backend_satisfies_declared_requires() -> bool:
         handling: `Requirement` strips extras from `.name`, and
         `importlib.metadata.version` normalises the name.
     """
-    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-    requires = pyproject.get("build-system", {}).get("requires", [])
+    backend = _declared_backend()
 
-    for raw in requires:
+    for raw in _declared_requires():
         requirement = Requirement(raw)
 
-        # Markers and URL pins are only worth judging when the distribution is
-        # actually installed here. On a machine with no setuptools at all there
-        # is nothing to compare against, and the skip branch owns that case.
-        try:
-            present = version(requirement.name)
-        except PackageNotFoundError:
-            present = None
+        # A marker that excludes this environment means the isolated build would
+        # not install this requirement at all, so the backend would be ABSENT
+        # there. Not satisfied -- inapplicable.
+        if requirement.marker is not None and not requirement.marker.evaluate():
+            return False
 
-        if present is not None:
-            # A marker that excludes this environment means the isolated build
-            # would not install this requirement at all, so the backend would be
-            # ABSENT there. Not satisfied -- inapplicable.
-            if requirement.marker is not None and not requirement.marker.evaluate():
-                return False
-
-            # A URL pin names an exact artifact. Whatever is installed locally
-            # is not knowably that artifact, so it cannot justify the retry.
-            if requirement.url is not None:
-                return False
+        # A URL pin names an exact artifact. Whatever is installed locally is not
+        # knowably that artifact, so it cannot justify the retry.
+        if requirement.url is not None:
+            return False
 
         try:
             installed = version(requirement.name)
         except PackageNotFoundError:
-            # Not installed at all. That is a backend-less ENVIRONMENT, not a
-            # bad declaration, and the two must not share a verdict -- the
-            # caller's ordering means returning False here would report a
-            # packaging defect on a machine that simply has no setuptools.
-            # Measured: it turned the legitimate skip into 11 errors. Let the
-            # skip branch below own this case.
+            # Absent locally. Which of the two meanings this has depends on
+            # WHICH distribution is missing, and conflating them is what the
+            # previous two rounds each did in one direction:
+            #
+            #   * It is the one supplying the declared backend. Then this is the
+            #     bare-machine case -- nothing is wrong with the declaration, the
+            #     environment simply cannot build -- and the skip legitimately
+            #     owns it. Returning False here reported a packaging defect on a
+            #     clean machine (measured: 11 errors instead of 11 skipped).
+            #   * It is any OTHER entry. Then an isolated build would have to
+            #     resolve it and could not, so the declaration is unbuildable and
+            #     must fail. Returning True here let `requires = ["wheel"]` pass
+            #     11/11 while the real build died with BackendUnavailable.
+            if backend is not None and isinstance(backend, str):
+                return _requires_can_supply(backend, [raw])
             return True
+
         if not requirement.specifier.contains(installed, prereleases=True):
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for the two skip/fail predicates.
+#
+# These exist because manual RED evidence missed the same class of bug TWICE, in
+# opposite directions: one round broke the bare-machine case, the next fixed that
+# and broke the unsatisfiable-pin case. Every hand mutation used `setuptools`,
+# which is installed here, so no hand mutation could ever exercise the
+# absent-distribution arm that both bugs lived in.
+#
+# Both predicates are pure functions of a TOML string, so these point REPO_ROOT at
+# a tmp_path and assert the whole table with NO pip invocation -- milliseconds,
+# and no network.
+#
+# `hatchling` and `flit_core` are the "absent" distributions. Pinned by
+# test_the_absent_distributions_these_cases_rely_on_are_absent, so if either ever
+# gets installed the affected rows fail loudly instead of silently inverting --
+# see the note on that constant for the ordering bug this actually caught.
+# ---------------------------------------------------------------------------
+
+# NOT `wheel`. Importing setuptools injects a VENDORED wheel into the metadata
+# path, so `wheel` is absent only until something resolves `setuptools.*` -- after
+# which `importlib.metadata.version("wheel")` returns 0.46.3. Measured:
+#
+#     before:                                    ABSENT
+#     after find_spec("setuptools.build_meta"):   0.46.3
+#
+# That made these rows ORDER-DEPENDENT: the requires table passed alone (11
+# passed) and failed once the coherence table ran first, because its very first
+# row -- the VALID declaration -- resolves setuptools and conjures wheel. The
+# guard below caught it by name, which is what it is for.
+#
+# hatchling and flit_core stay absent across that import, so they are safe
+# stand-ins for "a distribution this environment does not have".
+ABSENT_DISTRIBUTIONS = ("hatchling", "flit_core")
+
+# The mirror image: rows that assert a verdict only reachable when setuptools IS
+# installed. Measured -- running this file on a machine with no setuptools turned
+# two "unsatisfiable pin" rows green-to-red, because an absent distribution takes
+# the defer-to-skip arm instead of the version-comparison arm. That is correct
+# behaviour reaching a row that assumed otherwise, so those rows are skipped
+# rather than allowed to fail.
+PRESENT_DISTRIBUTIONS = ("setuptools",)
+
+
+def _requires_installed(*names: str) -> None:
+    """Skip the calling test unless every named distribution is installed here."""
+    for name in names:
+        try:
+            version(name)
+        except PackageNotFoundError:
+            pytest.skip(
+                f"{name} is not installed, so this row cannot exercise the "
+                "version-comparison path it is written for"
+            )
+
+
+def _write_pyproject(tmp_path, monkeypatch, body: str) -> None:
+    """Point the predicates at a throwaway pyproject.toml containing `body`.
+
+    Patches the LIVE module object, resolved from `sys.modules` by this module's
+    own `__name__`, rather than by a dotted string. Two traps, both hit here:
+
+      * There is no `tests/__init__.py`, so pytest imports this file as top-level
+        `test_packaging`. A string target of "tests.test_packaging.REPO_ROOT"
+        imports a SECOND, separate module object and patches that one, leaving
+        the predicates reading the real repository. That fails silently in the
+        comfortable direction -- 8 "expected False" rows passed against the real
+        declaration, testing nothing.
+      * `monkeypatch.setitem(globals(), ...)` mutates the module dict but does
+        not reliably restore it, which leaked a tmp_path into later tests: one row
+        failed in a whole-file run while passing when selected alone.
+
+    `setattr` on the module object is restored properly, so each row gets a clean
+    REPO_ROOT and the integration tests below still see the real one.
+    """
+    (tmp_path / "pyproject.toml").write_text(body)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+
+
+def test_the_absent_distributions_these_cases_rely_on_are_absent():
+    """Guard on the fixtures below: they only mean anything if these are missing.
+
+    Several rows assert a verdict that depends on `wheel` / `flit_core` NOT being
+    installed. If a future dev extra adds one, those rows would still pass while
+    testing the opposite situation. Fail here instead, by name.
+    """
+    for name in ABSENT_DISTRIBUTIONS:
+        try:
+            found = version(name)
+        except PackageNotFoundError:
+            continue
+        pytest.fail(
+            f"{name} {found} is installed, but the predicate tests below use it "
+            "as a stand-in for an ABSENT distribution. Those cases are no longer "
+            "testing what they claim -- pick a different absent distribution.",
+            pytrace=False,
+        )
+
+
+# (declaration, expected coherent?, why, distributions that must be installed)
+COHERENCE_CASES = (
+    (
+        'requires = ["setuptools>=61,<85"]\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "the real declaration",
+        (),
+    ),
+    (
+        'requires = ["setuptools>=61,<85"]\nbuild-backend = "setuptools.build_metaa"',
+        False,
+        ("a typo'd submodule: COHERENT (setuptools does supply setuptools.*) but "
+         "the exact module does not resolve, and setuptools is installed here so "
+         "that is knowable. Coherence alone let this skip -- measured, "
+         "`20 passed, 11 skipped` -- which is why local resolution is asked too"),
+        PRESENT_DISTRIBUTIONS,
+    ),
+    (
+        'requires = ["setuptools>=61,<85"]\nbuild-backend = "nosuchpkg.api"',
+        False,
+        "nothing in requires can ever supply nosuchpkg",
+        (),
+    ),
+    (
+        'requires = ["setuptools>=61,<85"]\nbuild-backend = "flit_core.buildapi"',
+        False,
+        "a real third-party backend, but not one this requires provides",
+        (),
+    ),
+    (
+        'requires = ["poetry-core>=1.0"]\nbuild-backend = "poetry.core.masonry.api"',
+        True,
+        "PEP 503 name normalisation: poetry-core supplies poetry.core.*",
+        (),
+    ),
+    (
+        'requires = ["setuptools>=61,<85", "hatchling"]\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "an extra entry does not make a coherent pairing incoherent",
+        (),
+    ),
+    (
+        'requires = []\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "empty requires is the implicit-setuptools boundary, left alone",
+        (),
+    ),
+    (
+        'requires = ["setuptools>=61,<85"]',
+        True,
+        "no build-backend key: nothing to be incoherent with",
+        (),
+    ),
+)
+
+
+@pytest.mark.parametrize(("body", "expected", "why", "needs_installed"), COHERENCE_CASES)
+def test_build_system_coherence(tmp_path, monkeypatch, body, expected, why, needs_installed):
+    """`[build-system]` coherence, judged without network or local state."""
+    _requires_installed(*needs_installed)
+    _write_pyproject(tmp_path, monkeypatch, f"[build-system]\n{body}\n")
+
+    assert _declared_build_system_is_coherent() is expected, why
+
+
+# (declaration, expected satisfied?, why, distributions that must be installed)
+REQUIRES_CASES = (
+    (
+        'requires = ["setuptools>=61,<85"]\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "installed setuptools satisfies the real pin",
+        (),
+    ),
+    (
+        'requires = ["setuptools>=999"]\nbuild-backend = "setuptools.build_meta"',
+        False,
+        "unsatisfiable pin on a PRESENT distribution",
+        PRESENT_DISTRIBUTIONS,
+    ),
+    (
+        ('requires = ["setuptools>=61,<85; python_version < \'3.12\'"]\n'
+         'build-backend = "setuptools.build_meta"'),
+        False,
+        "marker excludes this interpreter, so an isolated build installs nothing",
+        (),
+    ),
+    (
+        ('requires = ["setuptools>=61,<85; python_version >= \'3.12\'"]\n'
+         'build-backend = "setuptools.build_meta"'),
+        True,
+        "an applicable marker must NOT be rejected",
+        (),
+    ),
+    (
+        'requires = ["hatchling"]\nbuild-backend = "setuptools.build_meta"',
+        False,
+        ("absent distribution that does NOT supply the backend -- the regression "
+         "that passed 11/11 for a whole round"),
+        (),
+    ),
+    (
+        ('requires = ["setuptools>=61,<85", "hatchling>=99"]\n'
+         'build-backend = "setuptools.build_meta"'),
+        False,
+        "multi-entry: one good, one absent-and-unsatisfiable",
+        PRESENT_DISTRIBUTIONS,
+    ),
+    (
+        ('requires = ["hatchling @ https://example.invalid/x.whl"]\n'
+         'build-backend = "setuptools.build_meta"'),
+        False,
+        "direct URL on an ABSENT distribution -- previously short-circuited to True",
+        (),
+    ),
+    (
+        ('requires = ["setuptools @ https://example.invalid/s.whl"]\n'
+         'build-backend = "setuptools.build_meta"'),
+        False,
+        "direct URL on a PRESENT distribution",
+        (),
+    ),
+    (
+        'requires = ["setuptools[core]>=61"]\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "extras are stripped from the requirement name",
+        (),
+    ),
+    (
+        'requires = ["SETUPTOOLS>=61"]\nbuild-backend = "setuptools.build_meta"',
+        True,
+        "distribution names are case-insensitive",
+        (),
+    ),
+    (
+        'requires = ["flit_core>=3"]\nbuild-backend = "flit_core.buildapi"',
+        True,
+        ("THE BARE-MACHINE CASE: the absent distribution is the one supplying "
+         "the declared backend, so this must defer to the skip, not accuse the "
+         "declaration"),
+        (),
+    ),
+)
+
+
+@pytest.mark.parametrize(("body", "expected", "why", "needs_installed"), REQUIRES_CASES)
+def test_requires_satisfaction(tmp_path, monkeypatch, body, expected, why, needs_installed):
+    """Whether the local backend can vouch for a `--no-build-isolation` retry."""
+    _requires_installed(*needs_installed)
+    _write_pyproject(tmp_path, monkeypatch, f"[build-system]\n{body}\n")
+
+    assert _local_backend_satisfies_declared_requires() is expected, why
 
 
 @pytest.fixture(scope="module")
@@ -424,12 +801,14 @@ def installed_package(tmp_path_factory):
             # exist -- and the latter is a defect that must fail. Asking
             # find_spec, rather than reading pip's words, tells them apart. See
             # _declared_backend_is_importable.
-            if not _declared_backend_is_importable():
+            if not _declared_build_system_is_coherent():
                 pytest.fail(
-                    "the build-backend declared in pyproject.toml "
-                    f"({_declared_backend()!r}) cannot be imported, so no build "
-                    "can start. This is a packaging defect, not an environment "
-                    f"limitation: every container build would fail.\n{combined}",
+                    "no build could ever succeed with this [build-system]: "
+                    f"build-backend is {_declared_backend()!r} but requires is "
+                    f"{_declared_requires()!r}, and nothing in requires can "
+                    "supply that backend. This is a packaging defect, not an "
+                    "environment limitation: every container build would fail, "
+                    f"on any machine.\n{combined}",
                     pytrace=False,
                 )
 
@@ -520,11 +899,12 @@ def test_the_editable_finder_is_not_what_resolves_these_imports(installed_packag
     On the specific question of a deleted `-S`, this guard fires whenever the
     finder actually ends up answering the import, which is the case when the
     declaration is ALSO broken: whole-file run with both mutations gives
-    `7 failed, 4 passed`, and this test is one of the seven, reporting "resolved
+    `7 failed, 24 passed`, and this test is one of the seven, reporting "resolved
     ... to the SOURCE WORKTREE".
 
     It does NOT fire when the `-S` is dropped while the declaration is correct
-    (whole-file run: `10 passed`), because the editable finder is a FALLBACK --
+    (whole-file run: `1 failed, 30 passed`, the one failure being that test
+    itself), because the editable finder is a FALLBACK --
     its hook is `if not paths and fullname in MAPPING`, so with the subpackages
     present in the temp target the PYTHONPATH entry wins and this assertion sees
     the temp install either way. `test_the_isolation_flag_is_actually_set` is
