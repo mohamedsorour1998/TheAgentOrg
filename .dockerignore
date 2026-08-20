@@ -1,0 +1,59 @@
+# Build context exclusions for infra/agentcore/Dockerfile.
+#
+# This file sits at the REPOSITORY ROOT on purpose. A .dockerignore is read from
+# the build CONTEXT root, not from the directory holding the Dockerfile, and the
+# context for this image must be the repo root (the Dockerfile copies
+# pyproject.toml, agentorg/ and fixtures/). A copy under infra/agentcore/ would
+# be silently ignored -- which is the failure mode this comment exists to prevent.
+#
+# Build with:
+#   docker build -f infra/agentcore/Dockerfile .
+
+# THE IMPORTANT ONE. build/lib/agentorg/ holds a STALE copy of several modules
+# from before the packaging fix, missing the agents/, common/ and security/
+# subpackages. It is gitignored (.gitignore:9) but present in the worktree, so a
+# build context would carry it. Nothing may read it as truth.
+build/
+dist/
+*.egg-info/
+
+# Never ship a virtualenv into an image. .venv-sorour holds an EDITABLE install
+# whose .pth file redirects `agentorg` imports back at this worktree -- inside a
+# container that path does not exist, and if it did it would defeat the
+# non-editable install the image is built to exercise.
+.venv/
+.venv-*/
+venv/
+
+# Secrets. .env holds a live GitHub token (gitignored). Excluded here as well so
+# no build context can carry it into an image layer, where it would persist even
+# if a later stage deleted it.
+.env
+*.tfvars
+
+# Gitignored scratch that grows on every test run; pure noise in an image.
+runs/
+runs-archive-*/
+
+# Caches: stale bytecode has served wrong bytes in this repo before, and a host
+# __pycache__ can shadow freshly installed source.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Not needed at runtime. The agents are library code; the suite, the demo target
+# app, the Terraform and the planning docs are all build-time or human artifacts.
+tests/
+target_repo/
+docs/
+tickets/
+scripts/
+infra/Terraform/
+.github/
+.superpowers/
+make_fixtures.py
+
+# Git metadata: large, and it would put the whole history in a layer.
+.git/
+.gitignore
