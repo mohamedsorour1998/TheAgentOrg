@@ -27,7 +27,13 @@ import logging
 from .. import fixtures_loader
 from ..common import config, llm
 from ..security import run_all_scanners
-from ..state import Finding, RunState, SecurityResult, compute_security_verdict
+from ..state import (
+    Finding,
+    RunState,
+    ScanProvenance,
+    SecurityResult,
+    compute_security_verdict,
+)
 
 SYSTEM_PROMPT = """You are the Security explainer. You are given a verdict and a
 list of blocking findings that were ALREADY decided by code. Write 1-3 plain
@@ -106,11 +112,40 @@ def _explain(verdict: str, blocking: list[Finding]) -> str:
     return reply if reply else _default_explanation(verdict, blocking)
 
 
+def _with_provenance(result: SecurityResult, provenance: ScanProvenance) -> SecurityResult:
+    """Stamp WHERE this verdict came from, without touching the verdict itself.
+
+    A copy rather than an in-place set, because the two fixture paths get their
+    result from `fixtures_loader.security`, which returns a freshly validated
+    model each call -- but mutating whatever a loader hands back is the habit
+    that turns a shared fixture into shared mutable state the first time one is
+    cached. `update=` cannot reach `verdict`, `findings` or `blocking` from
+    here, so this cannot become a way to change a decision.
+
+    This exists because the fixture paths and the scanner path build their
+    results in three different places, and provenance that each of them sets by
+    hand is provenance one of them will eventually forget to set.
+    """
+    return result.model_copy(update={"scan_provenance": provenance})
+
+
 def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
-    """Scan the diff, decide in code, then attach an explanation."""
+    """Scan the diff, decide in code, then attach an explanation.
+
+    Every return carries `scan_provenance`, and that is the whole reason this
+    function has three of them worth telling apart. The verdict alone does not
+    say whether the scanners ran: a raise from Habiba's lane is answered with
+    the FIXTURE verdict below, which still blocks a poisoned diff, so "block"
+    on a machine with no scanners installed and "block" from real gitleaks were
+    indistinguishable on disk. graph.py writes this value into the run's log
+    row, and agentorg/timeline.py renders it. See state.ScanProvenance.
+    """
     if not use_real_scanners:
-        # STUB path, kept for demos that must not shell out at all.
-        return fixtures_loader.security(block=_looks_poisoned(state))
+        # STUB path, kept for demos that must not shell out at all. A CHOICE,
+        # not a fault -- distinct from the fallback below, which is a fault.
+        return _with_provenance(
+            fixtures_loader.security(block=_looks_poisoned(state)), "fixture-stub"
+        )
 
     try:
         findings = run_all_scanners(state.dev)
@@ -140,7 +175,14 @@ def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
         logging.getLogger(__name__).debug("scanner failure traceback", exc_info=True)
         # Fall back to the FIXTURE, never to an empty findings list -- see the
         # module docstring. This still blocks a diff carrying an AWS key.
-        return fixtures_loader.security(block=_looks_poisoned(state))
+        #
+        # Stamped "fixture-fallback": the WARNING above goes to the Python
+        # logger, which is not the run's artifact. Without this stamp the only
+        # record that no scanner ran was a stderr line nobody reads back, and
+        # the log row said "blocked" exactly as a real scan would.
+        return _with_provenance(
+            fixtures_loader.security(block=_looks_poisoned(state)), "fixture-fallback"
+        )
 
     verdict, blocking = compute_security_verdict(
         findings, threshold=config.SECURITY_BLOCK_THRESHOLD
@@ -150,4 +192,6 @@ def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
         findings=findings,
         blocking=blocking,
         explanation=_explain(verdict, blocking),
+        # The only path on which compute_security_verdict actually ran.
+        scan_provenance="scanners",
     )

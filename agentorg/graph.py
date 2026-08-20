@@ -49,10 +49,29 @@ from .state import (
 )
 
 
-def _log(state: RunState, actor, stage, action, verdict="", summary=""):
+def _log(state: RunState, actor, stage, action, verdict="", summary="",
+         artifact_ref="", scan_provenance=""):
+    """Append one row to the run's log.
+
+    WIDENED IN WEEK 3, by ADDITION only -- both new parameters default to "", so
+    every existing call site writes exactly the bytes it wrote before. They exist
+    because agentorg/timeline.py may read nothing but log.read(run_id), which
+    makes this helper the only route by which a fact can reach the judges:
+
+      * artifact_ref  the delivery ref for a block reason. It was already being
+        recorded, but only INSIDE a summary sentence, so reading it back meant
+        string-parsing prose. It now goes in the field state.py named for it
+        ("PR url, branch, path to findings json") as well.
+      * scan_provenance  whether the verdict came from real scanners or a
+        fixture. See state.ScanProvenance.
+
+    The summary keeps carrying the ref too, deliberately: every run already on
+    disk has it there and nowhere else, and the timeline must render those.
+    """
     log.append(LogEvent(
         run_id=state.run_id, ticket_id=state.ticket_id,
         actor=actor, stage=stage, action=action, verdict=verdict, summary=summary,
+        artifact_ref=artifact_ref, scan_provenance=scan_provenance,
     ))
 
 
@@ -165,8 +184,12 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
 
     # 5. SECURITY (deterministic block rule) -------------------------------
     state.security = security.run(state)
+    # scan_provenance is the answer to "did the scanners actually run, or did
+    # this verdict come from a fixture?" -- a question the count in `summary`
+    # cannot answer, because the fixture fallback produces a real count too.
     _log(state, "security", "security", "blocked" if state.security.verdict == "block" else "passed",
-         verdict=state.security.verdict, summary=f"{len(state.security.blocking)} blocking")
+         verdict=state.security.verdict, summary=f"{len(state.security.blocking)} blocking",
+         scan_provenance=state.security.scan_provenance)
     if state.security.verdict == "block":
         state.status = "blocked"
         # The ref is written down rather than dropped on the floor. post_comment
@@ -177,8 +200,16 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
         # of truth the timeline UI renders -- and without the ref that file is
         # byte-identical whether the block was reported or evaporated into a 502.
         ref = github_ops.post_comment(state, state.security.explanation)
+        # The ref goes in artifact_ref AND stays in the summary. Both, because
+        # they answer to different readers: artifact_ref is the field state.py
+        # names for exactly this ("PR url, branch, path to findings json") and
+        # is what agentorg/timeline.py classifies without parsing prose, while
+        # the summary sentence is what every run already on disk carries and
+        # what `cat runs/<run_id>.jsonl` shows in demo beat 5. Dropping it from
+        # the summary would rewrite the demo script to save a duplicated string.
         _log(state, "system", "security", "blocked",
-             summary=f"pipeline halted by block rule; block reason {ref}")
+             summary=f"pipeline halted by block rule; block reason {ref}",
+             artifact_ref=ref, scan_provenance=state.security.scan_provenance)
         return state
 
     # 5b. THE REVIEWER'S VERDICT IS TERMINAL --------------------------------

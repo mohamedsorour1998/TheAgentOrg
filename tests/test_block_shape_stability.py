@@ -54,6 +54,11 @@ def test_shapes_match_the_declared_types():
     assert set(_shape(state.plan)) == {"tasks", "acceptance_criteria", "target_files", "notes"}
     assert set(_shape(state.dev)) == {"branch", "diff", "summary", "files_changed", "pr_url"}
     assert set(_shape(state.review)) == {"verdict", "comments", "must_fix"}
-    assert set(_shape(state.security)) == {"verdict", "findings", "blocking", "explanation"}
+    # scan_provenance added in week 3 for the timeline UI: "blocked" proves two
+    # different things depending on whether real scanners ran, and this is the
+    # field that tells them apart. See state.ScanProvenance.
+    assert set(_shape(state.security)) == {
+        "verdict", "findings", "blocking", "explanation", "scan_provenance",
+    }
     assert state.review.verdict in ("approve", "changes_requested")
     assert state.security.verdict in ("pass", "block")
