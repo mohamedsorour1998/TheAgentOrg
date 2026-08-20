@@ -99,6 +99,12 @@ jobs:
       # hard dependency in [project].dependencies, so the Install step above
       # (`pip install -e ".[dev]"`) already provides it, and a second install
       # would be a second place for the version to drift.
+      # `python -m pytest`, NOT the bare `pytest` used at line 91: `python -m`
+      # prepends cwd to sys.path, the console script does not, and
+      # pythonpath = ["."] resolves against rootdir (the repo root, via
+      # pyproject.toml) rather than cwd. Measured from inside target_repo: the
+      # bare form dies with `ModuleNotFoundError: No module named 'app'` during
+      # collection. Do not harmonise this line with the step above.
       # Owner of the tests: Reem; owner of this workflow: Mariam.
       - name: Target app tests
         run: cd target_repo && python -m pytest tests -q
