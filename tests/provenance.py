@@ -213,6 +213,19 @@ class Provenance:
         self._activate()
         if (self._bin / absent).exists():
             raise RuntimeError(f"{absent} must be the absent one, but a fake exists")
+        # AND check the WORLD, not just our own directory. The line above only
+        # proves the loop skipped `absent`, which it always does -- a guard that
+        # cannot fire. On a provisioned machine the REAL binary shadows through
+        # and this method would quietly deliver a fully-provisioned mode while
+        # claiming to be half-provisioned. none_installed() refuses to lie about
+        # exactly this; so must we.
+        if absent in binaries_installed():
+            raise RuntimeError(
+                f"some_absent_others_broken({absent!r}) cannot make {absent} "
+                f"absent: a real one is on PATH behind the fake directory, so "
+                f"this would run FULLY-PROVISIONED while reporting "
+                f"HALF-PROVISIONED. Prepending cannot hide a real binary."
+            )
 
     @staticmethod
     def answered_from_fixture(state: RunState) -> bool:

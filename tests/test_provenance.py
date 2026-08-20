@@ -37,8 +37,15 @@ def _state_with_lines(first: int, second: int) -> RunState:
     return state
 
 
-def test_the_fixture_lines_and_the_real_scanner_lines_do_not_overlap():
-    """The whole discriminator rests on this. If they ever coincide, it is dead."""
+def test_the_fixture_lines_and_the_real_scanner_lines_are_not_identical():
+    """The whole discriminator rests on this. If they ever coincide, it is dead.
+
+    NOT "do not overlap" -- they DO overlap, at line 4. That is the measured
+    reason no single-line observation can tell the two modes apart and only the
+    whole set can. What the discriminator needs is that the two sets are not
+    IDENTICAL, which is what `!=` asserts. Do not "tighten" this to
+    `isdisjoint()`: that would assert something false and break a correct pin.
+    """
     assert prov.FIXTURE_LINES != prov.REAL_SCANNER_LINES
     assert prov.FIXTURE_LINES == frozenset({4, 5})
     assert prov.REAL_SCANNER_LINES == frozenset({3, 4})
