@@ -798,7 +798,14 @@ def test_the_status_check_fails_the_job_when_a_runtime_is_not_ready():
     # by exiting non-zero on timeout and on any terminal state, rather than by a
     # failure flag -- the same property, expressed by the loop's own exits, and
     # both are pinned here so a rewrite cannot drop either one silently.
-    status = [s for s in _all_run_scripts(DEPLOY) if "list-agent-runtimes" in s and "READY" in s]
+    # Keyed on the polling loop, not merely on the words: the invoke step also
+    # calls list-agent-runtimes and also mentions READY in a comment, and a
+    # matcher loose enough to catch it reported this assertion as unsatisfied
+    # against a correct workflow.
+    status = [
+        s for s in _all_run_scripts(DEPLOY)
+        if "list-agent-runtimes" in s and "for attempt in" in s
+    ]
     assert status, "no status wait; a deploy could report success with nothing READY"
     for script in status:
         assert 'ready" = "5"' in script or "ready\" = \"5\"" in script, (
@@ -1056,3 +1063,55 @@ def test_shellcheck_can_actually_fail(tmp_path):
         check=False,
     )
     assert result.returncode != 0, "shellcheck passed a script it should reject"
+
+
+# --------------------------------------------------------------------------
+# What the image must contain to be able to answer at all.
+# --------------------------------------------------------------------------
+
+
+def test_the_image_ships_every_runtime_path_the_code_reads_from_disk():
+    """A healthy runtime that cannot complete one invocation.
+
+    THIS IS A REGRESSION TEST FOR A DEPLOY THAT REACHED PRODUCTION-SHAPED
+    FAILURE. All five runtimes reported READY, /ping answered 200, and every
+    /invocations returned 500:
+
+        FileNotFoundError: [Errno 2] No such file or directory:
+        '/app/fixtures/plan_result.json'
+
+    `fixtures/` lives at the repo ROOT, outside the package, and
+    agentorg/fixtures_loader.py resolves it by walking up from its own file. So
+    `pip install .` does not ship it -- not even with the
+    [tool.setuptools.packages.find] fix, which covers subpackages and
+    agentorg/security's data files. Only an explicit COPY puts it in the image.
+
+    Every agent falls back to a fixture when no model answers, so this directory
+    is not test scaffolding: it is the runtime's answer of last resort, and
+    without it the container is healthy and useless.
+
+    Asserts on the loader's own resolution rather than a hardcoded list, so a
+    future fixture directory cannot be added to the code and forgotten here.
+    """
+    dockerfile = REPO_ROOT / "agentorg" / "agents" / "Dockerfile"
+    assert dockerfile.is_file(), f"no Dockerfile at {dockerfile}"
+    body = dockerfile.read_text(encoding="utf-8")
+
+    loader = (REPO_ROOT / "agentorg" / "fixtures_loader.py").read_text(encoding="utf-8")
+    assert 'parent.parent / "fixtures"' in loader, (
+        "fixtures_loader no longer resolves fixtures/ from the repo root; this "
+        "test is pinned to that resolution and must be updated with it"
+    )
+
+    copied = re.findall(r"^COPY\s+(\S+)", body, re.MULTILINE)
+    assert "fixtures" in copied, (
+        f"the image does not COPY fixtures/, which fixtures_loader reads at "
+        f"runtime from the repo root. COPY lines present: {copied}"
+    )
+
+    # The directory must actually hold the fixtures the agents load, or the COPY
+    # would ship an empty directory and the failure would look identical.
+    present = {p.name for p in (REPO_ROOT / "fixtures").glob("*.json")}
+    assert "plan_result.json" in present, (
+        f"fixtures/ does not contain plan_result.json; found {sorted(present)}"
+    )

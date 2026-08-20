@@ -284,11 +284,20 @@ jobs:
             --output text)"
           echo "planner runtime: ${arn}"
 
+          # Both of these were found by running the call by hand, not assumed:
+          #   * --payload must be BASE64. Passing raw JSON gives
+          #     `Invalid base64: "{...}"` before the request leaves the CLI.
+          #   * --qualifier is required. Without it the call fails with
+          #     `ResourceNotFoundException: No endpoint or agent found with
+          #     qualifier` even though the runtime is READY and its DEFAULT
+          #     endpoint is READY too.
           payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
+          encoded="$(printf '%s' "$payload" | base64 | tr -d '\n')"
 
           aws bedrock-agentcore invoke-agent-runtime \
             --agent-runtime-arn "$arn" \
-            --payload "$payload" \
+            --qualifier DEFAULT \
+            --payload "$encoded" \
             --content-type application/json \
             /tmp/invoke-out.json
 

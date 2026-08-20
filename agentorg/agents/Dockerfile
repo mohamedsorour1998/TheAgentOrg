@@ -59,6 +59,25 @@ RUN pip install --no-cache-dir -r agents-requirements.txt
 COPY pyproject.toml README.md ./
 COPY agentorg ./agentorg
 
+# fixtures/ IS REQUIRED AT RUNTIME AND LIVES OUTSIDE THE PACKAGE.
+# agentorg/fixtures_loader.py:21 resolves it as
+# `pathlib.Path(__file__).resolve().parent.parent / "fixtures"` -- the repo root,
+# not inside agentorg -- so `pip install .` never ships it, and the packaging fix
+# that covers the subpackages and agentorg/security's data files does not reach
+# it either.
+#
+# Measured on the first runtime that actually served traffic: /ping answered 200
+# and /invocations failed with
+#
+#   FileNotFoundError: [Errno 2] No such file or directory:
+#   '/app/fixtures/plan_result.json'
+#
+# Every agent falls back to a fixture when no model answers -- see the note in
+# planner.py -- so without this directory a runtime reports healthy and cannot
+# complete a single invocation. WORKDIR is /app and the loader walks up from
+# /app/agentorg/, so /app/fixtures is exactly where it looks.
+COPY fixtures ./fixtures
+
 # --no-deps because requirements.txt above is the pinned source of truth. Without
 # it, pip would re-resolve pyproject's floating dependencies and could quietly
 # upgrade past a pin -- the image would then differ from the one that was tested.
