@@ -22,8 +22,25 @@ SECURITY_BLOCK_THRESHOLD = os.environ.get("SECURITY_BLOCK_THRESHOLD", "high")
 # Cap on developer<->reviewer revision loops so a run can't spin forever.
 MAX_REVISION_LOOPS = int(os.environ.get("MAX_REVISION_LOOPS", "3"))
 
-# OFFLINE=true makes github_ops use plain local git instead of the GitHub API,
-# so the whole demo runs with the network off.
+# OFFLINE=true makes github_ops use plain local git instead of the GitHub API.
+#
+# IT DOES NOT TAKE THE MODEL OFFLINE, and the comment that used to sit here
+# claimed it did -- "so the whole demo runs with the network off". `available()`
+# in llm.py reads LLM_DISABLED, LLM_BASE_URL and boto3 credentials. It never
+# reads OFFLINE, so on a machine with AWS credentials every agent still calls
+# Bedrock. Measured:
+#
+#   OFFLINE=true python -c "from agentorg.common import llm; print(llm.available())"
+#   True
+#
+# For a genuinely offline run set BOTH:  OFFLINE=true LLM_DISABLED=true
+#
+# One knob closes the GitHub seam, the other closes the model seam. They are
+# separate on purpose -- an offline git demo against a live model is a real
+# configuration -- but the word "offline" reads as though it covers both, which
+# is why this note is longer than the line it explains. Several plan documents
+# still carry the one-knob form; docs/plan/reem/demo_script.md is correct
+# because it sets LLM_DISABLED=true throughout.
 OFFLINE = os.environ.get("OFFLINE", "false").lower() == "true"
 
 # GitHub seam (Mariam) ------------------------------------------------------
