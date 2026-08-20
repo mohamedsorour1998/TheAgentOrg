@@ -2710,9 +2710,19 @@ def _permutable_findings() -> list:
 
     Deliberately NOT the demo fixture's two gitleaks hits: those agree on tool,
     file and severity, so a key that only looked at `tool` would order them
-    identically and read as working. These differ in tool, file, line, rule and
-    severity, so a key that drops any component leaves at least one pair
-    input-ordered.
+    identically and read as working. These four span several fields and catch a
+    key narrowed to one or two components.
+
+    WHAT THIS FIXTURE DOES NOT CATCH, stated because an earlier version of this
+    docstring claimed the opposite and review measured it false. It said "a key
+    that drops any component leaves at least one pair input-ordered". It does
+    not: these four have no MINIMAL pair -- the closest, the two `a.rule` hits,
+    differ in `line` AND `description`, so either alone still separates them.
+    Measured over all 24 permutations, EVERY one of the six single-component
+    drops still yields exactly one order. Totality is pinned instead by
+    `test_the_sort_key_reads_every_field_a_finding_carries`, which builds one
+    minimal pair per field. Do not read a green run of the tests below as
+    evidence that the key must keep all six components.
     """
     return [
         _LANE.Finding(tool="semgrep", severity="high", rule="b.rule",
@@ -2909,4 +2919,167 @@ def test_a_cached_result_is_in_the_same_order_as_a_fresh_one(monkeypatch):
         f"this test's own setup is broken -- the input order must be one the "
         f"sort actually changes, or it cannot tell a missing sort from a "
         f"working one. Got {[(f.tool, f.rule) for f in fresh]}"
+    )
+
+
+def test_the_sort_key_reads_every_field_a_finding_carries(monkeypatch):
+    """One minimal pair per field, so dropping ANY component goes red.
+
+    THIS IS THE PIN FOR THE "WHY ALL SIX FIELDS" ARGUMENT in `_sort_key`'s
+    docstring, and it exists because that argument was unpinned. Review measured
+    it: narrowing the key to `(tool, file, line, rule)` -- dropping `severity`
+    and `description` -- left the whole suite GREEN, so a reader "simplifying"
+    the key found the tests endorsing them.
+
+    WHY THE PERMUTATION TEST ABOVE CANNOT CATCH IT, which is the part worth
+    understanding. Two separate weaknesses had to line up:
+
+      * `_permutable_findings` has no MINIMAL pair. Its near-tie pair differs in
+        `line` AND `description`, so either component alone still separates them.
+        Measured against that fixture, ALL SIX single-component drops still yield
+        exactly one order -- so its docstring's claim that "a key that drops any
+        component leaves at least one pair input-ordered" was false for every
+        component, not just the two.
+      * That test's OBSERVATION tuple is `(tool, file, line, rule)`. Even given a
+        pair that ties, a reordering visible only in `severity` or `description`
+        would be invisible to what it records.
+
+    So this test fixes both halves: one pair per field differing in EXACTLY that
+    field, and an observation spanning EVERY field. A pair differing in exactly
+    one field is separated by a key if and only if the key reads that field --
+    which is what makes each of the six assertions independent, and what makes a
+    narrowed key fail here loudly instead of silently.
+
+    It drives the real `run_all_scanners`, like the rest of this section, so it
+    pins the shipped sort rather than a re-implementation of it.
+    """
+    # Two distinct values per field. `severity` deliberately spans the block
+    # threshold in the direction that does NOT flip the verdict for the pair --
+    # order is the subject here, not the verdict.
+    other = {
+        "tool": "gitleaks",
+        "severity": "low",
+        "rule": "s.rule",
+        "file": "app/zz.py",
+        "line": 2,
+        "description": "e",
+    }
+    base = {
+        "tool": "semgrep",
+        "severity": "high",
+        "rule": "r.rule",
+        "file": "app/auth.py",
+        "line": 1,
+        "description": "d",
+    }
+    fields = tuple(_LANE.Finding.model_fields)
+    assert set(fields) == set(base), (
+        f"Finding grew or lost a field: {fields}. Add it to this test's two "
+        f"value maps AND to _sort_key, or the new field can tie and leave that "
+        f"pair ordered by whatever the scanners happened to emit."
+    )
+
+    for field in fields:
+        twin = dict(base)
+        twin[field] = other[field]
+        pair = [_LANE.Finding(**base), _LANE.Finding(**twin)]
+
+        seen = set()
+        for permutation in itertools.permutations(pair):
+            _LANE.reset_scanner_cache()
+
+            def answer(tool: str, dev, _p=permutation) -> list:
+                if tool != "gitleaks":
+                    return []
+                return [f.model_copy(deep=True) for f in _p]
+
+            _stub_wrappers(monkeypatch, answer)
+
+            result = run_all_scanners(_dev())
+            # Observe EVERY field. A narrower observation cannot see a swap that
+            # shows up only in `severity` or `description`.
+            seen.add(tuple(tuple(getattr(f, x) for x in fields) for f in result))
+
+        assert len(seen) == 1, (
+            f"two findings differing ONLY in {field!r} came back in "
+            f"{len(seen)} different orders, so `_sort_key` does not read "
+            f"{field!r} and that pair is left in whatever order the scanners "
+            f"emitted. The key must be TOTAL over every field Finding carries "
+            f"-- see _sort_key's docstring."
+        )
+
+
+def test_both_wrappers_share_one_repo_relative_and_do_not_copy_it():
+    """The brief's "do not write a second copy" rule, as an assertion.
+
+    Review measured that a second private copy of `_repo_relative` inside
+    `semgrep_tool` passes the whole suite and ruff -- resemblance and identity
+    are indistinguishable to every other test here, so nothing pinned the one
+    thing the brief asked for by name.
+
+    Identity, not equality of behaviour: two copies that agree today are exactly
+    the failure this lane already paid for. Four private copies of the diff
+    materialiser drifted apart until the poisoned demo stopped blocking, which is
+    why `common/diff.py` exists and why this is one function and not two.
+    """
+    from agentorg.security import gitleaks_tool, semgrep_tool
+
+    assert semgrep_tool._repo_relative is gitleaks_tool._repo_relative, (
+        "semgrep_tool._repo_relative is a SEPARATE object from the gitleaks one, "
+        "so a fix to either reaches only one wrapper. The brief requires the "
+        "same helper, not an equivalent one."
+    )
+    assert semgrep_tool._repo_relative.__module__ == "agentorg.security.gitleaks_tool"
+
+
+def test_the_sort_is_global_and_not_per_wrapper(monkeypatch):
+    """Sorting inside each wrapper is not equivalent, and nothing pinned that.
+
+    `run_all_scanners`'s comment argues the sort must be applied ONCE across all
+    three tools rather than inside each wrapper. Review measured that per-wrapper
+    sorting passes every other test in this file: each tool's block comes back
+    internally ordered, and the BLOCKS land in fan-out order, which happens to be
+    stable -- so a test that only checks "the same order twice" cannot tell the
+    two designs apart.
+
+    They differ on the property that matters. Per-wrapper, the result is grouped
+    by the fan-out's iteration order (semgrep, gitleaks, trivy) and ONLY the
+    within-tool order comes from the key. Globally sorted, position is decided by
+    the key alone. This test drives one finding from EACH wrapper, chosen so the
+    key's order and the fan-out's order DISAGREE: keyed on `tool`, gitleaks sorts
+    before semgrep before trivy, while the fan-out asks semgrep first.
+
+    So a global sort must return gitleaks first, and any per-wrapper scheme must
+    return semgrep first -- whatever it does within a tool. The assertion is on
+    the first element's tool, which is exactly the byte a reader sees first in
+    the explanation.
+    """
+    per_tool = {
+        "semgrep": _LANE.Finding(
+            tool="semgrep", severity="high", rule="s.rule",
+            file="app/api.py", line=1, description="d-semgrep",
+        ),
+        "gitleaks": _LANE.Finding(
+            tool="gitleaks", severity="critical", rule="g.rule",
+            file="app/auth.py", line=1, description="d-gitleaks",
+        ),
+        "trivy": _LANE.Finding(
+            tool="trivy", severity="high", rule="t.rule",
+            file="requirements.txt", line=1, description="d-trivy",
+        ),
+    }
+    _LANE.reset_scanner_cache()
+
+    def answer(tool: str, dev) -> list:
+        return [per_tool[tool].model_copy(deep=True)]
+
+    _stub_wrappers(monkeypatch, answer)
+
+    result = run_all_scanners(_dev())
+    assert [f.tool for f in result] == ["gitleaks", "semgrep", "trivy"], (
+        f"got {[f.tool for f in result]}. The fan-out asks semgrep FIRST, so a "
+        f"result led by 'semgrep' means the ordering is the fan-out's iteration "
+        f"order and not `_sort_key` -- i.e. the sort is applied per-wrapper, or "
+        f"not at all. A global sort puts 'gitleaks' first regardless of who "
+        f"answered first."
     )

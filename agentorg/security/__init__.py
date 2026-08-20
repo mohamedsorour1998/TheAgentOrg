@@ -211,10 +211,19 @@ def _sort_key(finding: Finding) -> tuple[str, str, int, str, str, str]:
     `Finding` has exactly six fields -- tool, severity, rule, file, line,
     description -- so a key over all six can only tie on findings that are equal
     in every field the model carries, and those are indistinguishable in the
-    rendered output anyway. Verified: `list(Finding.model_fields)` is those six.
-    A shorter key is tempting and wrong -- keying on `(tool, rule)` alone leaves
-    the poisoned fixture's two AWS hits tied whenever one rule matches twice in
-    one file, which is the exact pair this defect was measured on.
+    rendered output anyway. Verified: `list(Finding.model_fields)` is those
+    six, and `test_the_sort_key_reads_every_field_a_finding_carries` builds one
+    MINIMAL pair per field, so dropping any single component turns it red --
+    that pin exists because review measured a narrowed `(tool, file, line,
+    rule)` key passing the entire suite.
+    A shorter key is tempting and wrong. Keying on `(tool, rule)` alone leaves
+    any two hits of the SAME rule in one file tied -- one credential pattern
+    matching two lines, which is the ordinary shape of a secrets finding. Note
+    the demo fixture's own two AWS hits are NOT that case: they carry different
+    rules (`aws-access-key-id` and `aws-secret-access-key`) and so are separated
+    even by `(tool, rule)`. An earlier version of this paragraph claimed they
+    were the measured pair; they are not, and the argument for totality does not
+    need them to be.
 
     WHY THIS ORDER OF COMPONENTS, which is a readability choice and not a
     correctness one: any total key fixes the defect. Findings group by tool, then
