@@ -184,39 +184,67 @@ jobs:
       # The CLI is installed here rather than expected on a laptop. Version
       # printed so a run records which CLI produced its runtimes -- when the
       # deploy behaviour changes, that line is the first thing to check.
+      # The toolkit provides the `agentcore` CLI. It has no --version flag, so
+      # the install is confirmed by asking for help and checking that the
+      # subcommands this job actually calls are present. The first version of
+      # this step ran `agentcore --version || agentcore --help | head -5`, which
+      # failed twice over: --version does not exist, and `| head -5` SIGPIPEs
+      # under `set -o pipefail`, so the fallback failed too.
       - name: Install the agentcore CLI
         run: |
           set -euo pipefail
           pip install --quiet bedrock-agentcore-starter-toolkit
-          agentcore --version || agentcore --help | head -5
+          help="$(agentcore --help 2>&1)"
+          for cmd in configure deploy status invoke; do
+            grep -q "$cmd" <<<"$help" || {
+              echo "::error::agentcore CLI has no '$cmd' subcommand; its interface changed"
+              exit 1
+            }
+          done
+          echo "agentcore CLI present with configure, deploy, status, invoke"
 
-      # Configure and launch each runtime from the pushed image. Sequential, not
-      # parallel: five concurrent configures write the same local .agentcore
-      # config and would race.
+      # Configure and deploy each runtime. Sequential, not parallel: the CLI
+      # keeps per-project state under .bedrock_agentcore.yaml and five concurrent
+      # configures would race on it.
       #
-      # `|| true` appears nowhere here on purpose. A failed configure or launch
-      # must fail the job -- reporting a deploy that did not happen is the one
-      # outcome the task forbids, because the fallback plan depends on knowing
-      # the truth.
-      - name: Configure and launch the five runtimes
+      # WHAT THIS DOES AND DOES NOT USE. The CLI builds and pushes the image
+      # itself from --entrypoint, into the --ecr repository it is given. It has no
+      # flag for "deploy this already-built image URI" -- the first version of
+      # this job invented `--container-uri` and `--env` on `configure`, and
+      # neither exists. So the build job above is not redundant: it is the check
+      # that the Dockerfile and the arm64 target are correct, and it fails fast
+      # and cheaply if either regresses. What CodeBuild produces here must agree
+      # with it.
+      #
+      # --env belongs to `deploy`, not `configure`. AGENT_ROLE is what makes one
+      # image serve five different agents, so it is passed at deploy time.
+      #
+      # `|| true` appears nowhere: a failed configure or deploy must fail the job.
+      # Reporting a deploy that did not happen is the one outcome the task
+      # forbids, because the fallback plan depends on knowing the truth.
+      - name: Configure and deploy the five runtimes
         run: |
           set -euo pipefail
           account="$(aws sts get-caller-identity --query Account --output text)"
-          registry="${account}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
 
           for agent in planner developer reviewer security sre; do
-            image="${registry}/${{ env.ECR_PREFIX }}-${agent}-agent:${{ github.sha }}"
+            repo="${{ env.ECR_PREFIX }}-${agent}-agent"
             echo "::group::${agent}"
 
             agentcore configure \
               --name "theagentorg_${agent}" \
+              --entrypoint agentorg/agents/server.py \
               --execution-role "${{ env.RUNTIME_ROLE }}" \
-              --container-uri "${image}" \
+              --ecr "${account}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${repo}" \
+              --requirements-file agentorg/agents/requirements.txt \
               --region "${{ env.AWS_REGION }}" \
-              --env "AGENT_ROLE=${agent}" \
+              --deployment-type container \
               --non-interactive
 
-            agentcore launch --name "theagentorg_${agent}" --non-interactive
+            agentcore deploy \
+              --agent "theagentorg_${agent}" \
+              --env "AGENT_ROLE=${agent}" \
+              --auto-update-on-conflict
 
             echo "::endgroup::"
           done
@@ -229,7 +257,7 @@ jobs:
           set -euo pipefail
           failed=0
           for agent in planner developer reviewer security sre; do
-            out="$(agentcore status --name "theagentorg_${agent}" 2>&1 || true)"
+            out="$(agentcore status --agent "theagentorg_${agent}" 2>&1 || true)"
             echo "--- ${agent}"
             echo "$out"
             if ! grep -qi 'READY' <<<"$out"; then
@@ -243,7 +271,7 @@ jobs:
         run: |
           set -euo pipefail
           payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
-          out="$(agentcore invoke --name theagentorg_planner "$payload" 2>&1)"
+          out="$(agentcore invoke --agent theagentorg_planner "$payload" 2>&1)"
           echo "$out"
           # Asserts on content, not on exit status. A runtime that returns 200
           # with an empty body exits 0, and "the call succeeded" is exactly the
