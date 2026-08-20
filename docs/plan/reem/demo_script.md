@@ -36,14 +36,42 @@ In this exact order. The order is not cosmetic: setting the knob before the
 binaries are installed makes the CLEAN run block (measured: `status=blocked`,
 `blocking=3`), which takes down the first half of the demo.
 
+    0. cd <repo root> && source .venv-testing/bin/activate
+       which python && which pytest      # BOTH must print paths under .venv-testing
     1. Install semgrep 1.172.0, gitleaks 8.21.2, trivy 0.74.0.
-    2. cd <repo root> && gitleaks version && trivy --version && semgrep --version
-    3. cd <repo root> && trivy fs --download-db-only --timeout 5m .   # warm the 108 MB DB
-    4. cd <repo root> && python scripts/scan_gate.py                  # must exit 0
-    5. export SCANNERS_REQUIRED=true                                  # ONLY after 1-4 pass
-    6. export LLM_DISABLED=true                                       # pacing; see above
-    7. cd <repo root> && python -m agentorg.graph            # status=promoted
-    8. cd <repo root> && python -m agentorg.graph --poisoned # status=blocked, blocking=2
+    2. gitleaks version && trivy --version && semgrep --version
+    3. trivy fs --download-db-only --timeout 5m .            # warm the 108 MB DB
+    4. python scripts/scan_gate.py                           # must exit 0
+    5. export SCANNERS_REQUIRED=true                         # ONLY after 1-4 pass
+    6. export LLM_DISABLED=true                              # pacing; see above
+    7. python -m agentorg.graph                              # status=promoted
+    8. python -m agentorg.graph --poisoned                   # status=blocked, blocking=2
+
+**Step 0 is not optional and it is not cosmetic. MEASURED on this machine:**
+
+```
+$ command -v python      # nothing
+$ command -v pytest      # nothing
+$ python -m agentorg.graph
+sh: python: command not found
+```
+
+There is no bare `python` or `pytest` on this PATH, and bare `python3` is the system
+3.9.6, which cannot even import the project (`ImportError: cannot import name 'UTC'
+from 'datetime'` at `agentorg/state.py:12`). **Every command in this script says
+`python` or `pytest` and assumes step 0 has run.** With the venv activated both
+resolve into `.venv-testing/` and every beat below works as written — verified:
+
+```
+$ source .venv-testing/bin/activate && which python
+/Users/.../agent-a7f2767bbef921e96/.venv-testing/bin/python
+$ LLM_DISABLED=true python -m agentorg.graph
+status=promoted
+security verdict=pass, blocking=0
+```
+
+If a beat ever prints `command not found`, you skipped step 0. Re-run it; do not
+start substituting `python3`.
 
 **If step 4 does not exit 0, DO NOT set the knob in step 5.** Run
 `unset SCANNERS_REQUIRED` and do the demo in fixture-fallback mode: both halves
@@ -232,11 +260,21 @@ not try to remember it.
 ### Narration B — fixture-fallback machine
 
 > "And this is the important part: that verdict is not the LLM's opinion. The
-> block is a code path with a fixed threshold, not a judgement call — the model
-> never gets a vote on it. On this machine the findings come from a recorded
-> scanner report rather than a live gitleaks process, so what's deterministic here
-> is the pipeline's response to those findings. Wire up the real scanners and the
-> same rule decides on their live output."
+> model never gets a vote on it. On this machine the findings come from a recorded
+> scanner report rather than a live gitleaks process, and which report gets loaded
+> is decided in code by a string check on the diff — so what's deterministic here
+> is the pipeline's response to those findings. Wire up the real scanners and a
+> pure-Python threshold rule decides on their live output instead."
+
+<!-- HONESTY NOTE, MEASURED. Do NOT restore the phrase "a code path with a fixed
+     threshold" to narration B. On the fixture path no threshold is consulted at
+     all: agentorg/agents/security.py:71-73 `_looks_poisoned` is a pure
+     `"AKIA" in state.dev.diff` substring test that picks which fixture to load;
+     fixtures_loader.py contains ZERO references to a threshold (grep -c -> 0);
+     and fixtures/security_result_block.json carries the literal string
+     verdict='block', read verbatim. compute_security_verdict and SEVERITY_ORDER
+     are never reached. The threshold sentence is TRUE of narration A and FALSE
+     here, which is exactly the sentence a judge would use to puncture the claim. -->
 
 **The knob dependency, measured.** `blocking=2` holds in *both* modes with the
 knob in its correct state. It becomes **3** — and the clean run in Beat 2 blocks
@@ -396,7 +434,7 @@ fixture-fallback output is the same false claim, just pre-recorded.
 
 **The 5–7 minute target is not verified in this file, because speech cannot be
 timed by running commands.** What is verified is that the machine time is
-negligible: the four on-screen commands total well under a minute of wall time
+negligible: the five on-screen commands total well under a minute of wall time
 with `LLM_DISABLED=true` set.
 
 | Beat | Command | Measured wall time |
