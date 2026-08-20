@@ -20,6 +20,7 @@ WHY THIS FILE EXISTS
 """
 
 import importlib.util
+import itertools
 import os
 import shutil
 import subprocess
@@ -2669,4 +2670,242 @@ def test_the_fault_rule_set_is_derived_from_the_tool_type_and_not_restated(
         f"error_finding what it produces, so every fault it no longer recognises "
         f"is now cacheable -- and a fault that is cached is the fail-open this "
         f"whole task exists to close."
+    )
+
+
+# ==========================================================================
+# Task 5 -- two defects found in review of this lane
+#
+# 1. semgrep leaks the scratch directory into Finding.file.
+# 2. The rendered block explanation is not byte-stable, because no scanner
+#    orders its report and the fan-out concatenates in arrival order.
+#
+# WHY THE OBVIOUS TEST FOR DEFECT 2 IS VACUOUS HERE, MEASURED BEFORE WRITING
+# THESE. The brief says "run the poisoned scan repeatedly and assert the
+# rendered explanation is byte-identical every time". On this machine that
+# passes with the sort deleted. With no scanner binary on PATH the first
+# wrapper raises, agents/security.py catches it and returns
+# fixtures/security_result_block.json wholesale -- verdict, the two blocking
+# findings AND the explanation, which in that file is a FIXED STRING. Measured:
+#
+#     verdict block, 3 findings, 2 blocking
+#     explanation == the fixture's constant  -> True
+#
+# So a ten-run byte-stability test on the agent's output pins that JSON file
+# and nothing else. Worse, the seam most agent tests reach for --
+# monkeypatching `security.run_all_scanners` -- REPLACES the function the sort
+# lives in, so a sort inside the lane is invisible to it either way.
+#
+# The tests below therefore stub the three WRAPPER names inside the lane
+# module, exactly as the Task 4 tests do, so the real `run_all_scanners` runs
+# and the real sort is the only thing that can order the result. Each one
+# varies its INPUT order across iterations, so a stable output is evidence of
+# the sort rather than evidence of a stable input.
+# ==========================================================================
+
+
+def _permutable_findings() -> list:
+    """Findings that span every field the sort key reads.
+
+    Deliberately NOT the demo fixture's two gitleaks hits: those agree on tool,
+    file and severity, so a key that only looked at `tool` would order them
+    identically and read as working. These differ in tool, file, line, rule and
+    severity, so a key that drops any component leaves at least one pair
+    input-ordered.
+    """
+    return [
+        _LANE.Finding(tool="semgrep", severity="high", rule="b.rule",
+                      file="app/auth.py", line=9, description="d1"),
+        _LANE.Finding(tool="gitleaks", severity="critical", rule="a.rule",
+                      file="app/auth.py", line=4, description="d2"),
+        _LANE.Finding(tool="gitleaks", severity="critical", rule="a.rule",
+                      file="app/auth.py", line=3, description="d3"),
+        _LANE.Finding(tool="trivy", severity="high", rule="c.rule",
+                      file="requirements.txt", line=1, description="d4"),
+    ]
+
+
+def test_the_fan_out_orders_its_findings_the_same_way_whatever_order_they_arrive(
+    monkeypatch,
+):
+    """Every input permutation must leave `run_all_scanners` in ONE order.
+
+    This is the pin for defect 2, and it is written against the real lane
+    function on purpose -- see this section's header for why the agent-level
+    byte-stability test the brief describes is vacuous on a machine with no
+    scanners installed.
+
+    ALL 24 permutations of four findings are driven through, not ten repeats of
+    one: repeating a stable input proves only that the input was stable. The
+    cache is cleared between permutations, because otherwise permutation 2
+    would be answered from permutation 1's entry and this test would pass
+    against no sort at all.
+    """
+    orders = {}
+    for permutation in itertools.permutations(_permutable_findings()):
+        _LANE.reset_scanner_cache()
+
+        def answer(tool: str, dev, _p=permutation) -> list:
+            # The whole permutation comes out of one wrapper slot. The subject is
+            # the ORDER the fan-out returns, and splitting the findings across
+            # slots would let the fan-out's own fixed iteration order do the
+            # sorting -- which is exactly the property under test.
+            return [f.model_copy(deep=True) for f in _p] if tool == "gitleaks" else []
+
+        _stub_wrappers(monkeypatch, answer)
+
+        result = run_all_scanners(_dev())
+        key = tuple((f.tool, f.file, f.line, f.rule) for f in result)
+        orders.setdefault(key, []).append([f.rule for f in permutation])
+
+    assert len(orders) == 1, (
+        f"the fan-out returned {len(orders)} DIFFERENT orders across the 24 "
+        f"input permutations of the same four findings, so what a reviewer "
+        f"reads depends on which order the scanners happened to answer in. "
+        f"Orders seen: { {k: v[0] for k, v in orders.items()} }"
+    )
+
+
+def test_the_rendered_block_explanation_is_byte_identical_across_repeated_scans(
+    monkeypatch,
+):
+    """The projector line itself, not just the findings list.
+
+    Defect 2's real consequence: `_default_explanation` joins the blocking
+    findings in list order, and `compute_security_verdict` builds `blocking` by
+    comprehension over `findings`, so it inherits whatever order the fan-out
+    returned. This drives the REAL security agent -- with the wrappers stubbed
+    so the fan-out does not raise and the fixture fallback is never reached --
+    and asserts the rendered string is byte-identical while the input order
+    varies underneath it.
+
+    The model is left disabled by conftest's autouse fixture, so `_explain`
+    falls to `_default_explanation`. That is the deterministic prose the demo
+    shows when no model answers, and it is the string this defect corrupts.
+    """
+    explanations = set()
+    for permutation in itertools.permutations(_permutable_findings()):
+        _LANE.reset_scanner_cache()
+
+        def answer(tool: str, dev, _p=permutation) -> list:
+            return [f.model_copy(deep=True) for f in _p] if tool == "gitleaks" else []
+
+        _stub_wrappers(monkeypatch, answer)
+
+        state = RunState(ticket_id="ORDER-1", ticket_text="t")
+        state.dev = _dev()
+        result = security_agent.run(state)
+
+        assert result.explanation.startswith("Blocked: "), (
+            f"this test's own setup is broken: it must reach the "
+            f"deterministic explanation, not the fixture fallback or a model. "
+            f"Got {result.explanation!r}"
+        )
+        explanations.add(result.explanation)
+
+    assert len(explanations) == 1, (
+        f"the block explanation rendered {len(explanations)} different ways "
+        f"across 24 input permutations of the same findings. A repeated demo "
+        f"run reads differently each time. Variants: {sorted(explanations)}"
+    )
+
+
+def test_semgrep_reports_a_repo_relative_path_not_the_scratch_directory(
+    monkeypatch, tmp_path
+):
+    """The pin for defect 1: no `/var/folders/...` in `Finding.file`.
+
+    semgrep reports paths under the temp dir the wrapper handed it, and that
+    string reaches the PR comment and the projector. gitleaks already strips it
+    with `_repo_relative`; this asserts semgrep does too.
+
+    The fake scanner derives the temp directory from its own report argument --
+    `${arg%/*}` -- rather than being told it, because the wrapper chooses that
+    directory and a hardcoded guess would test a path the wrapper never used.
+
+    Asserted as EQUALITY against `app/auth.py`, not merely "no /var in it": a
+    wrapper that returned `unknown`, or a bare basename, or an empty string
+    would satisfy a negative assertion while still not naming the file a
+    reviewer has to open.
+    """
+    script = (
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        '    *semgrep-report.json)\n'
+        '      d="${arg%/*}"\n'
+        '      echo "{\\"results\\":[{\\"check_id\\":\\"py.timeout\\",'
+        '\\"path\\":\\"$d/app/auth.py\\",'
+        '\\"extra\\":{\\"severity\\":\\"ERROR\\",\\"message\\":\\"m\\"},'
+        '\\"start\\":{\\"line\\":9}}]}" > "$arg"\n'
+        '      ;;\n'
+        '  esac\n'
+        'done\n'
+        'exit 0'
+    )
+    _fake_scanner(tmp_path / "bin", "semgrep", script, monkeypatch)
+
+    findings = semgrep_tool.scan(_dev())
+
+    assert len(findings) == 1, (
+        f"this test's own setup is broken -- expected one semgrep finding, got "
+        f"{_summarize(findings)}"
+    )
+    assert findings[0].file == "app/auth.py", (
+        f"semgrep must report the repo-relative path, like gitleaks does via "
+        f"_repo_relative. Got {findings[0].file!r} -- a scratch directory that "
+        f"exists only for the duration of the scan, printed on a PR comment and "
+        f"on the projector."
+    )
+
+
+def test_a_cached_result_is_in_the_same_order_as_a_fresh_one(monkeypatch):
+    """The sort must run BEFORE the store, so the memo holds sorted findings.
+
+    The brief forbids a cached result differing from a fresh one, and ORDER is a
+    way to differ that no `len()` or set-based assertion would notice. This is
+    the pin for WHERE the sort sits rather than whether it exists: with
+    `findings.sort(...)` moved one line down, past `_CACHE[key] = _copy(...)`,
+    the first caller gets sorted findings and every later caller gets the
+    unsorted list the wrappers actually returned. MEASURED against that
+    mutation -- fresh `[('gitleaks','a'), ('trivy','c')]`, cached
+    `[('trivy','c'), ('gitleaks','a')]`.
+
+    The wrappers answer in an order the key must actively reverse, so a sort
+    that never ran and a sort that ran on both paths give different answers.
+    """
+    unsorted_first = [
+        _LANE.Finding(tool="trivy", severity="low", rule="c.rule",
+                      file="requirements.txt", line=1, description="d"),
+        _LANE.Finding(tool="gitleaks", severity="low", rule="a.rule",
+                      file="app/auth.py", line=2, description="d"),
+    ]
+
+    def answer(tool: str, dev) -> list:
+        if tool == "gitleaks":
+            return [f.model_copy(deep=True) for f in unsorted_first]
+        return []
+
+    calls = _stub_wrappers(monkeypatch, answer)
+
+    fresh = run_all_scanners(_dev())
+    cached = run_all_scanners(_dev())
+
+    assert len(calls) == 3, (
+        f"this test's own setup is broken: the second call must be a cache HIT, "
+        f"so the fan-out should have run once (three wrappers). Got {calls!r}"
+    )
+    assert [(f.tool, f.rule) for f in fresh] == [(f.tool, f.rule) for f in cached], (
+        f"a cached result came back in a DIFFERENT order than the fresh one: "
+        f"fresh {[(f.tool, f.rule) for f in fresh]} vs cached "
+        f"{[(f.tool, f.rule) for f in cached]}. The sort is running after the "
+        f"cache store, so the memo holds the wrappers' arrival order and only "
+        f"the very first caller sees a sorted list."
+    )
+    assert [(f.tool, f.rule) for f in fresh] == [
+        ("gitleaks", "a.rule"),
+        ("trivy", "c.rule"),
+    ], (
+        f"this test's own setup is broken -- the input order must be one the "
+        f"sort actually changes, or it cannot tell a missing sort from a "
+        f"working one. Got {[(f.tool, f.rule) for f in fresh]}"
     )

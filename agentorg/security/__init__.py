@@ -14,6 +14,19 @@ means, shared with the developer's poisoned safety net so the two cannot
 disagree about it again. It never imports the graph, so you can build and test
 it in isolation.
 
+THE FAN-OUT ALSO ORDERS, BECAUSE THE RENDERED GATE HAS TO READ THE SAME TWICE
+
+    No scanner orders its report, and this function concatenates, so without a
+    sort the findings list carries whatever order the tools happened to emit.
+    That order is not cosmetic: `compute_security_verdict` builds `blocking` by
+    comprehension over `findings`, and `agents/security._default_explanation`
+    joins `blocking` into the one line that reaches the PR comment and the
+    projector. Measured across ten runs of the poisoned fixture with real
+    gitleaks, the explanation led with `aws-secret-access-key` six times and
+    `aws-access-key-id` four -- same verdict, same count, same finding set, and a
+    different sentence on stage each time. `_sort_key` below is the fix, and it is
+    applied once across all three tools rather than inside each wrapper.
+
 THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
 
     A repeat of the same diff costs nothing: `_CACHE` maps sha256 of the full
@@ -174,6 +187,52 @@ def _is_fault_free(findings: list[Finding]) -> bool:
     return all(finding.rule not in fault_rules for finding in findings)
 
 
+def _sort_key(finding: Finding) -> tuple[str, str, int, str, str, str]:
+    """A TOTAL order over findings, so the rendered gate reads the same twice.
+
+    THE DEFECT THIS CLOSES. No scanner orders its report and the fan-out simply
+    concatenates, so the ORDER of the findings list is whatever the tools
+    happened to emit. Measured on the poisoned fixture across ten runs of real
+    gitleaks: the explanation led with `aws-secret-access-key` six times and
+    `aws-access-key-id` four. Verdict, count and finding-SET were identical every
+    time -- only the rendered order moved. `compute_security_verdict` builds
+    `blocking` by comprehension over `findings`, so it inherits that order, and
+    `_default_explanation` joins it into the string on the PR comment and the
+    projector.
+
+    WHY ALL SIX FIELDS. The key must be TOTAL: if two DISTINCT findings can tie,
+    `sorted` keeps them in input order and the defect survives for that pair.
+    `Finding` has exactly six fields -- tool, severity, rule, file, line,
+    description -- so a key over all six can only tie on findings that are equal
+    in every field the model carries, and those are indistinguishable in the
+    rendered output anyway. Verified: `list(Finding.model_fields)` is those six.
+    A shorter key is tempting and wrong -- keying on `(tool, rule)` alone leaves
+    the poisoned fixture's two AWS hits tied whenever one rule matches twice in
+    one file, which is the exact pair this defect was measured on.
+
+    WHY THIS ORDER OF COMPONENTS, which is a readability choice and not a
+    correctness one: any total key fixes the defect. Findings group by tool, then
+    by file, then run down the file by line, which is the order a reviewer reads
+    a diff in. `rule`, `severity` and `description` are tie-breakers that only
+    matter for two findings at the same tool/file/line.
+
+    NOT SEVERITY-FIRST, deliberately. Ordering the worst finding first would read
+    better on a projector, but `severity` is the one field `compute_security_verdict`
+    consumes, and making the gate's INPUT order depend on it invites a future
+    reader to believe the order carries meaning. The verdict is computed from
+    severity regardless of position -- pinned by the existing threshold tests --
+    and this key leaves that untouched.
+    """
+    return (
+        finding.tool,
+        finding.file,
+        finding.line,
+        finding.rule,
+        finding.severity,
+        finding.description,
+    )
+
+
 def _copy(findings: list[Finding]) -> list[Finding]:
     """A deep copy, so cache and caller share no mutable object.
 
@@ -225,6 +284,25 @@ def run_all_scanners(dev: DevResult | None) -> list[Finding]:
     # module docstring on why a stored exception is a memoised fault.
     for scan in (_semgrep, _gitleaks, _trivy):
         findings.extend(scan(dev))
+
+    # Sorted HERE, once, across all three tools -- not per-wrapper. Per-wrapper
+    # sorting would leave each tool's block internally ordered and the BLOCKS in
+    # fan-out order, which is stable only for as long as nobody reorders that
+    # tuple; and it would need the same key written in three files, which is how
+    # this lane ended up with four drifting copies of the diff materialiser.
+    #
+    # BEFORE the cache store, so what gets memoised is what a fresh call returns.
+    # Sorting after the store -- or in the `cached is not None` branch -- would
+    # make a cached result and a fresh one differ in ORDER, which the brief
+    # forbids and which no `len()` or set-based assertion would catch.
+    #
+    # This sorts a MIXED clean+fault result too. That is intentional and harmless:
+    # `_is_fault_free` and `_fault_rules` are membership tests over `rule`, so
+    # neither reads position, and a reordered list containing a fault is still
+    # refused by the store. A fault's `file` is `<semgrep scanner>` and its line
+    # is 0, so faults sort among the findings rather than to a fixed end -- the
+    # verdict is unaffected either way, since severity alone decides it.
+    findings.sort(key=_sort_key)
 
     if _is_fault_free(findings):
         _CACHE[key] = _copy(findings)

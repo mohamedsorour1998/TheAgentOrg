@@ -34,6 +34,7 @@ from ._run import (
     run_scanner,
     unrunnable_findings,
 )
+from .gitleaks_tool import _repo_relative
 
 
 def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
@@ -174,6 +175,30 @@ def scan(dev: DevResult) -> list[Finding]:
 
     findings: list[Finding] = []
 
+    # `temp_dir` IS STILL IN SCOPE HERE, and that is worth stating because the
+    # obvious reading says otherwise. `with` is not a scope in Python -- only
+    # functions are -- so the name the `with` statement bound above is live for
+    # the rest of `scan`, even though the DIRECTORY it names was deleted when the
+    # block exited. Nothing below needs that directory to exist: `_repo_relative`
+    # is `os.path.relpath`, which is pure string arithmetic on two paths.
+    # MEASURED, with os.stat/lstat/listdir/readlink instrumented: relpath of an
+    # absolute path against an absolute base makes ZERO filesystem calls.
+    #
+    # So the parse stays OUT here rather than being moved inside the block. The
+    # alternative -- moving the JSON parse and the Finding construction inside
+    # the `with` -- would work too, but it widens the window in which the scratch
+    # tree is still on disk for no gain, and it would reindent a hundred lines of
+    # audited fault handling for a two-line fix.
+    #
+    # The one case where relpath DOES touch the filesystem is a RELATIVE input,
+    # because it must call getcwd() to resolve it. That matters here: semgrep is
+    # invoked with an absolute target so it reports absolute paths, but a report
+    # that omitted `path` entirely would hand the default "unknown" to relpath and
+    # get back a long `../../..`-prefixed path built from the CWD. gitleaks has
+    # the identical behaviour on its own default -- measured, both produce
+    # `../../...../unknown` -- so this wrapper is now no worse than the one the
+    # brief points at, and the shared helper means a fix to that reaches both.
+
     # Wrong-typed INNER fields are a fault too, and the top-level guards above
     # cannot see them -- see _run.report_text for the nine measured crashes and
     # the fail-open they produce end to end. `extra` is the likeliest of them for
@@ -191,7 +216,10 @@ def scan(dev: DevResult) -> list[Finding]:
                         report_text(extra, "severity", "")
                     ),
                     rule=report_text(result_item, "check_id", "unknown"),
-                    file=report_text(result_item, "path", "unknown"),
+                    file=_repo_relative(
+                        report_text(result_item, "path", "unknown"),
+                        temp_dir,
+                    ),
                     line=report_int(start, "line", 0),
                     description=(
                         report_text(extra, "message", "")
