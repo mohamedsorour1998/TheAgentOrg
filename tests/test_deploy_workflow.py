@@ -1,0 +1,1026 @@
+"""Pins the deploy and terraform workflows' blast radius.
+
+Owner: Sorour (Task 6). These two workflows are the only files in this
+repository that can spend money or mutate live AWS infrastructure. They cannot
+be proven on the authoring machine -- proving them means pushing to `main` and
+letting them run -- so these tests pin the properties whose violation would
+either leak a credential or fire a billable deploy by accident.
+
+WHAT THESE WORKFLOWS MAKE WORSE, which is what these tests are actually about
+----------------------------------------------------------------------------
+Before them, NO workflow here could touch AWS. ci.yml holds `contents: read` and
+nothing else, and its test job sets LLM_DISABLED precisely because the runner has
+no credentials. deploy.yml and terraform.yml introduce hazards that did not
+previously exist anywhere in the repo:
+
+1. `id-token: write` -- the permission that lets a job mint an OIDC token and
+   assume an IAM role. Any job holding it can reach account 339712964409.
+2. An assumption of `github-actions-role`, which is SHARED with other
+   repositories' CI (docs/plan/week1-verification-log.md:21-30). Editing that
+   role from here would break someone else's pipeline.
+3. `workflow_dispatch` -- once these files are on the default branch, one click
+   is a real deploy.
+4. Billable CREATEs: images pushed to five ECR repositories and five AgentCore
+   runtimes configured and launched.
+
+So these tests are not "is the YAML valid". They are: does the credential surface
+stay closed, does `id-token: write` stay off ci.yml and off any workflow's top
+level, is `terraform apply` gated to main, and does no step edit the shared role.
+
+WHAT THESE TESTS DO NOT AND CANNOT CLAIM
+----------------------------------------
+They do NOT claim the deploy works. As of this commit the OIDC role assumption
+FAILS: GitHub issues an immutable subject claim carrying numeric IDs
+(`repo:mohamedsorour1998@<id>/TheAgentOrg@<id>:ref:refs/heads/main`) which the
+role's `repo:mohamedsorour1998/TheAgentOrg:*` trust condition cannot match. That
+needs a trust-policy addition on a role shared with other repositories, so it is
+escalated, not worked around. Every test here asserts STRUCTURE. A test implying
+these workflows currently run green would be a false claim; terraform.yml's own
+comment block documents the same diagnosis.
+
+WHY THESE PARSE THE YAML INSTEAD OF GREPPING IT
+-----------------------------------------------
+A substring assertion over a whole workflow file can be satisfied by that file's
+own comments, and these files are heavily commented. Two measured examples:
+
+  * `id-token: write` appears on 3 lines of deploy.yml, only TWO of which are
+    the actual permission -- the rest is prose. So `"id-token: write" in text`
+    stays green after a permission is deleted from a job.
+  * deploy.yml:7-8 reads "do not add an AWS_ACCESS_KEY_ID secret". A test
+    asserting that string is ABSENT from the file therefore fails on the comment
+    forbidding it -- the inverse defect, a test that can only ever fail.
+
+Task 5 hit exactly this trap: three mutations escaped tests that matched prose,
+and the fix was to parse the file as data. So everything here loads the document
+and asserts on the parsed structure -- which is why the credential tests read
+each step's `with:` inputs and each `env:` mapping rather than the file text. The
+one test that reads raw text
+(test_no_workflow_contains_a_key_shaped_string_outside_the_aws_example) says why
+it must, and cannot be satisfied by prose: it matches a key SHAPE that no comment
+here contains.
+
+THE `on:` TRAP: YAML 1.1 resolves the unquoted key `on` to the BOOLEAN True, so
+`doc["on"]` raises KeyError and `"on" in doc` is False. GitHub Actions does not
+read it that way. `_triggers()` goes through True, and
+test_the_on_key_is_the_yaml_boolean_trap_not_the_string pins the trap itself so
+nobody "fixes" the accessor into something that silently reads nothing.
+
+NO LIVE AWS. Nothing here runs aws, terraform, docker, agentcore or git push. The
+only subprocesses are actionlint and shellcheck over local files.
+"""
+
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+DEPLOY = WORKFLOWS / "deploy.yml"
+TERRAFORM = WORKFLOWS / "terraform.yml"
+CI = WORKFLOWS / "ci.yml"
+
+# Every workflow in the repository, so a newly added one is covered by the
+# repo-wide credential tests without anyone remembering to list it here.
+ALL_WORKFLOWS = sorted(WORKFLOWS.glob("*.yml"))
+
+# The workflows allowed to reach AWS at all. A new workflow assuming a role must
+# be added here deliberately, which is the point.
+AWS_WORKFLOW_NAMES = {"deploy.yml", "terraform.yml"}
+
+# Read from docs/plan/week1-verification-log.md:11-30. Never recalled, never
+# re-derived from live AWS state -- Task 6 is forbidden from calling AWS at all.
+RECORDED_ACCOUNT = "339712964409"
+RECORDED_REGION = "us-east-1"
+RECORDED_OIDC_ROLE_ARN = "arn:aws:iam::339712964409:role/github-actions-role"
+RECORDED_RUNTIME_ROLE_ARN = (
+    "arn:aws:iam::339712964409:role/theagentorg-shared-agentcore-runtime-role"
+)
+RECORDED_ECR_PREFIX = "theagentorg-shared"
+
+# The five agents. Runtime names use UNDERSCORES (theagentorg_planner); the ECR
+# repositories use HYPHENS (theagentorg-shared-planner-agent). Two namespaces,
+# and conflating them is a real failure mode -- see
+# test_the_two_naming_namespaces_are_not_conflated.
+AGENTS = ["planner", "developer", "reviewer", "security", "sre"]
+
+# The credential inputs of aws-actions/configure-aws-credentials that take a
+# long-lived key. The entire point of Task 6 is that none of these ever appears.
+STATIC_KEY_INPUTS = (
+    "aws-access-key-id",
+    "aws-secret-access-key",
+    "aws-session-token",
+)
+KEY_ENV_NAMES = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
+
+
+def _doc(path):
+    """Parse a workflow to a dict. safe_load, so no tag can execute anything."""
+    return yaml.safe_load(path.read_text())
+
+
+def _triggers(path):
+    """The parsed `on:` mapping.
+
+    Keyed on the BOOLEAN True, not the string "on": YAML 1.1 resolves the
+    unquoted key `on` to a bool, so path["on"] raises KeyError. Asserting the
+    key's presence here means a future rename cannot make this return an empty
+    dict and take every trigger test green with it.
+    """
+    doc = _doc(path)
+    assert True in doc, f"{path.name} has no `on:` block (YAML 1.1 bool key)"
+    return doc[True]
+
+
+def _jobs(path):
+    doc = _doc(path)
+    assert "jobs" in doc, f"{path.name} has no `jobs:` block"
+    return doc["jobs"]
+
+
+def _job(path, name):
+    jobs = _jobs(path)
+    assert name in jobs, f"{path.name} jobs are {sorted(jobs)}, expected {name!r}"
+    return jobs[name]
+
+
+def _steps(job):
+    steps = job.get("steps")
+    assert steps, "job has no steps"
+    return steps
+
+
+def _run_scripts(job):
+    """Every `run:` body in one job, as a list of strings."""
+    return [s["run"] for s in _steps(job) if "run" in s]
+
+
+def _all_run_scripts(path):
+    """Every `run:` body in every job of a workflow."""
+    out = []
+    for job in _jobs(path).values():
+        out.extend(s["run"] for s in (job.get("steps") or []) if "run" in s)
+    return out
+
+
+def _resolve_env(path, text):
+    """Substitute ${{ env.NAME }} from a workflow's top-level env block.
+
+    GitHub does this before anything runs, so tests comparing ARNs have to do it
+    too -- otherwise they can only assert on the unexpanded template and would go
+    green precisely when someone stopped using the env block. An expression
+    naming a key the env block does not define is left untouched, so it fails the
+    comparison loudly instead of silently resolving to an empty string.
+    """
+    env = _doc(path).get("env") or {}
+    return re.sub(
+        r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        lambda m: str(env[m.group(1)]) if m.group(1) in env else m.group(0),
+        text,
+    )
+
+
+def _credential_steps(path):
+    """(job_name, step) for every configure-aws-credentials step in a workflow."""
+    found = []
+    for job_name, job in _jobs(path).items():
+        for step in job.get("steps") or []:
+            if "configure-aws-credentials" in str(step.get("uses", "")):
+                found.append((job_name, step))
+    return found
+
+
+# --------------------------------------------------------------------------
+# The files parse at all. Everything below depends on this, so it fails first.
+# --------------------------------------------------------------------------
+
+
+def test_the_deploy_and_terraform_workflows_exist():
+    assert DEPLOY.is_file(), f"{DEPLOY} is missing"
+    assert TERRAFORM.is_file(), f"{TERRAFORM} is missing"
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_every_workflow_is_parseable_yaml_with_a_name_and_jobs(path):
+    doc = _doc(path)
+    assert isinstance(doc, dict), f"{path.name} parsed as {type(doc).__name__}"
+    assert doc.get("name"), f"{path.name} has no top-level name"
+    assert doc.get("jobs"), f"{path.name} has no jobs"
+
+
+def test_the_on_key_is_the_yaml_boolean_trap_not_the_string():
+    """Pins the trap, so nobody rewrites _triggers() into a silent no-op.
+
+    If a future PyYAML or a quoted `"on":` key changes this, the accessor above
+    must change too -- and this test is what says so out loud rather than letting
+    every trigger assertion below quietly stop reading anything.
+    """
+    doc = _doc(DEPLOY)
+    assert True in doc, "`on:` no longer parses as the boolean True"
+    assert "on" not in doc, "`on:` now parses as the string 'on'; update _triggers()"
+
+
+# --------------------------------------------------------------------------
+# HAZARD 1 -- no static AWS credentials, in ANY workflow. The point of the task.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_no_step_in_any_workflow_passes_a_static_aws_key(path):
+    """Structural, not textual: reads each step's `with:` inputs as data.
+
+    A grep for "aws-access-key-id" would be satisfied by deploy.yml's own header
+    comment forbidding it, which is the inverse defect -- a test that can only
+    ever fail.
+    """
+    for job_name, job in _jobs(path).items():
+        for step in job.get("steps") or []:
+            with_inputs = step.get("with") or {}
+            for forbidden in STATIC_KEY_INPUTS:
+                assert forbidden not in with_inputs, (
+                    f"{path.name} job {job_name} step "
+                    f"{step.get('name') or step.get('uses')!r} passes {forbidden}; "
+                    "every AWS step must assume the role via OIDC"
+                )
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_no_workflow_reads_an_aws_key_from_env_or_a_secret(path):
+    """The other half: a key can arrive through env or a secrets expression.
+
+    Checks the workflow-level env, every job env, every step env, and every run
+    body for the names a static-key setup would use.
+    """
+    doc = _doc(path)
+    scopes = [("workflow env", doc.get("env") or {})]
+    for job_name, job in _jobs(path).items():
+        scopes.append((f"job {job_name} env", job.get("env") or {}))
+        for step in job.get("steps") or []:
+            label = f"job {job_name} step {step.get('name') or step.get('uses')!r} env"
+            scopes.append((label, step.get("env") or {}))
+
+    for label, mapping in scopes:
+        for name in KEY_ENV_NAMES:
+            assert name not in mapping, f"{path.name} {label} defines {name}; OIDC only"
+
+    for script in _all_run_scripts(path):
+        for name in KEY_ENV_NAMES:
+            assert name not in script, f"{path.name} run body references {name}; OIDC only"
+        assert "secrets.AWS" not in script, (
+            f"{path.name} run body reads an AWS secret; OIDC needs none"
+        )
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_no_workflow_contains_a_key_shaped_string_outside_the_aws_example(path):
+    """RAW TEXT on purpose -- a leaked key in a COMMENT is still a leaked key.
+
+    This is the one property where parsed structure is the wrong altitude:
+    comments do not survive parsing, and a pasted key would sit in one. The regex
+    is AWS's access-key-id shape; AKIAIOSFODNN7EXAMPLE is AWS's own published
+    example and is the only permitted match.
+    """
+    found = set(re.findall(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", path.read_text()))
+    assert found <= {"AKIAIOSFODNN7EXAMPLE"}, f"key-shaped strings in {path.name}: {sorted(found)}"
+
+
+def test_ci_yml_never_gains_an_aws_credential_step():
+    """ci.yml runs on every pull_request. It must stay credential-free.
+
+    deploy.yml must not have been made to work by loosening the workflow that
+    untrusted PR code can reach.
+    """
+    assert not _credential_steps(CI), "ci.yml now assumes an AWS role; it is PR-triggered"
+    assert _doc(CI).get("permissions") == {"contents": "read"}, (
+        f"ci.yml top-level permissions changed to {_doc(CI).get('permissions')!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# HAZARD 2 -- id-token: write. Narrowest scope, never at top level, never on ci.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_id_token_write_is_never_granted_at_a_workflow_top_level(path):
+    """Scope it to the jobs that need it.
+
+    A top-level grant hands token-minting to every job anyone later adds to the
+    file, which is how a lint job ends up able to assume a shared deploy role.
+    """
+    top = _doc(path).get("permissions") or {}
+    assert top.get("id-token") != "write", (
+        f"{path.name} grants id-token: write at the top level; move it to the job that needs it"
+    )
+
+
+def test_ci_yml_never_gains_id_token_write():
+    """Checked at top level AND per job.
+
+    ci.yml runs on every pull_request, so granting it id-token: write would let
+    PR-triggered code mint a token for the shared role.
+    """
+    top = _doc(CI).get("permissions") or {}
+    assert "id-token" not in top, f"ci.yml top-level permissions gained id-token: {top!r}"
+    for job_name, job in _jobs(CI).items():
+        perms = job.get("permissions") or {}
+        assert "id-token" not in perms, f"ci.yml job {job_name} gained id-token: {perms!r}"
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_only_jobs_that_assume_a_role_hold_id_token_write(path):
+    """The converse of the tests above, and the one that catches drift.
+
+    A job holding id-token: write without a credential step is an unused
+    capability on a shared role -- and a job with a credential step but no
+    id-token: write simply cannot authenticate. Both are defects; this asserts
+    the two sets match exactly.
+    """
+    with_token = {
+        name
+        for name, job in _jobs(path).items()
+        if (job.get("permissions") or {}).get("id-token") == "write"
+    }
+    with_creds = {name for name, _ in _credential_steps(path)}
+    assert with_token == with_creds, (
+        f"{path.name}: jobs with id-token: write are {sorted(with_token)}, "
+        f"jobs assuming a role are {sorted(with_creds)}; these must match"
+    )
+
+
+def test_every_workflow_that_reaches_aws_is_one_we_expect():
+    """A new AWS-touching workflow should be a deliberate decision, not a surprise."""
+    reaching = {p.name for p in ALL_WORKFLOWS if _credential_steps(p)}
+    assert reaching == AWS_WORKFLOW_NAMES, (
+        f"workflows assuming an AWS role are {sorted(reaching)}, "
+        f"expected {sorted(AWS_WORKFLOW_NAMES)}"
+    )
+
+
+# --------------------------------------------------------------------------
+# HAZARD 3 -- the triggers. Every widening costs money or risks a mutation.
+# --------------------------------------------------------------------------
+
+
+def test_the_deploy_trigger_is_a_filtered_push_to_main_plus_manual_dispatch():
+    """Compared as data, and by set equality rather than containment.
+
+    Containment would let someone add `pull_request:` -- which would deploy from
+    any PR, including a fork's -- while staying green.
+    """
+    triggers = _triggers(DEPLOY)
+    assert set(triggers) == {"push", "workflow_dispatch"}, (
+        f"deploy.yml triggers are {sorted(str(k) for k in triggers)}"
+    )
+    assert triggers["push"].get("branches") == ["main"], (
+        f"deploy push branches is {triggers['push'].get('branches')!r}; "
+        "a wider filter deploys from feature branches"
+    )
+    paths = triggers["push"].get("paths")
+    assert paths, "deploy.yml push has no paths filter; every push to main would redeploy"
+    assert "agentorg/**" in paths or "agentorg/agents/**" in paths, (
+        f"deploy paths {paths!r} does not cover the agent sources"
+    )
+
+
+@pytest.mark.parametrize("path", [DEPLOY, TERRAFORM], ids=["deploy", "terraform"])
+def test_no_aws_workflow_fires_on_an_untrusted_or_unattended_event(path):
+    """pull_request_target runs with repository secrets against a fork's code.
+
+    `schedule` would deploy unattended. deploy.yml must not fire on any
+    pull_request event at all; terraform.yml deliberately does, which the
+    dedicated test below covers by requiring apply to be gated.
+    """
+    triggers = _triggers(path)
+    for event in ("pull_request_target", "schedule", "repository_dispatch"):
+        assert event not in triggers, (
+            f"{path.name} fires on {event}; that is unattended or untrusted"
+        )
+
+
+def test_the_deploy_workflow_does_not_fire_on_pull_requests_at_all():
+    """A deploy is billable and hard to reverse; a plan is neither."""
+    assert "pull_request" not in _triggers(DEPLOY), (
+        "deploy.yml fires on pull_request; that deploys from unmerged code"
+    )
+
+
+def test_terraform_apply_is_gated_to_main_and_never_runs_on_a_pull_request():
+    """terraform.yml DOES run on pull_request, which is correct for plan.
+
+    The whole safety of that choice rests on `apply` carrying an `if:` that
+    excludes PR events. Without it, opening a PR would mutate live
+    infrastructure. This asserts the guard names both conditions.
+    """
+    guard = _job(TERRAFORM, "apply").get("if")
+    assert guard, "terraform.yml apply has no `if:` guard; a PR could apply"
+    assert "refs/heads/main" in guard, f"apply guard does not pin main: {guard!r}"
+    assert "pull_request" in guard, f"apply guard does not exclude pull_request: {guard!r}"
+
+
+def test_the_deploy_workflow_serialises_concurrent_runs_without_cancelling():
+    """Two deploys racing would push the same tags and configure the same runtimes.
+
+    Cancelling mid-deploy is worse than queueing: it can leave images pushed and
+    runtimes half-configured. So cancel-in-progress must be false, not absent.
+    """
+    concurrency = _doc(DEPLOY).get("concurrency")
+    assert concurrency, "deploy.yml has no concurrency group; two deploys could race"
+    assert concurrency.get("cancel-in-progress") is False, (
+        f"cancel-in-progress is {concurrency.get('cancel-in-progress')!r}; "
+        "a cancelled deploy can leave runtimes half-configured"
+    )
+
+
+# --------------------------------------------------------------------------
+# HAZARD 4 -- the shared role is consumed, never modified.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [DEPLOY, TERRAFORM], ids=["deploy", "terraform"])
+def test_every_credential_step_assumes_the_recorded_role_by_arn(path):
+    """Resolves ${{ env.* }} the way GitHub would, then compares whole ARNs.
+
+    These workflows write `role-to-assume: ${{ env.AWS_ROLE }}`, so asserting the
+    literal account appears in that string would be asserting a property the file
+    never had -- it would only pass if someone inlined the ARN and stopped using
+    the env block. Resolving first means this tracks what actually reaches AWS.
+    """
+    steps = _credential_steps(path)
+    assert steps, f"{path.name} has no configure-aws-credentials step"
+    for job_name, step in steps:
+        assert str(step["uses"]).endswith("@v4"), (
+            f"{path.name} job {job_name} action is not pinned: {step['uses']!r}"
+        )
+        with_inputs = step.get("with") or {}
+        role = _resolve_env(path, with_inputs.get("role-to-assume", ""))
+        assert role == RECORDED_OIDC_ROLE_ARN, (
+            f"{path.name} job {job_name} role-to-assume resolves to {role!r}, "
+            f"recorded is {RECORDED_OIDC_ROLE_ARN!r}"
+        )
+        region = _resolve_env(path, with_inputs.get("aws-region", ""))
+        assert region == RECORDED_REGION, f"{path.name} job {job_name} region is {region!r}"
+
+
+@pytest.mark.parametrize("path", [DEPLOY, TERRAFORM], ids=["deploy", "terraform"])
+@pytest.mark.parametrize(
+    "mutating",
+    [
+        "aws iam create",
+        "aws iam put-role-policy",
+        "aws iam attach-role-policy",
+        "aws iam update-assume-role-policy",
+        "aws iam delete",
+        "aws iam detach-role-policy",
+    ],
+)
+def test_no_step_mutates_the_shared_role(path, mutating):
+    """`github-actions-role` is shared with other repositories' CI.
+
+    Editing its trust policy or attached policies from here would break a
+    pipeline nobody in this repo can see. Both workflows consume it only.
+    """
+    for script in _all_run_scripts(path):
+        assert mutating not in script, (
+            f"{path.name} run body invokes {mutating!r}; the shared role is consume-only"
+        )
+
+
+def test_the_deploy_workflow_runs_no_terraform_at_all():
+    """Separation of concerns, and a blast-radius boundary.
+
+    terraform.yml owns infrastructure and gates apply behind a main-only `if:`.
+    A `terraform apply` smuggled into deploy.yml would inherit deploy's trigger
+    instead, bypassing that gate entirely.
+    """
+    for script in _all_run_scripts(DEPLOY):
+        assert "terraform " not in script, (
+            "deploy.yml runs terraform; apply's main-only gate lives in terraform.yml"
+        )
+
+
+def test_the_runtime_role_passed_to_agentcore_is_the_recorded_arn():
+    """A wrong execution role either fails or grants the runtime someone else's."""
+    configure = [s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s]
+    assert configure, "no agentcore configure step in deploy.yml"
+    for script in configure:
+        resolved = _resolve_env(DEPLOY, script)
+        match = re.search(r"--execution-role\s+\"?([^\s\"\\]+)", resolved)
+        assert match, f"no --execution-role in the configure step: {resolved!r}"
+        assert match.group(1) == RECORDED_RUNTIME_ROLE_ARN, (
+            f"--execution-role is {match.group(1)!r}, recorded is {RECORDED_RUNTIME_ROLE_ARN!r}"
+        )
+
+
+# --------------------------------------------------------------------------
+# The deploy being able to work at all: the five agents, the image, the deps.
+# --------------------------------------------------------------------------
+
+
+def test_every_agent_loop_in_the_deploy_workflow_covers_all_five_agents():
+    """EVERY loop, not just the first one. Measured: deploy.yml has four.
+
+    They build the tag list, verify the pushed images, configure-and-launch, and
+    check status. A mutation dropping `sre` from any ONE of them leaves the others
+    intact -- so `re.search` (first match only) reported that mutation as caught
+    when it was not. This uses re.findall and asserts on all four, which is what
+    makes the test able to fail wherever the drift happens.
+
+    Both directions matter: every agent this repo has must be deployed, and no
+    loop may name a sixth that does not exist.
+    """
+    scripts = "\n".join(_all_run_scripts(DEPLOY))
+    loops = re.findall(r"for agent in ([a-z ]+); do", scripts)
+    assert loops, "no agent loop found in deploy.yml run bodies"
+    for i, loop in enumerate(loops):
+        assert loop.split() == AGENTS, (
+            f"deploy.yml agent loop {i} covers {loop.split()}, expected {AGENTS}"
+        )
+    # A loop that stops being reached is as bad as one that lost an agent, so pin
+    # the count too -- re-measured from this file, not carried forward.
+    assert len(loops) == 4, f"expected 4 agent loops in deploy.yml, found {len(loops)}"
+
+
+@pytest.mark.parametrize("agent", AGENTS)
+def test_every_deployed_agent_has_a_module_the_server_can_dispatch_to(agent):
+    """The containers serve agentorg/agents/server.py, which selects by AGENT_ROLE.
+
+    A runtime deployed for an agent the server cannot dispatch would start and
+    then fail every invocation -- READY, and useless.
+    """
+    module = REPO_ROOT / "agentorg" / "agents" / f"{agent}.py"
+    assert module.is_file(), f"{module} does not exist but deploy.yml deploys it"
+    server = (REPO_ROOT / "agentorg" / "agents" / "server.py").read_text()
+    assert f'"{agent}"' in server, f"server.py has no AGENT_ROLE entry for {agent}"
+
+
+def test_the_server_entrypoint_exists_and_requires_an_explicit_agent_role():
+    """The gap Task 5 reported is closed, and closed the safe way.
+
+    The five agents were library functions with no `__main__`, so
+    `agentcore configure` had nothing to invoke. server.py is that entrypoint.
+    AGENT_ROLE must RAISE when unset rather than defaulting: a container that
+    silently defaulted to one agent would serve the wrong agent's results under
+    another's runtime name, which is indistinguishable from a correct deploy
+    until someone reads the output.
+    """
+    server = REPO_ROOT / "agentorg" / "agents" / "server.py"
+    assert server.is_file(), (
+        "agentorg/agents/server.py is missing; the containers have no entrypoint"
+    )
+    text = server.read_text()
+    assert "AGENT_ROLE" in text, "server.py does not read AGENT_ROLE"
+    assert "/invocations" in text and "/ping" in text, (
+        "server.py does not serve the AgentCore HTTP contract (/invocations, /ping)"
+    )
+
+
+def test_every_agent_gets_its_role_from_the_environment_not_from_the_image():
+    """One image, five tags, five AGENT_ROLE values.
+
+    If configure stopped passing AGENT_ROLE, all five runtimes would run whatever
+    the image defaults to -- five runtimes serving one agent, all reporting READY.
+    """
+    configure = "\n".join(s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s)
+    assert "AGENT_ROLE=" in configure, (
+        "configure does not pass AGENT_ROLE; all five runtimes would be identical"
+    )
+
+
+def test_the_dockerfile_the_workflow_builds_actually_exists():
+    """A --file pointing at a moved Dockerfile fails after OIDC and ECR login.
+
+    This repo has TWO Dockerfiles (agentorg/agents/ and infra/agentcore/), so the
+    path the workflow names is a real choice and not a formality.
+    """
+    scripts = "\n".join(_all_run_scripts(DEPLOY))
+    match = re.search(r"--file\s+(\S+)", scripts)
+    assert match, "the build step names no --file"
+    dockerfile = REPO_ROOT / match.group(1)
+    assert dockerfile.is_file(), f"--file {match.group(1)} does not exist at {dockerfile}"
+
+
+def test_the_image_is_built_for_arm64_because_agentcore_runs_arm64():
+    """The runner is amd64.
+
+    Without an explicit platform the image builds, pushes and deploys, then dies
+    at startup with an exec format error -- a failure that appears only after
+    everything expensive has already succeeded.
+    """
+    scripts = "\n".join(_all_run_scripts(DEPLOY))
+    assert "linux/arm64" in scripts, "the build does not target linux/arm64"
+    uses = [
+        str(s.get("uses", ""))
+        for job in _jobs(DEPLOY).values()
+        for s in (job.get("steps") or [])
+    ]
+    assert any("setup-qemu-action" in u for u in uses), (
+        "no QEMU setup step; a cross-platform arm64 build on an amd64 runner needs it"
+    )
+
+
+def test_the_requirements_file_the_image_installs_exists_and_is_pinned():
+    """That file, NOT pyproject.toml, is the pinned source of truth for the image.
+
+    An unpinned line would let an image built in September contain different code
+    from the one demonstrated in August, which is the whole reason it is pinned.
+    """
+    requirements = REPO_ROOT / "agentorg" / "agents" / "requirements.txt"
+    assert requirements.is_file(), f"{requirements} is missing; the image build would fail"
+
+    dockerfile = REPO_ROOT / "agentorg" / "agents" / "Dockerfile"
+    assert "agentorg/agents/requirements.txt" in dockerfile.read_text(), (
+        "the Dockerfile does not install agentorg/agents/requirements.txt"
+    )
+
+    lines = [
+        line.strip()
+        for line in requirements.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert lines, "requirements.txt declares nothing"
+    unpinned = [line for line in lines if "==" not in line]
+    assert not unpinned, f"unpinned requirement lines: {unpinned}"
+
+
+def test_the_two_naming_namespaces_are_not_conflated():
+    """Runtime names use underscores; ECR repositories use hyphens.
+
+    theagentorg_planner is a runtime; theagentorg-shared-planner-agent is a
+    repository. Getting one where the other belongs fails late and reads as an
+    AWS problem rather than a naming problem.
+    """
+    scripts = "\n".join(_all_run_scripts(DEPLOY))
+    assert "theagentorg_${agent}" in scripts, "runtime names are not built with an underscore"
+    env = _doc(DEPLOY).get("env") or {}
+    assert env.get("ECR_PREFIX") == RECORDED_ECR_PREFIX, (
+        f"ECR_PREFIX is {env.get('ECR_PREFIX')!r}, recorded is {RECORDED_ECR_PREFIX!r}"
+    )
+    assert "theagentorg_shared" not in scripts, (
+        "an ECR repository name was written with underscores"
+    )
+
+
+def test_images_are_tagged_with_the_commit_sha_not_only_latest():
+    """`latest` cannot tell you which commit is running.
+
+    Asserting `"github.sha" in scripts` was too weak to fail: deploy.yml
+    references github.sha in five places, so deleting it from the BUILD step's
+    tag list left the test green while every image became :latest only. This
+    asserts on the tag list specifically, and on the runtime being pinned to the
+    SHA tag rather than to latest -- a redeploy must be reproducible instead of
+    resolving to whatever `latest` happened to be.
+    """
+    build_steps = [s for s in _run_scripts(_job(DEPLOY, "build")) if "--tag" in s]
+    assert build_steps, "no build step assembles image tags"
+    for script in build_steps:
+        tag_lines = [line for line in script.splitlines() if "--tag" in line]
+        assert any("github.sha" in line or "${sha}" in line for line in tag_lines), (
+            f"no image tag carries the commit SHA: {tag_lines}"
+        )
+
+    launch = "\n".join(s for s in _all_run_scripts(DEPLOY) if "agentcore configure" in s)
+    assert "${{ github.sha }}" in launch or "${sha}" in launch, (
+        "the runtime is not pinned to the SHA-tagged image; it would deploy :latest"
+    )
+
+
+def test_the_env_block_holds_the_recorded_identifiers():
+    """Everything downstream interpolates these, so a typo here is a typo in
+    every ARN and registry path the workflow builds.
+    """
+    env = _doc(DEPLOY).get("env") or {}
+    assert env.get("AWS_REGION") == RECORDED_REGION, f"AWS_REGION is {env.get('AWS_REGION')!r}"
+    assert env.get("AWS_ROLE") == RECORDED_OIDC_ROLE_ARN, f"AWS_ROLE is {env.get('AWS_ROLE')!r}"
+    assert env.get("RUNTIME_ROLE") == RECORDED_RUNTIME_ROLE_ARN, (
+        f"RUNTIME_ROLE is {env.get('RUNTIME_ROLE')!r}"
+    )
+
+
+# --------------------------------------------------------------------------
+# Failures must be reported, not swallowed. The expensive defect class.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [DEPLOY, TERRAFORM], ids=["deploy", "terraform"])
+def test_every_run_body_containing_a_pipe_sets_pipefail(path):
+    """Scoped to pipes, because that is the gap the runner does NOT close for you.
+
+    Measured on this machine rather than assumed:
+
+      * GitHub's default shell is `bash -e {0}`, so a bare failing command
+        already fails the step. Probe: a script whose middle command is `false`
+        exits 1 under `bash -e` and 0 under plain `bash`.
+      * `-e` does NOT imply pipefail. Probe: `false | cat` exits 0 under
+        `bash -e`, and 1 only with `set -o pipefail`.
+
+    So a multi-line body without `set -euo pipefail` is a style inconsistency,
+    while a body that PIPES without pipefail silently discards the exit status of
+    every command but the last. That is where the property is load-bearing, so
+    that is what this asserts -- requiring `set -euo pipefail` on every
+    multi-line body instead would have flagged deploy.yml's preflight step,
+    which contains no pipe at all and where pipefail therefore changes nothing.
+    """
+    for job_name, job in _jobs(path).items():
+        for step in _steps(job):
+            script = step.get("run")
+            if not script or "|" not in script:
+                continue
+            # `||` is not a pipe, and `<<<"$x"` is a herestring, not a pipeline.
+            piped = [
+                line
+                for line in script.splitlines()
+                if re.search(r"(?<!\|)\|(?!\|)", line) and not line.strip().startswith("#")
+            ]
+            if not piped:
+                continue
+            assert "set -o pipefail" in script or "set -euo pipefail" in script, (
+                f"{path.name} job {job_name} step {step.get('name')!r} pipes without "
+                f"pipefail, so a failure in {piped[0].strip()!r} would be discarded"
+            )
+
+
+def test_no_configure_or_launch_step_swallows_its_failure():
+    """`|| true` on a configure or launch is the one outcome the task forbids:
+    reporting a deploy that did not happen.
+
+    Narrowly scoped to the commands that MUTATE. `agentcore status` legitimately
+    uses `|| true` -- it captures output from a command expected to fail while a
+    runtime is absent, then greps for READY and sets failed=1, so the failure is
+    still reported. Asserting no `|| true` anywhere would flag that correct usage;
+    scoping it to mutating commands catches the defect that actually matters.
+    """
+    mutating_commands = ("agentcore configure", "agentcore launch", "docker buildx", "aws ecr put")
+    for script in _all_run_scripts(DEPLOY):
+        for line in script.splitlines():
+            if "|| true" not in line:
+                continue
+            for mutating in mutating_commands:
+                assert mutating not in line, (
+                    f"a mutating command swallows its failure: {line.strip()!r}"
+                )
+
+
+def test_the_status_check_fails_the_job_when_a_runtime_is_not_ready():
+    """The `|| true` above only stays safe because the loop reports separately.
+
+    If the final `[ "$failed" = "0" ]` were dropped, the step would print
+    ::error:: lines and still exit 0 -- an honest-looking log on a green run,
+    which is worse than a red one.
+    """
+    status = [s for s in _all_run_scripts(DEPLOY) if "agentcore status" in s]
+    assert status, "no status step; a deploy could report success with nothing READY"
+    for script in status:
+        assert "failed=1" in script, "the status loop never records a failure"
+        assert '[ "$failed" = "0" ]' in script, (
+            "the status step never asserts on the failure flag; "
+            "it would exit 0 while printing errors"
+        )
+
+
+def test_the_smoke_invoke_asserts_on_response_content_not_just_exit_status():
+    """A runtime returning 200 with an empty body exits 0.
+
+    "The call succeeded" is exactly the reassuring non-answer this project keeps
+    having to distinguish from a real completion.
+
+    Two escapes drove the current shape. `any("tasks" in s ...)` matched the word
+    inside the step's own ::error:: message ("planner returned no tasks"), so
+    replacing the real `grep -q '"tasks"'` with `true` stayed green -- and so did
+    deleting the invoke step outright, because the assertion only ran `if invoke`.
+    Now the presence of an invoke is asserted unconditionally, and the content
+    check must be a real grep against the captured output.
+    """
+    steps = [
+        step
+        for step in _steps(_job(DEPLOY, "deploy"))
+        if "agentcore invoke" in (step.get("run") or "")
+    ]
+    assert steps, "nothing invokes a runtime; READY is not the same as working"
+
+    for step in steps:
+        # A step disabled by `if: false` -- or by any condition -- is not a smoke
+        # test. Deleting the invoke by neutralising it must fail this, which an
+        # earlier version missed because it only looked at run-body text.
+        assert "if" not in step, (
+            f"the invoke step is conditional ({step.get('if')!r}); "
+            "a smoke test that can skip itself proves nothing"
+        )
+        assert re.search(r"grep\s+-q[a-z]*\s+'\"tasks\"'", step["run"]), (
+            "the invoke step does not grep the response for a real result field; "
+            "exit status alone cannot distinguish a completion from an empty 200"
+        )
+
+
+def test_the_preflight_job_runs_before_anything_billable_and_needs_no_credentials():
+    """It fails the run before any image is built if packaging regressed.
+
+    It must also hold NO id-token: write -- a credential-free check that gained
+    one would be a credential surface for no reason.
+    """
+    preflight = _job(DEPLOY, "preflight")
+    perms = preflight.get("permissions") or {}
+    assert "id-token" not in perms, f"preflight gained id-token: {perms!r}"
+
+    build = _job(DEPLOY, "build")
+    assert "preflight" in (build.get("needs") or []), (
+        f"build does not need preflight: {build.get('needs')!r}"
+    )
+    deploy_job = _job(DEPLOY, "deploy")
+    assert "build" in (deploy_job.get("needs") or []), (
+        f"deploy does not need build: {deploy_job.get('needs')!r}"
+    )
+
+
+def test_the_preflight_check_imports_from_outside_the_source_tree():
+    """`cd /tmp` is load-bearing, not tidiness.
+
+    From the repo root, `import agentorg` finds ./agentorg whether or not the
+    install shipped it -- so the check would pass against the broken packaging
+    declaration it exists to catch. This is the inverse-defect guard for that
+    check: without the cd, it asserts a property it cannot observe.
+    """
+    scripts = "\n".join(_run_scripts(_job(DEPLOY, "preflight")))
+    assert "cd /tmp" in scripts, (
+        "the preflight install check does not leave the source tree; "
+        "it would pass even with agentorg/agents missing from the wheel"
+    )
+    assert "pip install --quiet ." in scripts or "pip install ." in scripts, (
+        "the preflight check does not do a non-editable install"
+    )
+    assert "-e ." not in scripts, "the preflight install is editable; that cannot detect the defect"
+
+
+# --------------------------------------------------------------------------
+# House style carried over from ci.yml.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_every_job_in_every_workflow_has_a_sane_timeout(path):
+    """The default is 6 hours.
+
+    On workflows that bill for what they create, an unbounded job is the
+    expensive kind of hang.
+    """
+    for name, job in _jobs(path).items():
+        timeout = job.get("timeout-minutes")
+        assert isinstance(timeout, int) and timeout > 0, (
+            f"{path.name} job {name} has timeout-minutes={timeout!r}"
+        )
+        assert timeout <= 90, f"{path.name} job {name} may run {timeout} minutes"
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_every_action_is_pinned_to_a_major_version_not_a_branch(path):
+    """`@main` on a third-party action means its next commit runs here, with
+    whatever permissions the job holds -- on deploy.yml, a shared AWS role.
+    """
+    for job_name, job in _jobs(path).items():
+        for step in job.get("steps") or []:
+            uses = step.get("uses")
+            if not uses:
+                continue
+            assert "@" in uses, f"{path.name} job {job_name} uses {uses!r} with no version"
+            ref = str(uses).rsplit("@", 1)[1]
+            assert ref not in ("main", "master", "latest", "HEAD"), (
+                f"{path.name} job {job_name} pins {uses!r} to a moving ref"
+            )
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_python_is_pinned_to_the_same_version_everywhere(path):
+    """A deploy testing on a different Python than CI is a silent difference."""
+    for job_name, job in _jobs(path).items():
+        for step in job.get("steps") or []:
+            if "setup-python" not in str(step.get("uses", "")):
+                continue
+            version = (step.get("with") or {}).get("python-version")
+            assert version == "3.12", (
+                f"{path.name} job {job_name} uses python {version!r}; ci.yml uses 3.12"
+            )
+
+
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_every_workflow_names_an_owner_in_its_header(path):
+    """ci.yml's convention: the header block says who owns the file.
+
+    Checks the leading comment block rather than only line 1 -- deploy.yml puts
+    its title on line 1 and OWNER on line 2, which is equally readable.
+    """
+    header = []
+    for line in path.read_text().splitlines():
+        if not line.startswith("#"):
+            break
+        header.append(line)
+    assert any("OWNER:" in line for line in header), (
+        f"{path.name} header names no owner: {header[:3]}"
+    )
+
+
+# --------------------------------------------------------------------------
+# External validators. Skipped, never faked, when the binary is absent.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not on PATH")
+@pytest.mark.parametrize("path", ALL_WORKFLOWS, ids=lambda p: p.name)
+def test_actionlint_accepts_every_workflow(path):
+    """Keys on returncode, not on parsing actionlint's human output.
+
+    test_actionlint_can_actually_fail below proves this binary reports rather
+    than rubber-stamping -- an exit-0-always validator is worse than none.
+    """
+    result = subprocess.run(
+        ["actionlint", str(path)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"actionlint failed on {path.name}:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("actionlint") is None, reason="actionlint not on PATH")
+def test_actionlint_can_actually_fail(tmp_path):
+    """Proves the validator above is capable of reporting a problem.
+
+    Writes a workflow with an unquoted shell variable -- actionlint runs
+    shellcheck over `run:` bodies -- and requires a NON-zero exit. If this went
+    green-on-broken, the acceptance test above would prove nothing, which is the
+    harness failure mode this repo has hit twice.
+    """
+    bad = tmp_path / ".github" / "workflows" / "bad.yml"
+    bad.parent.mkdir(parents=True)
+    bad.write_text(
+        "name: bad\n"
+        "on: push\n"
+        "jobs:\n"
+        "  j:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          if [ $UNQUOTED = x ]; then echo hi; fi\n"
+    )
+    result = subprocess.run(
+        ["actionlint", str(bad)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        check=False,
+    )
+    assert result.returncode != 0, (
+        f"actionlint passed a workflow it should reject; it cannot report.\n{result.stdout}"
+    )
+
+
+@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not on PATH")
+def test_shellcheck_accepts_every_run_body_in_the_aws_workflows(tmp_path):
+    """actionlint already runs shellcheck, but only with its own default flags.
+
+    Running it directly, with each body wrapped in the `set -euo pipefail` the
+    workflow itself declares, checks the script as it will actually execute.
+    GitHub expands ${{ }} before the shell sees it, so those are substituted with
+    a plain token first -- shellcheck cannot parse the raw expression syntax.
+    """
+    checked = 0
+    for path in (DEPLOY, TERRAFORM):
+        for job_name, job in _jobs(path).items():
+            for i, step in enumerate(_steps(job)):
+                script = step.get("run")
+                if not script:
+                    continue
+                shell = re.sub(r"\$\{\{[^}]*\}\}", "EXPANDED", script)
+                target = tmp_path / f"{path.stem}_{job_name}_{i}.sh"
+                header = "" if "set -euo pipefail" in shell else "set -euo pipefail\n"
+                target.write_text("#!/usr/bin/env bash\n" + header + shell)
+                result = subprocess.run(
+                    ["shellcheck", str(target)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                assert result.returncode == 0, (
+                    f"shellcheck rejected {path.name} job {job_name} step {i}:\n{result.stdout}"
+                )
+                checked += 1
+    assert checked > 0, "no run bodies were checked; this test would pass vacuously"
+
+
+@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck not on PATH")
+def test_shellcheck_can_actually_fail(tmp_path):
+    """Same self-test, one level down: prove shellcheck reports."""
+    path = tmp_path / "bad.sh"
+    path.write_text("#!/usr/bin/env bash\nif [ $UNQUOTED = x ]; then echo hi; fi\n")
+    result = subprocess.run(
+        ["shellcheck", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "shellcheck passed a script it should reject"
