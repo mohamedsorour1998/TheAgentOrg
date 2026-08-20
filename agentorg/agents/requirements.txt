@@ -1,98 +1,46 @@
-# Runtime dependencies for the five AgentCore agent runtimes.
+# Runtime dependencies for the five AgentCore containers. OWNER: Sorour.
 #
-# AgentCore builds the image FROM THIS FILE (`agentcore configure -rf
-# requirements.txt`), so it is the only dependency declaration the deployed
-# container ever sees. pyproject.toml is not consulted by that build path.
+# Pinned, not floating. An AgentCore image built in September must contain the
+# same code as the one demonstrated in August, and `>=` does not promise that.
 #
-# WHY THIS IS NOT JUST THE SPEC'S THREE LINES
-# -------------------------------------------
-# docs/plan/mariam/week3.md:42-48 specifies three lines: strands-agents,
-# bedrock-agentcore, pydantic>=2. Those are a FLOOR, not the answer. A container
-# built from exactly those three lines dies at IMPORT, which is the same shape
-# as the packaging defect fixed in tests/test_packaging.py: green build,
-# invisible until runtime, discovered at the venue.
+# Every version below was read from `pip index versions <pkg>` on 2026-08-20,
+# not recalled. The first draft of this file guessed bedrock-agentcore==0.1.9;
+# the current release is 1.22.0, so the guess would have pinned an image
+# twenty-one minor versions behind and the error would have surfaced as a
+# runtime contract mismatch inside a container, which is the worst place to
+# find it.
 #
-# Every line below is justified by an import site read out of this tree, not
-# guessed. Verified with an AST walk over agentorg/**/*.py filtering
-# sys.stdlib_module_names, plus a sys.modules diff per agent entrypoint.
+# THE THREE LINES THE SPEC ASKED FOR ARE A FLOOR, NOT THE LIST. The week-3 spec
+# names strands-agents, bedrock-agentcore and pydantic>=2. Reconciled against
+# the actual import sites, that list builds an image that dies at import:
 #
-# PINNING: the house style pins a floor and excludes the next major
-# (pyproject.toml pins `ruff>=0.16,<0.17` and `setuptools>=61,<85`; CI pins
-# scanner versions). Each floor below is the version measured in .venv-sorour
-# via `pip list`, so the container gets what this project was actually tested
-# against; each ceiling excludes the next major so a future release cannot
-# silently change the runtime.
+#   agentorg/github_ops.py:32   from github import Auth, Github, GithubException
+#
+# That is module level and unconditional, and agentorg/graph.py:42 imports
+# github_ops, so any container that imports the graph needs PyGithub whether or
+# not it ever opens a PR. Omitting it reproduces exactly the defect Task 1 fixed
+# one layer up: a container that builds green and fails on import.
+#
+#   agentorg/common/llm.py:52   import boto3
+#
+# Lazy, inside the Bedrock handler, so an import-time smoke test would pass
+# without it and every model call would then fall back to the fixture. A runtime
+# whose whole purpose is to invoke Bedrock must not depend on that accident.
+#
+# flask is deliberately absent: it belongs to target_repo/, the demo's subject
+# repository, not to the agents.
 
-# --- The spec's three lines (the floor) ---
+# The agent framework.
+strands-agents==1.52.0
 
-# strands-agents: the agent framework.
-#   agentorg/common/llm.py:85       `from strands import Agent`
-#   agentorg/common/model.py:33     `from strands.models.bedrock import BedrockModel`
-#   agentorg/common/model.py:17     `from strands.models.openai import OpenAIModel`
-# All three are lazy (inside functions), so a missing strands fails at the first
-# model call rather than at import -- which on a runtime means a container that
-# reports healthy and then serves nothing but fixtures.
-strands-agents>=1.52.0,<2
+# AgentCore runtime SDK -- the HTTP contract agentorg/agents/server.py serves.
+bedrock-agentcore==1.22.0
 
-# bedrock-agentcore: the runtime SDK the AgentCore harness itself requires.
-#
-# DELIBERATELY UNPINNED, and this is the one exception to the pinning rule
-# above. Nothing in this tree imports it (`grep -rn "bedrock_agentcore"
-# agentorg/` returns nothing) and it is NOT installed in .venv-sorour, so no
-# version of it has ever been exercised by this project. `pip install --dry-run`
-# resolved it to 1.22.0 from the index, but a floor taken from a resolver run
-# rather than from a working deploy would assert compatibility nobody has
-# tested. The spec asks for the bare name; that is what this is.
-#
-# Pin it as `>=1.22.0,<2` once a deploy has actually succeeded against a real
-# version, and record which one in docs/plan/week1-verification-log.md.
-bedrock-agentcore
+# The frozen result contract in agentorg/state.py.
+pydantic==2.13.4
 
-# pydantic: every result model.
-#   agentorg/state.py:16            `from pydantic import BaseModel, Field`  (module-level, unconditional)
-#   agentorg/common/llm.py:33       `from pydantic import BaseModel, ValidationError`
-# state.py is on every agent's import path, so this one is not optional at any
-# layer. Floor kept at the spec's `>=2` rather than raised to the measured
-# 2.13.4: the spec names it explicitly, and v2 is the API boundary that matters.
-pydantic>=2,<3
+# Bedrock. Lazy-imported at llm.py:52; required in the image regardless.
+boto3==1.43.75
 
-# --- Additions measured from import sites (Ruling 13) ---
-
-# boto3: AWS / Bedrock credentials and the agentcore-control client.
-#   agentorg/common/llm.py:52       `import boto3`   (lazy, inside llm.available())
-#   agentorg/github_ops.py:396      `import boto3`   (lazy)
-#   agentorg/github_ops.py:419      `import boto3`   (lazy)
-# Lazy everywhere, so its absence is invisible at import and shows up as
-# "no credentials -> fixture" instead of an error. On a deployed runtime whose
-# entire purpose is to call Bedrock, that silent degradation is the worst
-# available outcome: the runtime answers, from fixtures, looking live.
-# Also supplies botocore (agentorg/github_ops.py:420
-# `from botocore.config import Config`), which is why botocore has no line of
-# its own -- it is boto3's own pinned dependency, not an independent one.
-boto3>=1.43.75,<2
-
-# PyGithub: provides the `github` module.
-#   agentorg/github_ops.py:35       `from github import Auth, Github, GithubException`
-# MODULE-LEVEL AND UNCONDITIONAL -- the one hard import in this list. And it is
-# reachable: agentorg/graph.py:42 does `from . import gates, github_ops, log`,
-# so anything that imports the graph imports PyGithub. Measured by sys.modules
-# diff: importing agentorg.graph pulls in `github`, while importing any single
-# agent module does not. A container missing this dies at import the moment
-# anything touches the graph, one layer above the packaging defect.
-PyGithub>=2.9.1,<3
-
-# --- Deliberately NOT here ---
-#
-# flask: pyproject.toml lists it, but no agent imports it. It exists for
-#   target_repo/ (the demo app under test), which is not in this image. Adding
-#   it would ship an unused web framework into all five runtimes.
-#   Ruled out by the AST walk: `flask` appears in NO import site under agentorg/.
-#
-# starlette: appears at agentorg/common/health.py:9, but inside a nested
-#   function of register_health(), and NOTHING imports agentorg.common.health --
-#   `grep -rn health agentorg/ tests/ scripts/` finds no importer, only prose.
-#   It is wiring for the FastMCP agent-server layer that does not exist yet
-#   (pyproject.toml:26 still has `# "fastmcp"` commented out). Dead code today,
-#   so it is not a runtime dependency today.
-#
-# pytest / ruff / setuptools: dev-only. See pyproject.toml [project.optional-dependencies].
+# github_ops.py:32, module level and unconditional. See above.
+PyGithub==2.10.0

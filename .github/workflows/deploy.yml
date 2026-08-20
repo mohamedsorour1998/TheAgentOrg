@@ -1,0 +1,255 @@
+# AgentCore deploy — build the five agent images, push to ECR, deploy runtimes.
+# OWNER: Sorour.
+#
+# ZERO STATIC AWS KEYS. Every AWS step assumes github-actions-role through
+# GitHub's OIDC provider, which already trusts
+# `repo:mohamedsorour1998/TheAgentOrg:*` in account 339712964409. If a step here
+# cannot authenticate, fix the role trust; do not add an AWS_ACCESS_KEY_ID
+# secret. The absence of static keys is the point of this workflow, not a detail.
+#
+# WHY THE agentcore CLI RUNS HERE AND NOT ON A LAPTOP. It creates the runtime
+# resources, so wherever it runs is what the account reflects. Run from a laptop,
+# the five live runtimes correspond to one person's working directory and nobody
+# can tell afterwards which commit produced them. Run from here, they correspond
+# to a commit on main.
+#
+# THE PACKAGING DEPENDENCY IS LOAD-BEARING. pyproject must declare
+# [tool.setuptools.packages.find] with include = ["agentorg*"]. With the older
+# `packages = ["agentorg"]`, a non-editable install silently drops
+# agentorg/agents, agentorg/common and agentorg/security -- the image builds
+# green and dies on import. Measured on 2026-08-20 against main before that fix
+# landed: `pip install .` then `import agentorg.agents` gives
+# ModuleNotFoundError. The Dockerfile's import smoke test is what turns that
+# from a runtime failure into a build failure, and the preflight job below
+# refuses to build at all if the declaration regresses.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agentorg/**"
+      - "pyproject.toml"
+      - ".github/workflows/deploy.yml"
+  # Redeploying an unchanged commit -- after a runtime is deleted, or to recover
+  # a crash-looping one -- is a real need the paths filter would otherwise block.
+  workflow_dispatch:
+
+# Two deploys racing would push the same tags and configure the same runtimes
+# concurrently. Never cancel mid-deploy: a cancelled run can leave images pushed
+# and runtimes half-configured, which is worse than a queued wait.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  # Not secret: readable in the account and printed in plan output. Inline so a
+  # reader can see what this workflow assumes without opening settings.
+  AWS_ROLE: arn:aws:iam::339712964409:role/github-actions-role
+  ECR_PREFIX: theagentorg-shared
+  # Read from docs/plan/week1-verification-log.md, not re-derived from Terraform
+  # state, per the task. Terraform also outputs it as agentcore_runtime_role_arn.
+  RUNTIME_ROLE: arn:aws:iam::339712964409:role/theagentorg-shared-agentcore-runtime-role
+
+jobs:
+  # Cheap, credential-free, and it fails the run before any image is built if the
+  # packaging declaration that the images depend on has regressed.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # A real non-editable install into a clean venv, then imports from a
+      # directory that is NOT the source tree. `cd /tmp` matters: from the repo
+      # root, `import agentorg` finds ./agentorg whether or not the install
+      # shipped it, so the check would pass against the broken declaration.
+      - name: A non-editable install must ship every subpackage
+        run: |
+          python -m venv /tmp/wheelcheck
+          /tmp/wheelcheck/bin/pip install --quiet .
+          cd /tmp
+          /tmp/wheelcheck/bin/python -c "
+          import agentorg, agentorg.agents, agentorg.common, agentorg.security
+          from agentorg.agents import server
+          from agentorg.security import gitleaks_tool, semgrep_tool, trivy_tool
+          import importlib.resources as r
+          assert r.files('agentorg.security').joinpath('gitleaks.toml').is_file(), 'gitleaks.toml did not ship'
+          assert r.files('agentorg.security').joinpath('semgrep_rules.yml').is_file(), 'semgrep_rules.yml did not ship'
+          assert len(server.AGENTS) == 5, f'expected 5 agents, got {len(server.AGENTS)}'
+          print('preflight OK: subpackages, data files and all five agents present')
+          "
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: preflight
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-build-${{ github.run_id }}
+
+      # Proves OIDC worked before anything expensive starts, so an auth failure
+      # reads as one rather than as a docker or ECR error.
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      # AgentCore runs arm64 and the runner is amd64, so this is required, not
+      # optional. Without it the build produces an amd64 image that pushes and
+      # deploys and then fails to start with an exec format error.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      # ONE image, five tags. Every agent runs the same code with a different
+      # AGENT_ROLE, so building five identical images would multiply build time
+      # by five for no difference in content. Tagged with the commit SHA as well
+      # as latest, because `latest` cannot tell you which commit is running.
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          registry='${{ steps.ecr.outputs.registry }}'
+          sha='${{ github.sha }}'
+
+          tags=()
+          for agent in planner developer reviewer security sre; do
+            repo="${registry}/${{ env.ECR_PREFIX }}-${agent}-agent"
+            tags+=(--tag "${repo}:${sha}" --tag "${repo}:latest")
+          done
+
+          docker buildx build \
+            --platform linux/arm64 \
+            --file agentorg/agents/Dockerfile \
+            --push \
+            "${tags[@]}" \
+            .
+
+      # Reads back what ECR actually holds rather than trusting the push. A push
+      # that half-succeeded would otherwise be discovered by the deploy job.
+      - name: Verify every repository received the image
+        run: |
+          set -euo pipefail
+          for agent in planner developer reviewer security sre; do
+            repo="${{ env.ECR_PREFIX }}-${agent}-agent"
+            if ! aws ecr describe-images \
+                  --repository-name "$repo" \
+                  --image-ids imageTag='${{ github.sha }}' \
+                  --query 'imageDetails[0].imageDigest' --output text >/dev/null 2>&1; then
+              echo "::error::$repo has no image tagged ${{ github.sha }}"
+              exit 1
+            fi
+            echo "$repo: ${{ github.sha }} present"
+          done
+
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: build
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-runtime-${{ github.run_id }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The CLI is installed here rather than expected on a laptop. Version
+      # printed so a run records which CLI produced its runtimes -- when the
+      # deploy behaviour changes, that line is the first thing to check.
+      - name: Install the agentcore CLI
+        run: |
+          set -euo pipefail
+          pip install --quiet bedrock-agentcore-starter-toolkit
+          agentcore --version || agentcore --help | head -5
+
+      # Configure and launch each runtime from the pushed image. Sequential, not
+      # parallel: five concurrent configures write the same local .agentcore
+      # config and would race.
+      #
+      # `|| true` appears nowhere here on purpose. A failed configure or launch
+      # must fail the job -- reporting a deploy that did not happen is the one
+      # outcome the task forbids, because the fallback plan depends on knowing
+      # the truth.
+      - name: Configure and launch the five runtimes
+        run: |
+          set -euo pipefail
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+
+          for agent in planner developer reviewer security sre; do
+            image="${registry}/${{ env.ECR_PREFIX }}-${agent}-agent:${{ github.sha }}"
+            echo "::group::${agent}"
+
+            agentcore configure \
+              --name "theagentorg_${agent}" \
+              --execution-role "${{ env.RUNTIME_ROLE }}" \
+              --container-uri "${image}" \
+              --region "${{ env.AWS_REGION }}" \
+              --env "AGENT_ROLE=${agent}" \
+              --non-interactive
+
+            agentcore launch --name "theagentorg_${agent}" --non-interactive
+
+            echo "::endgroup::"
+          done
+
+      # The task's done-when: READY for each runtime, and a real completion from
+      # at least one invoke. Reported, not assumed -- a fabricated READY is worse
+      # than an honest blocker.
+      - name: Status must be READY for all five
+        run: |
+          set -euo pipefail
+          failed=0
+          for agent in planner developer reviewer security sre; do
+            out="$(agentcore status --name "theagentorg_${agent}" 2>&1 || true)"
+            echo "--- ${agent}"
+            echo "$out"
+            if ! grep -qi 'READY' <<<"$out"; then
+              echo "::error::theagentorg_${agent} is not READY"
+              failed=1
+            fi
+          done
+          [ "$failed" = "0" ]
+
+      - name: Invoke the planner and require a real completion
+        run: |
+          set -euo pipefail
+          payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
+          out="$(agentcore invoke --name theagentorg_planner "$payload" 2>&1)"
+          echo "$out"
+          # Asserts on content, not on exit status. A runtime that returns 200
+          # with an empty body exits 0, and "the call succeeded" is exactly the
+          # reassuring non-answer this project keeps having to distinguish from
+          # a real one.
+          grep -q '"tasks"' <<<"$out" || {
+            echo "::error::planner returned no tasks; the response is not a real completion"
+            exit 1
+          }

@@ -80,10 +80,35 @@ with `block/2`), and the only thing lost is that the block's provenance is a
 fixture rather than the rule. **Say nothing false about that on camera** — use
 narration **B** in Beats 2 and 3.
 
-On the machine this script was written on, step 4 **fails**: `scan_gate.py` exits
-**1** with a `FileNotFoundError` traceback (`semgrep is not installed…`), because
-all three binaries are absent from PATH. So as of today the demo is a
-**narration B** demo. If you provision the machine, re-run step 4 and switch to A.
+**SUPERSEDED 2026-08-20 — the machine is now provisioned and this demo is
+narration A.** When this script was written, step 4 exited **1** with a
+`FileNotFoundError` (`semgrep is not installed…`) because all three binaries were
+absent. They were installed on 2026-08-20 and step 4 now passes. Measured, from
+the repository root with `.venv-main` active:
+
+```
+$ python scripts/scan_gate.py ; echo "EXIT=$?"
+--- poisoned: 3 finding(s)
+      gitleaks  critical aws-access-key-id app/auth.py:3
+      gitleaks  critical aws-secret-access-key app/auth.py:4
+      semgrep   low      agentorg.security.python.flask.missing-timeout app/auth.py:6
+      binaries executed: ['gitleaks', 'semgrep', 'trivy']
+      verdict=block blocking=2
+--- clean: 0 finding(s)
+      verdict=pass blocking=0
+
+SCAN OK
+EXIT=0
+```
+
+Note `binaries executed` and the finding lines **3 and 4** — the real-scanner
+signature. The fixture reports 4 and 5, so those line numbers are how a reader
+tells the two paths apart. Installed versions: gitleaks **8.30.1**, semgrep
+**1.173.0**, trivy **0.74.0** (the script's step 1 names semgrep 1.172.0 and
+gitleaks 8.21.2; the newer versions produce the same findings at the same lines).
+
+Use **narration A** in Beats 2 and 3. Still re-run step 4 on the day: if it ever
+exits non-zero, fall back to narration B rather than narrating something false.
 
 **Judge step 4 by its exit code, not by the text on screen.** The script *does*
 print `SCAN OK` when all three scanners are installed and the findings match its
@@ -126,11 +151,27 @@ status=promoted
 security verdict=pass, blocking=0
 ```
 
-**Pre-flight result on this machine, run in order, today:** step 1 halts —
-`gitleaks`, `trivy` and `semgrep` are all ABSENT from PATH; step 2's
-`gitleaks version` gives `command not found`; step 4 gives `exit=1`. So this
-machine is **narration B** and the knob must stay unset. If you provision the
-demo machine, re-run steps 1-4 and only then set the knob.
+**Pre-flight result on this machine, re-run in order on 2026-08-20 after
+provisioning:** all four steps pass. `gitleaks version` → `8.30.1`,
+`trivy --version` → `0.74.0`, `semgrep --version` → `1.173.0`; step 4 exits **0**
+with `SCAN OK`. **The knob may be set**, and the ordering rule that made this
+paragraph necessary was honoured: the binaries went on first, then
+`SCANNERS_REQUIRED=true`. Verified in that order, end to end:
+
+```
+$ SCANNERS_REQUIRED=true python -m agentorg.graph
+status=promoted
+security verdict=pass, blocking=0
+
+$ SCANNERS_REQUIRED=true python -m agentorg.graph --poisoned
+status=blocked
+security verdict=block, blocking=2
+```
+
+The clean run promoting **with the knob on** is the measurement that matters
+here: with the knob set and the binaries absent, the clean run blocks with
+`blocking=3` and the first half of the demo dies. That is why step 5 comes after
+steps 1-4 and not before.
 
 ---
 
@@ -282,10 +323,17 @@ too — if `SCANNERS_REQUIRED=true` is set while the binaries are missing. That 
 the exact failure Beat 0's ordering exists to prevent.
 
 Both modes print `blocked / block / blocking=2` and differ only in the finding
-line numbers: fixture reports lines **4 and 5**, real gitleaks 8.21.2 reports
-**3 and 4**. If someone asks you on stage which mode you are in and you do not
-remember, that is the discriminator — and it is not visible in this beat's
-output, so answer from Beat 0, not from the screen.
+line numbers: fixture reports lines **4 and 5**, real gitleaks reports **3 and
+4**. Re-measured on 2026-08-20 with gitleaks **8.30.1** installed (this line
+previously cited 8.21.2): still lines 3 and 4, so the discriminator survived the
+version change.
+
+If someone asks on stage which mode you are in, you no longer have to answer from
+memory. Two independent tells now exist: the `scan_provenance` field, which the
+timeline renders in words (`↳ scan: real scanners ran`), and these line numbers.
+Prefer the timeline — it is on screen in Beat 5. If the two ever disagree, say so
+rather than picking one: two instruments that agree are evidence, two that
+disagree mean one is broken.
 
 ---
 

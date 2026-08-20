@@ -1,0 +1,259 @@
+# Terraform — plan on every PR, apply on main. OWNER: Sorour.
+#
+# All infrastructure for this project lives in infra/Terraform and is applied
+# from here, not from a laptop. A local `terraform apply` leaves the S3 state
+# and the account agreeing with one person's working directory rather than with
+# main, and nobody can tell afterwards which apply produced the live resources.
+#
+# The split:
+#
+#   validate  fmt + init -backend=false + validate. No credentials, no state,
+#             so it runs on a fork PR and cannot touch anything.
+#   plan      real init against S3, real plan, posted to the PR. Read-only.
+#   apply     main only, and only after plan succeeds.
+#
+# ZERO STATIC AWS KEYS. Every AWS step assumes github-actions-role through
+# GitHub's OIDC provider. That role already exists in account 339712964409 and
+# is shared with other repositories, which is why Terraform reads it through a
+# data source and never writes to it -- see infra/Terraform/environments/shared
+# /main.tf. Adding an AWS_ACCESS_KEY_ID secret to this repository would defeat
+# the entire point of the task; if a step here ever cannot authenticate, fix the
+# role trust, do not add a key.
+
+name: terraform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/Terraform/**"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    paths:
+      - "infra/Terraform/**"
+      - ".github/workflows/terraform.yml"
+  # Applying from the UI when nothing changed under infra/ -- recovering from a
+  # drifted account, for instance -- is a real need and otherwise impossible,
+  # because the paths filter above would skip the run.
+  workflow_dispatch:
+
+# Two runs applying the same state at once is how state locks are left behind
+# and how two applies interleave. One at a time, and never cancel a run
+# mid-apply: a cancelled apply can leave a resource created but unrecorded.
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "1.15.8"
+  AWS_REGION: us-east-1
+  # The role is not secret -- it is readable in the account and in the plan
+  # output -- so it is inline rather than a repository secret. A secret here
+  # would only make it harder to see what this workflow assumes.
+  AWS_ROLE: arn:aws:iam::339712964409:role/github-actions-role
+  TF_DIR: infra/Terraform/environments/shared
+
+jobs:
+  # No credentials and no state. This is the job that can fail on a fork PR
+  # without anyone granting the fork access to the account.
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # The wrapper rewrites stdout, which breaks reading a step's real
+          # output later in the job. Off everywhere in this file.
+          terraform_wrapper: false
+
+      # -recursive so the module under infra/Terraform/modules is covered too,
+      # not only the root module.
+      - name: Format check
+        run: terraform fmt -check -recursive infra/Terraform
+
+      # -backend=false is what makes this credential-free: it configures
+      # providers and modules without reaching S3 for state.
+      - name: Init (no backend)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false -backend=false
+
+      - name: Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: validate
+    permissions:
+      contents: read
+      # The OIDC token. Without this the role assumption below fails and no
+      # amount of role trust fixes it.
+      id-token: write
+      # Posting the plan as a PR comment.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Prints the token's actual `sub` claim BEFORE trying to assume the role.
+      # The first run of this workflow failed with "Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity" while the role's trust policy did list
+      # `repo:mohamedsorour1998/TheAgentOrg:*` with StringLike, the OIDC provider
+      # existed, and its ClientIDList held sts.amazonaws.com -- every part
+      # checked and correct. When the policy looks right and the assumption
+      # still fails, the remaining unknown is what the token actually says, and
+      # guessing at it is how an afternoon disappears. This decodes the claim
+      # set so the mismatch is visible rather than inferred. Cheap, and it stays
+      # because the next person to hit this will want the same line.
+      - name: What does our OIDC token actually claim
+        run: |
+          set -euo pipefail
+          tok="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')"
+          # Payload only, decoded with jq -- no heredoc, because the whole run
+          # block is indented inside YAML and an indented terminator does not
+          # match. tr/printf pad the base64 to a multiple of four.
+          body="$(cut -d. -f2 <<<"$tok" | tr '_-' '/+')"
+          case $(( ${#body} % 4 )) in
+            2) body="${body}==" ;;
+            3) body="${body}=" ;;
+          esac
+          printf '%s' "$body" | base64 -d 2>/dev/null \
+            | jq '{iss, aud, sub, repository, repository_owner, ref}'
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-plan-${{ github.run_id }}
+
+      # Proves the OIDC assumption worked before Terraform starts, so an
+      # authentication failure reads as one instead of as a Terraform error.
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # -detailed-exitcode distinguishes the three outcomes: 0 no changes,
+      # 2 changes present, 1 error. Without it "no changes" and "changes" look
+      # identical to the job and a failure is the only thing anyone notices.
+      - name: Plan
+        id: plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set +e
+          terraform plan -input=false -no-color -lock-timeout=5m \
+            -detailed-exitcode -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          tail -c 60000 plan.txt
+          if [ "$code" = "1" ]; then
+            echo "::error::terraform plan failed"
+            exit 1
+          fi
+          if [ "$code" = "2" ]; then
+            echo "::notice::plan has changes to apply"
+          else
+            echo "::notice::no changes; infrastructure matches configuration"
+          fi
+
+      # Keeping the binary plan is what would let a future apply run exactly
+      # what was reviewed. Not consumed yet -- the apply job re-plans -- and
+      # said plainly rather than implying this artifact is load-bearing.
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ github.run_id }}
+          path: |
+            ${{ env.TF_DIR }}/tfplan
+            ${{ env.TF_DIR }}/plan.txt
+          retention-days: 5
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_EXIT: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = `${process.env.GITHUB_WORKSPACE}/${{ env.TF_DIR }}/plan.txt`;
+            let body;
+            try {
+              // A GitHub comment caps at 65536 characters, so a long plan is
+              // truncated deliberately rather than failing the post.
+              let plan = fs.readFileSync(path, 'utf8');
+              if (plan.length > 60000) {
+                plan = plan.slice(-60000);
+                plan = '...(truncated; see the workflow log)\n' + plan;
+              }
+              const changed = process.env.PLAN_EXIT === '2';
+              const head = changed
+                ? 'Terraform plan — **changes to apply**'
+                : 'Terraform plan — no changes';
+              body = `### ${head}\n\n\`\`\`\n${plan}\n\`\`\``;
+            } catch (e) {
+              body = `### Terraform plan\n\nCould not read the plan output: ${e.message}`;
+            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  # main only. A PR never reaches this job, so a fork cannot apply.
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: plan
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: terraform-apply-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false
+
+      # Re-plans rather than consuming the plan job's artifact. The tradeoff is
+      # explicit: a re-plan can differ from what the plan job showed if the
+      # account changed in between, but downloading a plan file and applying it
+      # blind has the opposite failure -- applying a stale plan against state
+      # that moved. Terraform refuses a stale saved plan anyway, so the re-plan
+      # is the honest version of the same check.
+      - name: Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m
+
+      # The five ECR URLs and the runtime role ARN, which the deploy workflow
+      # needs. Printed so a reader of the run does not have to open the state.
+      - name: Outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform output -no-color
