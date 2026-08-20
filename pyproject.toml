@@ -19,8 +19,11 @@ dev = [
     "ruff>=0.16,<0.17",
 ]
 
-[tool.setuptools]
-packages = ["agentorg"]
+[tool.setuptools.packages.find]
+include = ["agentorg*"]
+
+[tool.setuptools.package-data]
+"agentorg.security" = ["gitleaks.toml", "semgrep_rules.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
