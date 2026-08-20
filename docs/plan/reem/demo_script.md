@@ -69,6 +69,41 @@ output looks like.
 Also before the room fills: terminal in the repo root, font large enough for the
 back row, scrollback cleared.
 
+### The trap, executed — a warning nobody has seen fire is a warning people route around
+
+Both runs below are real, from this machine, minutes apart. Same command, same
+ticket, opposite demo outcomes — the only difference is whether the knob was set
+before the binaries existed.
+
+**Out of order (knob set first). The CLEAN half of the demo dies:**
+
+```
+$ SCANNERS_REQUIRED=true LLM_DISABLED=true python -m agentorg.graph
+run_id=88028c44-fba7-4121-bfa9-872d05d9e0fd
+status=blocked
+security verdict=block, blocking=3
+```
+
+That is the clean ticket. `blocking=3` is three `*-scanner-error` findings: the knob
+promoted "scanner absent" to "scanner faulted", and a change nothing could scan
+fails closed. Correct behaviour, catastrophic timing — Beat 2 is supposed to show
+`promoted`.
+
+**Knob unset (the safe fallback). Both halves behave:**
+
+```
+$ LLM_DISABLED=true python -m agentorg.graph
+run_id=32cdf9c5-08dd-4c82-92c3-3d12e182b324
+status=promoted
+security verdict=pass, blocking=0
+```
+
+**Pre-flight result on this machine, run in order, today:** step 1 halts —
+`gitleaks`, `trivy` and `semgrep` are all ABSENT from PATH; step 2's
+`gitleaks version` gives `command not found`; step 4 gives `exit=1`. So this
+machine is **narration B** and the knob must stay unset. If you provision the
+demo machine, re-run steps 1-4 and only then set the knob.
+
 ---
 
 ## Beat 1 — The two tickets (~0:30)
@@ -567,3 +602,72 @@ only cheap way to tell the two modes apart from output alone.
   so it is ready the moment someone provisions a machine and re-runs Beat 0 step 4;
   it is **not** a description of anything yet observed.
 - **The backup video** does not exist. Task 10 step 3, owner Aya, due Aug 25.
+
+---
+
+## Re-verify sequence (run at freeze Aug 25, and again Aug 26–27 after any late fix)
+
+Every command needs `cd <repo root>` first. Mode 1 was executed in full on Aug 20 and
+the pasted results are below; Mode 2 has never been run anywhere in this project.
+
+### Mode 1 — fixture fallback. What CI and every laptop here runs.
+
+```
+$ pytest -q
+218 passed, 1 skipped
+
+$ python -c "from tests.provenance import describe_mode; print(describe_mode())"
+FIXTURE-FALLBACK mode: no scanner binaries on PATH
+
+$ pytest -q tests/test_provenance.py
+7 passed
+
+$ LLM_DISABLED=true python -m tests.dora_batch && python -m tests.dora_table
+agent_org : blocked=10  bad_changes_shipped=0  provenance=fixture
+baseline  : blocked=0   bad_changes_shipped=10 provenance=n/a
+```
+
+### Mode 2 — real scanners. Requires the three binaries. NEVER RUN.
+
+```
+$ python scripts/scan_gate.py; echo "exit=$?"     # need exit=0
+$ pytest -q                                        # expect the trivy skip to RUN, so 219 passed
+$ LLM_DISABLED=true python -m tests.dora_batch && python -m tests.dora_table
+```
+
+**Verify the instrument before trusting a green run, every time.** `pytest -q
+tests/test_provenance.py` must report:
+
+| Machine | Correct result | What a wrong result means |
+|---|---|---|
+| No binaries (today) | `7 passed`, 0 skipped | — |
+| All three installed | `4 passed, 3 skipped` | **`7 passed` here means the skips are broken** and the file is not measuring what it claims |
+
+**Then confirm the two things that make the numbers meaningful:**
+
+1. `agent_org` reports `blocked: 10, bad_changes_shipped: 0` **in both modes**.
+2. The `provenance` field **differs** between them — `fixture` versus `real_scanners`. If it
+   does not differ, the discriminator is broken and every number in the deck is unlabelled.
+   *This comparison is impossible until Mode 2 runs once.*
+
+If a late fix moves a number, update the deck the same day — and **re-paste it from
+`runs/dora_table.md`, never re-type it.**
+
+---
+
+## Freeze checklist (Task 12 — needs a human)
+
+- [ ] **Mon Aug 24** — one full timed run-through with whoever drives the terminal. Target
+      5–7 minutes. Machine time is ~2 s total with `LLM_DISABLED=true`, so the pacing risk
+      is entirely the talking.
+- [ ] **Tue Aug 25, end of day** — Sorour's sign-off. Aya posts "metrics frozen" after a
+      final green `pytest -q` and a final `python -m tests.dora_batch`. From here: wording
+      polish only — no new commands, no new behaviour, no new tests.
+- [ ] **Wed–Thu Aug 26–27** — two clean run-throughs, each under 7 minutes, in English.
+- [ ] Confirm the fallback: play the video and narrate the six beats over it. **The video
+      does not exist yet** — Task 10 step 3, owner Aya, due Aug 25.
+- [ ] Re-run the sequence above after any late fix, and re-paste every number that moved.
+
+**Freeze precondition, already met.** Tasks 1–8 were all required to land before Aug 25
+because the freeze forbids new tests and new code paths. They landed Aug 20, five days
+early, across 14 reviewed commits. Nothing from the contingency cut list was cut.
