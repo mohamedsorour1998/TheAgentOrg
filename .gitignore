@@ -19,3 +19,4 @@ venv/
 
 # Pipeline run artifacts (logs + paused state)
 runs/
+runs-archive-*/
