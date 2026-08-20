@@ -54,9 +54,24 @@ def _log(state: RunState, actor, stage, action, verdict="", summary="",
     """Append one row to the run's log.
 
     WIDENED IN WEEK 3, by ADDITION only -- both new parameters default to "", so
-    every existing call site writes exactly the bytes it wrote before. They exist
-    because agentorg/timeline.py may read nothing but log.read(run_id), which
-    makes this helper the only route by which a fact can reach the judges:
+    every existing call site writes the same SEMANTIC row as before.
+
+    NOT the same BYTES, and the difference is worth stating because an earlier
+    version of this docstring claimed it was. `model_dump()` emits defaults, and
+    this helper passes both parameters unconditionally, so every row now carries
+    a `"scan_provenance": ""` key -- MEASURED on a full run of each kind: 14/14
+    rows on a clean run and 9/9 on a poisoned one carry the key, while only 1 and
+    2 respectively carry a non-empty value. Old readers ignore an extra key and
+    rows validate in both directions, so nothing breaks; but "identical bytes"
+    was false and a later reader would have relied on it.
+
+    `gates.py:58` and `:80` construct LogEvent directly rather than through here,
+    so their rows carry the key too. That is correct -- a gate row has no scan
+    provenance to report, and "" is exactly what it should say.
+
+    The two parameters exist because agentorg/timeline.py may read nothing but
+    log.read(run_id), which makes this helper the only route by which a fact can
+    reach the judges:
 
       * artifact_ref  the delivery ref for a block reason. It was already being
         recorded, but only INSIDE a summary sentence, so reading it back meant

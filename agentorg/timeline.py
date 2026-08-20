@@ -62,6 +62,24 @@ _PROVENANCE = {
     "": "provenance unknown — logged before this was recorded",
 }
 
+# The same three facts, phrased for a row that PASSED. Identical information,
+# different emphasis: on a blocked row "scanners did not run" is the caveat a
+# judge needs, but on the green run that phrasing reads as a shortfall in the
+# run rather than in the machine, and the demo's whole point is that the green
+# run is a good outcome. Naming the CAUSE ("no scanners installed") says the
+# same thing without inviting "so the clean run wasn't checked either?".
+#
+# Kept as a separate table rather than as a conditional inside the sentence so
+# the blocked-path strings stay byte-identical -- every assertion in
+# tests/test_timeline.py and every line of the demo script that quotes them is
+# written against those exact words.
+_PROVENANCE_PASSED = {
+    "scanners": "real scanners ran",
+    "fixture-fallback": "no scanners installed — verdict from the built-in fixture rules",
+    "fixture-stub": "scanners not requested — verdict from the built-in fixture rules",
+    "": "provenance unknown — logged before this was recorded",
+}
+
 # How a block reason's delivery ref reads. Keys are the ref SCHEMES that
 # github_ops.post_comment can return; the values are what the timeline says.
 #
@@ -129,7 +147,9 @@ def _annotations(e: LogEvent) -> list[str]:
     """
     notes = []
     if (e.actor, e.stage) == ("security", "security") and e.action in ("blocked", "passed"):
-        notes.append(f"scan: {_PROVENANCE.get(e.scan_provenance, _PROVENANCE[''])}")
+        # Phrasing keyed on the outcome -- see _PROVENANCE_PASSED for why.
+        table = _PROVENANCE_PASSED if e.action == "passed" else _PROVENANCE
+        notes.append(f"scan: {table.get(e.scan_provenance, table[''])}")
     delivery = _delivery(e)
     if delivery:
         state, detail = delivery
@@ -232,7 +252,17 @@ def render_html(run_id: str) -> str:
         + "".join(f"<em class='note'>{html.escape(n)}</em>" for n in _annotations(e))
         + "</span></li>"
         for e in events)
-    tid = html.escape(events[0].ticket_id) if events else run_id
+    # Escaped at the point of USE below, not here. Both branches feed the same
+    # interpolation, and escaping on only one of them is exactly the bug this
+    # line used to carry: the `if` branch escaped, the `else` branch did not, so
+    # `python -m agentorg.timeline '<img src=x onerror=alert(1)>' --html out`
+    # -- an unknown run id, which is the empty-events branch -- wrote the markup
+    # raw into the <h1> while the <title> two lines above escaped the same value.
+    # Keeping the escape adjacent to the interpolation makes the invariant local:
+    # "everything interpolated into HTML is escaped right there, or is a string
+    # this module built itself", which is what test_no_unescaped_interpolation_
+    # reaches_the_html checks structurally.
+    tid = events[0].ticket_id if events else run_id
     label, glyph, detail = _outcome(events) if events else ("NO EVENTS", "…", "")
     banner = (
         f"<p class='banner {label.split()[0].lower()}'>{glyph} {html.escape(label)}"
@@ -263,7 +293,7 @@ def render_html(run_id: str) -> str:
  li.rejected{{background:#2d0f11;border-left-color:#f85149}}
  .note{{display:block;font-style:normal;color:#e3b341;font-size:.9em}}
 </style>
-<h1>Timeline for {html.escape(run_id)} — ticket {tid}</h1>
+<h1>Timeline for {html.escape(run_id)} — ticket {html.escape(tid)}</h1>
 {banner}
 <ul>{rows}</ul>"""
 

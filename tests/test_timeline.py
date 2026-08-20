@@ -73,6 +73,168 @@ def test_render_html_survives_an_unknown_run_id():
     assert "<title>" in out
 
 
+# =========================================================================
+# HTML ESCAPING.
+#
+# Three layers, because no one of them is sufficient and the gap between them is
+# where the original defect lived:
+#
+#   * the DATA tests below drive markup through every LogEvent field that can
+#     hold it, on BOTH the empty-events and non-empty branches. They cannot
+#     reach `stage`, `actor` or `action` -- those are Literals, so pydantic
+#     rejects markup before the renderer ever sees it (verified: constructing a
+#     LogEvent with stage="<img ...>" raises ValidationError). An escape removed
+#     from one of those three sites is therefore INVISIBLE to any data-driven
+#     test, however thorough.
+#   * so the STRUCTURAL test walks render_html's AST and requires every
+#     interpolation to be escaped or provably renderer-owned. That is what makes
+#     "every interpolated field is escaped" enforceable at all 12 sites instead
+#     of only the reachable ones.
+#
+# The whole set exists because stripping all 12 `html.escape(` calls from
+# timeline.py left the suite green at 247 passed -- a defended design decision
+# with nothing behind it, which is this repository's signature defect.
+# =========================================================================
+
+MARKUP = "<img src=x onerror=alert(1)>"
+ESCAPED_MARKUP = "&lt;img src=x onerror=alert(1)&gt;"
+
+
+def _assert_markup_is_inert(out: str, where: str):
+    """No live tag anywhere, and the payload present only in escaped form."""
+    assert "<img" not in out, f"{where}: raw <img survived into the HTML"
+    assert "onerror=alert(1)>" not in out, f"{where}: a live onerror attribute survived"
+    assert ESCAPED_MARKUP in out, f"{where}: the payload is not present in escaped form"
+
+
+def test_markup_in_every_injectable_log_field_is_escaped_in_the_html():
+    """Every free-str field a LogEvent can carry, one at a time.
+
+    One field per run_id so a single unescaped site cannot be masked by another
+    field's escaping happening to contain the same bytes.
+
+    `ts` gets a DIFFERENT payload, and that is not a shortcut. Both renderers
+    slice it as `e.ts[11:19]` to pull HH:MM:SS out of an ISO timestamp, so the
+    full `<img ...>` string never reaches the escape call -- it arrives as the
+    8-character fragment "onerror=", which proves nothing about escaping. The
+    padded payload puts a real `<b>` tag inside that window instead, so the
+    assertion is about what the renderer actually interpolates.
+    """
+    sliced_field_markup = "0123456789T<b>x</b>"          # [11:19] == "<b>x</b>"
+    assert sliced_field_markup[11:19] == "<b>x</b>", "the ts payload must survive slicing"
+
+    for field in ("verdict", "summary", "ticket_id"):
+        run_id = f"escape-check-{field}"
+        kwargs = {"run_id": run_id, "ticket_id": "ESC-1", "actor": "system",
+                  "stage": "security", "action": "blocked", field: MARKUP}
+        log.append(LogEvent(**kwargs))
+        _assert_markup_is_inert(timeline.render_html(run_id), f"field {field}")
+
+    # `artifact_ref` is deliberately NOT in that loop. Neither renderer
+    # interpolates it: `_delivery` reads only its SCHEME and emits a fixed phrase
+    # from `_DELIVERY`, so the field's bytes never reach the page. Asserting the
+    # escaped payload appears would be asserting a requirement that does not
+    # exist -- and it fails, which is how this was found. What must hold is that
+    # nothing live escapes, and that an unrecognised scheme still says so.
+    log.append(LogEvent(run_id="escape-check-artifact_ref", ticket_id="ESC-1",
+                        actor="system", stage="security", action="blocked",
+                        artifact_ref=MARKUP))
+    out = timeline.render_html("escape-check-artifact_ref")
+    assert "<img" not in out, "artifact_ref: raw <img reached the HTML"
+    assert "onerror=alert(1)>" not in out, "artifact_ref: a live onerror attribute reached the HTML"
+    assert "UNRECOGNISED" in out, "an unparseable ref must still be reported, not dropped"
+
+    log.append(LogEvent(run_id="escape-check-ts", ticket_id="ESC-1", actor="system",
+                        stage="security", action="blocked", ts=sliced_field_markup))
+    out = timeline.render_html("escape-check-ts")
+    assert "<b>x</b>" not in out, "field ts: a raw <b> tag survived into the HTML"
+    assert "&lt;b&gt;x&lt;/b&gt;" in out, "field ts: not present in escaped form"
+
+
+def test_markup_in_the_run_id_is_escaped_on_the_empty_events_branch():
+    """The branch the original bug lived on, reachable from the documented CLI.
+
+    `python -m agentorg.timeline '<img ...>' --html out.html` is an unknown run
+    id, so `log.read` returns [] and render_html takes its empty-events path.
+    That path once interpolated the id into the <h1> RAW while escaping the same
+    value in the <title> two lines above -- the same bytes escaped in one
+    position and live in another.
+    """
+    out = timeline.render_html(MARKUP)
+    _assert_markup_is_inert(out, "empty-events run_id")
+    # Both positions, named separately: the <title> was already correct, and a
+    # fix that only repaired the <h1> would leave the pair asymmetric again.
+    assert f"<title>Timeline {ESCAPED_MARKUP}" in out
+    assert f"ticket {ESCAPED_MARKUP}" in out
+
+
+def test_markup_in_an_annotation_is_escaped():
+    """Annotations are renderer-built, but they INTERPOLATE the row's own data.
+
+    `_delivery` reads the ref out of `artifact_ref`/`summary`, so an annotation
+    string can carry attacker bytes even though this module composed the sentence
+    around them.
+    """
+    run_id = "escape-check-annotation"
+    log.append(LogEvent(
+        run_id=run_id, ticket_id="ESC-1", actor="system", stage="security",
+        action="blocked", artifact_ref=f"comment://{MARKUP}",
+        summary=f"pipeline halted by block rule; block reason comment://{MARKUP}"))
+    _assert_markup_is_inert(timeline.render_html(run_id), "annotation")
+
+
+def _render_html_interpolations():
+    """Every f-string interpolation inside render_html, as source text."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(timeline))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "render_html")
+    return [ast.unparse(n.value) for n in ast.walk(fn)
+            if isinstance(n, ast.FormattedValue)]
+
+
+def test_no_unescaped_interpolation_reaches_the_html():
+    """STRUCTURAL: every f-string field in render_html is escaped or ours.
+
+    This is the test that actually pins the requirement. The data tests above
+    cannot reach `stage`, `actor` or `action` -- pydantic Literals make markup in
+    those fields unconstructable -- so removing `html.escape` from one of them is
+    caught by nothing else. Walking the AST covers all 12 sites uniformly.
+
+    The allowlist is values this module BUILT, never log data: the CSS class from
+    `_row_class`/`label`, the glyph from `_MARK`, and the `rows`/`banner`/`tid`
+    fragments assembled above (each escaped at its own point of use). Anything
+    else interpolated raw is a finding -- if you add an interpolation and this
+    fails, escape it rather than extending the list.
+    """
+    renderer_owned = {
+        "label.split()[0].lower()", "glyph", "tid", "banner", "rows",
+        "_row_class(e)", "_MARK.get(e.action, '\u2022')",
+    }
+    unescaped = [expr for expr in _render_html_interpolations()
+                 if "html.escape(" not in expr and expr not in renderer_owned]
+    assert not unescaped, (
+        "render_html interpolates these without html.escape and they are not "
+        f"renderer-owned constants: {unescaped}"
+    )
+
+
+def test_the_structural_escape_check_covers_every_escape_site():
+    """Guard on the guard: the AST walk must actually SEE all 12 escape sites.
+
+    Without this, a structural test whose allowlist quietly grew, or whose walk
+    stopped finding nodes, would pass by inspecting nothing -- the failure mode
+    of every test that asserts on an empty collection.
+    """
+    escaped = [e for e in _render_html_interpolations() if "html.escape(" in e]
+    assert len(escaped) >= 10, (
+        f"the AST walk found only {len(escaped)} escaped interpolations in "
+        "render_html; it is no longer inspecting what it claims to"
+    )
+
+
 def test_every_action_the_log_can_write_has_a_glyph():
     """_MARK must cover LogEvent.action, or a stage renders as a bare bullet.
 
@@ -354,6 +516,65 @@ def test_the_stub_path_is_told_apart_from_the_fallback_path():
     assert security.run(state).scan_provenance == "fixture-fallback"
     assert (timeline._PROVENANCE["fixture-stub"]
             != timeline._PROVENANCE["fixture-fallback"])
+
+
+def test_a_passed_row_names_the_cause_and_a_blocked_row_keeps_its_wording():
+    """Same fact, two phrasings, keyed on the row's action.
+
+    On a blocked row "FIXTURE verdict -- scanners did not run" is the caveat a
+    judge needs. On the green run that same phrasing reads as a shortfall in the
+    run rather than in the machine, so the passed row names the CAUSE instead.
+
+    Both halves are asserted, and the blocked half matters most: the demo script
+    and every provenance assertion in this file are written against those exact
+    words, so the passed-row rewording must not have touched them.
+    """
+    clean = timeline.render_text(_promoted_run().run_id)
+    blocked = timeline.render_text(_blocked_run().run_id)
+
+    assert "scan: no scanners installed — verdict from the built-in fixture rules" in clean
+    assert "scanners did not run" not in clean, (
+        "the green run must not be described in terms of what did not happen"
+    )
+
+    assert "scan: FIXTURE verdict — scanners did not run" in blocked, (
+        "the blocked row's wording is quoted by the demo script and must not drift"
+    )
+
+    # And the two must not collapse into one string, or the distinction is gone.
+    assert timeline._PROVENANCE["fixture-fallback"] != \
+        timeline._PROVENANCE_PASSED["fixture-fallback"]
+
+
+def test_every_provenance_value_the_log_can_carry_has_words():
+    """_PROVENANCE must cover ScanProvenance, mirroring _MARK's guard.
+
+    Without this, a fourth ScanProvenance value falls through
+    `_PROVENANCE.get(..., _PROVENANCE[""])` and renders "provenance unknown --
+    logged before this was recorded", which would be FALSE: the row does record
+    its provenance, this renderer just has no words for it. That is the exact
+    conflation this field exists to end, inverted -- and it is the worst shape of
+    all, because it is a confident wrong answer rather than a missing one.
+
+    Read off the Literal via get_args rather than listed by hand, for the same
+    reason test_every_action_the_log_can_write_has_a_glyph does.
+    """
+    from typing import get_args
+
+    from agentorg.state import ScanProvenance
+
+    values = set(get_args(ScanProvenance))
+    # BOTH tables, because _annotations picks between them by the row's action --
+    # a value covered by only one renders correctly on blocked rows and falsely
+    # on passed ones, which is the harder half of the bug to notice.
+    for name, table in (("_PROVENANCE", timeline._PROVENANCE),
+                        ("_PROVENANCE_PASSED", timeline._PROVENANCE_PASSED)):
+        assert values <= set(table), (
+            f"{name}: provenance values with no words: {sorted(values - set(table))}"
+        )
+        # And the unknown-row key must remain, since it is the default the .get
+        # falls back to and the commonest case in the existing corpus.
+        assert "" in table, f"{name}: the pre-provenance row case must keep its words"
 
 
 def _legacy_run(tmp_run_id: str) -> str:
