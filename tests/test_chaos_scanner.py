@@ -114,6 +114,10 @@ def test_a_broken_scanner_blocks_a_CLEAN_change_too(provenance):
     )
     assert len(state.security.blocking) == 3
     assert all(f.severity == "high" for f in state.security.blocking)
+    # Stated, not inferred. all_broken() on a CLEAN diff can only produce fault
+    # findings, so the count above is already sufficient -- but naming the set
+    # makes that self-evident and matches how tests 1 and 5 discriminate.
+    assert {f.rule for f in state.security.blocking} == FAULT_RULES
 
 
 def test_the_poisoned_ticket_blocks_with_no_scanners_installed(provenance):
@@ -145,10 +149,24 @@ def test_a_blind_scanner_is_the_one_way_the_poison_could_ship(monkeypatch):
 
     compute_security_verdict([]) returns ("pass", []) -- measured. So a fan-out
     that returned zero findings on a poisoned diff would promote it. Habiba's
-    whole module exists to make that unreachable: unrunnable_findings either
-    returns [error_finding(...)] or raises, and the shape [] does not exist to
-    be returned. This test pins the CONSEQUENCE from the outside, so the reason
-    that guarantee matters stays visible.
+    module exists to make that unreachable, and this test pins the CONSEQUENCE
+    from the outside so the reason that guarantee matters stays visible.
+
+    WHICH SEAM ACTUALLY GUARANTEES IT, MEASURED -- and it is NOT the obvious one.
+    `unrunnable_findings` (never [] -- either [error_finding(...)] or raises)
+    covers the ABSENT path only. Under the fault mode the other tests here use,
+    `provenance.all_broken()`, the fakes `exit 2`, which means the command RAN:
+    `result is None` is false, so `unrunnable_findings` is NEVER REACHED. Each
+    wrapper handles that case in its own `returncode not in (0, 1)` branch and
+    returns [error_finding(...)] directly -- gitleaks_tool.py:124,
+    semgrep_tool.py:119, trivy_tool.py:103. Verified by instrumenting both
+    branches: zero hits on the fault path.
+
+    This matters to anyone mutating code to check these tests can fail. The
+    plan's own RED step aimed at `unrunnable_findings`' fault branch and ALL
+    FIVE TESTS STAYED GREEN, because that branch is dead with respect to them.
+    The reachable seam is the wrappers' bad-exit branch; mutating THAT to return
+    [] reddens two tests and promotes the poisoned ticket.
 
     The patch is on `security.run_all_scanners`, i.e. BELOW the security agent,
     so the agent's real code, its real fixture fallback, the real block rule and
@@ -168,8 +186,10 @@ def test_a_blind_scanner_is_the_one_way_the_poison_could_ship(monkeypatch):
     # surprise.
     assert state.status == "promoted", (
         "an empty findings list on a poisoned diff currently promotes. If this "
-        "is red, a guard now rejects an empty scan -- that is a FIX: replace "
-        "this test with one asserting the new blocking behaviour."
+        "is red, either a guard now rejects an empty scan or the graph no "
+        "longer promotes on a pass verdict. The first is a FIX: replace this "
+        "test with one asserting the new blocking behaviour. The second is a "
+        "regression somewhere else -- check the graph before touching this test."
     )
     assert state.security.verdict == "pass"
     assert state.security.blocking == []
