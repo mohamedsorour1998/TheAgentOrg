@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal, get_args
 from unittest import mock
 
 import pytest
@@ -36,6 +37,7 @@ from agentorg.agents import security as security_agent
 from agentorg.common import config
 from agentorg.security import gitleaks_tool, run_all_scanners, semgrep_tool, trivy_tool
 from agentorg.security._run import (
+    ScannerTool,
     classify_failure,
     error_finding,
     run_scanner,
@@ -2017,10 +2019,24 @@ def _clean_finding(tool: str, dev) -> list:
 
 
 _CLEAN_RULES = {"semgrep-noop", "gitleaks-noop", "trivy-noop"}
-_FAULT_RULES = {
-    "semgrep-scanner-error",
-    "gitleaks-scanner-error",
-    "trivy-scanner-error",
+
+# The fault rules, DERIVED the same way the implementation derives them, rather
+# than the three literals that used to sit here.
+#
+# Two reasons the literals were wrong. First, the same identifier also exists in
+# agentorg/security/__init__.py, so one name meant "what the cache refuses to
+# store" there and "what this file types out by hand" here -- and only one of them
+# moves when `error_finding` changes. Second and worse, restating them left the
+# implementation's derivation pinned by NOTHING: measured in review, replacing the
+# module's derived set with this exact literal and dropping its `error_finding`
+# import kept all 186 tests green, because today both spellings produce the same
+# three strings. The literals agreed with the code for exactly as long as the code
+# was right, which is the definition of an assertion that pins nothing.
+#
+# `test_the_fault_rule_set_is_derived_from_the_tool_type_and_not_restated` is the
+# pin that the literals were missing.
+_EXPECTED_FAULT_RULES = {
+    error_finding(tool, "").rule for tool in get_args(ScannerTool)
 }
 
 
@@ -2225,7 +2241,7 @@ def test_a_scanner_fault_is_never_memoised_so_one_timeout_cannot_stick(
     calls = _stub_wrappers(monkeypatch, answer)
 
     faulted = run_all_scanners(_dev())
-    assert {f.rule for f in faulted} == _FAULT_RULES, (
+    assert {f.rule for f in faulted} == _EXPECTED_FAULT_RULES, (
         f"expected a fault from every tool, got {_summarize(faulted)}"
     )
     assert _verdict_of(faulted) == "block", "a fault must still fail CLOSED"
@@ -2531,3 +2547,126 @@ def _scanner_cache_is_per_test():
     _LANE.reset_scanner_cache()
     yield
     _LANE.reset_scanner_cache()
+
+
+def test_the_fault_rule_set_is_derived_from_the_tool_type_and_not_restated(
+    monkeypatch,
+):
+    """The cache's fault test must DERIVE its rule set, not restate it.
+
+    THIS TEST EXISTS BECAUSE ITS ABSENCE WAS MEASURED. Review replaced the
+    implementation's derived set with a byte-identical hardcoded literal --
+    `{"semgrep-scanner-error", "gitleaks-scanner-error", "trivy-scanner-error"}`
+    -- and dropped the `error_finding` import, and ALL 186 TESTS PASSED. Every
+    assertion in this file was satisfied, because today the derivation and the
+    literal produce the same three strings. The coupling the implementation's
+    docstring defends at length was pinned by nothing at all.
+
+    IT ALSO CLOSES A FAIL-OPEN THAT WAS REAL, NOT HYPOTHETICAL. The first version
+    of that code derived the RULE SPELLING from `error_finding` but iterated a
+    hardcoded three-tool tuple, under a comment claiming a fourth tool "cannot
+    leave a fault silently cacheable". Measured: it could. A fourth tool's
+    `bandit-scanner-error` is absent from a set built off three hardcoded names,
+    so `_is_fault_free` returns True and that tool's transient timeout is pinned
+    to the diff for the life of the process -- the exact defect Task 4 exists to
+    prevent, reintroduced by the code that prevents it.
+
+    SO BOTH SOURCES OF TRUTH ARE SUBSTITUTED HERE, because a test that patched
+    only one would still pass against a set that hardcoded the other:
+
+      * `ScannerTool` gains a FOURTH tool. If the implementation reads
+        `get_args(ScannerTool)`, the new tool's fault rule appears and the fault
+        is refused. If it iterates a literal tuple, the rule is missing and the
+        fault gets CACHED -- which this test observes as a wrapper count, not as
+        a set comparison, because the cache is the behaviour that matters.
+      * `error_finding` changes its rule SPELLING. If the implementation calls it,
+        the set follows. If it restates the strings, they no longer match anything
+        the function produces and every fault becomes cacheable.
+
+    A `Literal` is not patchable in place, so `_run.ScannerTool` is REBOUND to a
+    four-member Literal. The implementation must read both names through the
+    `_run` module for that to be visible -- which is why it does, and is the same
+    reason _run.py's own docstring gives for reading `config.SCANNERS_REQUIRED`
+    through `config` rather than importing the value.
+    """
+    from agentorg.security import _run
+
+    # --- part 1: a FOURTH tool's fault must not be cacheable -------------
+    #
+    # `Finding.tool` is a frozen three-member Literal, so a real fourth tool
+    # cannot be constructed. `error_finding` is therefore also substituted, to
+    # spell the fourth tool's rule the way it spells the other three while still
+    # returning a Finding the frozen model accepts.
+    real_error_finding = _run.error_finding
+
+    def error_finding_for_four(tool, reason):
+        finding = real_error_finding("semgrep", reason)
+        return finding.model_copy(update={"rule": f"{tool}-scanner-error"})
+
+    monkeypatch.setattr(
+        _run, "ScannerTool", Literal["semgrep", "gitleaks", "trivy", "bandit"]
+    )
+    monkeypatch.setattr(_run, "error_finding", error_finding_for_four)
+
+    def fourth_tool_faults(tool: str, dev) -> list:
+        # semgrep and trivy are healthy; the fourth tool is the one that died.
+        # Emitted from gitleaks' slot so the fan-out's three-call shape is kept.
+        if tool == "gitleaks":
+            return [error_finding_for_four("bandit", "the fourth scanner timed out")]
+        return _clean_finding(tool, dev)
+
+    calls = _stub_wrappers(monkeypatch, fourth_tool_faults)
+
+    first = run_all_scanners(_dev())
+    assert "bandit-scanner-error" in {f.rule for f in first}, (
+        f"the fourth tool's fault must be in the result at all; got "
+        f"{_summarize(first)} -- this test's own setup is broken if not"
+    )
+
+    run_all_scanners(_dev())
+
+    assert len(calls) == 6, (
+        f"a FOURTH tool's fault was memoised: {len(calls)} wrapper call(s) over "
+        f"two calls ({calls!r}), where a genuine retry costs six. The cache's "
+        f"fault test is iterating a hardcoded tool list instead of "
+        f"get_args(ScannerTool), so 'bandit-scanner-error' is not in its rule set "
+        f"and one transient timeout is now pinned to this diff for the life of "
+        f"the process."
+    )
+
+    # --- part 2: a changed rule SPELLING must be followed ----------------
+    #
+    # If the implementation restates the rule strings instead of calling
+    # error_finding, a respelled fault matches nothing it refuses and gets cached.
+    monkeypatch.setattr(
+        _run, "ScannerTool", Literal["semgrep", "gitleaks", "trivy"]
+    )
+
+    def respelled(tool, reason):
+        finding = real_error_finding(tool, reason)
+        return finding.model_copy(update={"rule": f"{tool}-SCAN-FAILED"})
+
+    monkeypatch.setattr(_run, "error_finding", respelled)
+
+    def respelled_fault(tool: str, dev) -> list:
+        return [respelled(tool, "the scanner died")]
+
+    respelled_calls = _stub_wrappers(monkeypatch, respelled_fault)
+
+    faulted = run_all_scanners(_dev())
+    assert {f.rule for f in faulted} == {
+        "semgrep-SCAN-FAILED",
+        "gitleaks-SCAN-FAILED",
+        "trivy-SCAN-FAILED",
+    }, f"this test's own setup is broken; got {_summarize(faulted)}"
+
+    run_all_scanners(_dev())
+
+    assert len(respelled_calls) == 6, (
+        f"a RESPELLED fault was memoised: {len(respelled_calls)} wrapper call(s) "
+        f"over two calls ({respelled_calls!r}), where a retry costs six. The "
+        f"cache is comparing against hardcoded rule strings rather than asking "
+        f"error_finding what it produces, so every fault it no longer recognises "
+        f"is now cacheable -- and a fault that is cached is the fail-open this "
+        f"whole task exists to close."
+    )

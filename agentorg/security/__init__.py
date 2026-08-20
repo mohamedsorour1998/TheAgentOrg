@@ -39,9 +39,13 @@ THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
         and in particular the exception is NOT stored to be re-raised: a
         replayed raise is a memoised fault wearing a different hat, and it would
         keep reporting "semgrep is not installed" after semgrep was installed.
-        The `try` below therefore has no `except` -- the raise propagates and the
-        cache line is simply never reached. agents/security.py catches it and
-        falls back to the fixture verdict, unchanged.
+        There is NO try/except in this module at all -- verified by AST walk,
+        zero `Try` nodes -- so the raise propagates untouched and the store line
+        below it is simply never reached. agents/security.py catches it and falls
+        back to the fixture verdict, unchanged. An earlier version of this
+        paragraph said "the `try` below has no `except`", which sent a reader
+        hunting for a construct that was never here; the absence of the handler
+        is the stronger property, so it is now what this says.
 
     CONSEQUENCE WORTH KNOWING BEFORE YOU MEASURE THIS: because 116 calls raise
     and the remaining few return only faults, a CORRECT cache leaves the shipped
@@ -59,18 +63,31 @@ THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
     alone still shares the Finding objects, and severity lives on the object.
 
     NO EVICTION, DELIBERATELY. One entry per distinct diff, and the process
-    lifetimes here are a pipeline run, a pytest session, and a demo -- bounded
-    at six distinct diffs across the whole suite (measured). A long-lived server
-    would need a cap; nothing in this repository is one, and an LRU would add a
-    second thing to get wrong beside the fault rule. `reset_scanner_cache()`
-    exists so the suite can clear it between tests, and is the hook a
-    long-running caller would use per run.
+    lifetimes here are a pipeline run, a pytest session, and a demo.
+
+    MEASURED AT THIS COMMIT, by spying `_diff_key` and the cache dict over a full
+    `pytest -q`: the whole suite computes SEVEN distinct keys and only FOUR of
+    them are ever STORED -- the other three belong to calls that raise, and a
+    raise stores nothing. Four is therefore the high-water mark for a session
+    that never cleared. The method is given because the bare number is what goes
+    stale: an earlier version of this paragraph said "six", which was the count of
+    distinct diffs in the SHIPPED suite at 1171470 and never the number of cache
+    entries, and the task report that accompanied it said "eight", which counted
+    the `dev is None` pseudo-key that never reaches `_diff_key` at all. Re-measure
+    rather than adjusting by hand.
+
+    The argument does not rest on the exact value -- it holds at four, seven or a
+    few hundred. A long-lived server would need a cap; nothing in this repository
+    is one, and an LRU would add a second thing to get wrong beside the fault
+    rule. `reset_scanner_cache()` exists so the suite can clear it between tests,
+    and is the hook a long-running caller would use per run.
 """
 
 import hashlib
+from typing import get_args
 
 from ..state import DevResult, Finding
-from ._run import error_finding
+from . import _run
 from .gitleaks_tool import scan as _gitleaks
 from .semgrep_tool import scan as _semgrep
 from .trivy_tool import scan as _trivy
@@ -79,22 +96,53 @@ from .trivy_tool import scan as _trivy
 # fault-free results are ever stored; see the module docstring.
 _CACHE: dict[str, list[Finding]] = {}
 
-# Every rule `error_finding` can produce, derived from the function itself rather
-# than from a hand-written list of three strings. This is what "is this result a
-# fault?" is decided against, and deriving it means a fourth tool added to
-# `ScannerTool` cannot leave a fault silently cacheable.
-#
-# WHY THIS AND NOT A CLEANER SIGNAL: there isn't one. `error_finding` returns a
-# plain `Finding`, the shape frozen in state.py, carrying no marker field -- and
-# adding one would mean touching a frozen model to serve a cache. Severity is
-# not it either: `high` is what a real semgrep hit reports, so `severity ==
-# "high"` would refuse to cache genuine findings. The `rule` string is the only
-# thing that distinguishes a fault from a finding, and building the set by
-# CALLING error_finding keeps this in step with it by construction instead of by
-# a comment asking the next author to remember.
-_FAULT_RULES = frozenset(
-    error_finding(tool, "").rule for tool in ("semgrep", "gitleaks", "trivy")
-)
+
+def _fault_rules() -> frozenset[str]:
+    """Every rule `error_finding` can produce, for every tool the lane knows.
+
+    This is what "is this result a fault?" is decided against, and BOTH halves
+    are derived rather than written down: the tool list from `ScannerTool`, the
+    rule spelling from `error_finding` itself.
+
+    WHY THIS AND NOT A CLEANER SIGNAL: there isn't one. `error_finding` returns a
+    plain `Finding`, the shape frozen in state.py, carrying no marker field -- and
+    adding one would mean touching a frozen model to serve a cache. Severity is
+    not it either: `high` is what a real semgrep hit reports, so `severity ==
+    "high"` would refuse to cache genuine findings. The `rule` string is the only
+    thing that distinguishes a fault from a finding.
+
+    WHY THE TOOL LIST COMES FROM `get_args(ScannerTool)` AND NOT FROM A TUPLE
+    WRITTEN HERE. The first version of this code iterated a literal
+    `("semgrep", "gitleaks", "trivy")` under a comment claiming that deriving the
+    set meant "a fourth tool added to `ScannerTool` cannot leave a fault silently
+    cacheable". That claim was FALSE and was caught in review by measurement: a
+    fourth tool's `bandit-scanner-error` is simply absent from a set built off
+    three hardcoded names, `_is_fault_free` returns True, and that tool's
+    transient timeout gets pinned to the diff for the life of the process. The
+    fix is to make the claim true, so `ScannerTool` -- the Literal in _run.py that
+    already exists to make a mistyped tool an authoring-time error -- is now the
+    single source of the tool list.
+
+    WHY IT IS A FUNCTION AND NOT A MODULE-LEVEL CONSTANT, which is the obvious
+    shape and looks like a wasted recomputation. A constant is computed once at
+    import, which makes the derivation UNTESTABLE: the reviewer replaced the
+    derived constant with a byte-identical hardcoded literal and dropped the
+    `error_finding` import, and all 186 tests passed, because today the two
+    spellings produce the same three strings. Computing it live is what lets
+    `test_the_fault_rule_set_is_derived_from_the_tool_type_and_not_restated`
+    patch either source of truth and observe this follow. Do not "optimise" it back into a constant
+    without replacing that pin -- the cost is three `error_finding` calls per
+    cache MISS, against three subprocess scanners on the same path.
+
+    Both names are read THROUGH the `_run` module rather than imported as bare
+    names, for the reason _run.py's own docstring gives about
+    `config.SCANNERS_REQUIRED`: a `from ._run import error_finding` binds the
+    value at import, before any test can substitute it, so the coupling would
+    again be unobservable.
+    """
+    return frozenset(
+        _run.error_finding(tool, "").rule for tool in get_args(_run.ScannerTool)
+    )
 
 
 def _diff_key(dev: DevResult) -> str:
@@ -122,7 +170,8 @@ def _is_fault_free(findings: list[Finding]) -> bool:
     be kept. Caching it pins one tool's transient timeout to this diff for the
     life of the process while the findings list still looks mostly correct.
     """
-    return all(finding.rule not in _FAULT_RULES for finding in findings)
+    fault_rules = _fault_rules()
+    return all(finding.rule not in fault_rules for finding in findings)
 
 
 def _copy(findings: list[Finding]) -> list[Finding]:
