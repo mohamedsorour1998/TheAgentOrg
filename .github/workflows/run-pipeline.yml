@@ -17,8 +17,16 @@
 #
 # The `RunState` is handed along as an Actions artifact, written and read by
 # `agentorg.gates.save`/`resume`, which existed for exactly this handoff before
-# this file did. Task 6 replaces the artifact with DynamoDB and this chain does
-# not change.
+# this file did.
+#
+# CORRECTED 2026-08-21: an earlier version of this note claimed Task 6 replaces
+# the artifact with DynamoDB and "this chain does not change". That was never
+# true. MEASURED with STATE_BACKEND=dynamodb: every stage after `plan` raises,
+# because `scripts/run_stage.py:_load` calls `gates._state_path`, which refuses
+# on that backend by design (agentorg/gates.py:116-121). This workflow uses the
+# artifact handoff below and deliberately does NOT set STATE_BACKEND, so it runs
+# on the `local` default. Moving this chain to DynamoDB needs a change in
+# run_stage.py -- read through `gates.load` -- not only in gates.py.
 #
 # WHAT `develop` CONTAINS, AND WHY THAT IS NOT A SHORTCUT. develop runs the
 # developer/reviewer revision loop, opens the PR, and evaluates the deterministic

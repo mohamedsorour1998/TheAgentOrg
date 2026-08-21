@@ -147,8 +147,24 @@ def _load(run_id: str) -> RunState:
     """Reload the state a previous job uploaded.
 
     Read through gates' own path helper, not by string-building a filename, so
-    the location stays a single definition. Task 6 moves this to DynamoDB by
-    changing gates.py alone.
+    the location stays a single definition.
+
+    CORRECTED 2026-08-21: an earlier version of this docstring claimed Task 6
+    moves this to DynamoDB "by changing gates.py alone". That was never true, and
+    it is worth stating rather than deleting so the next reader knows the file
+    once asserted the opposite. MEASURED with STATE_BACKEND=dynamodb, this
+    function raises:
+
+        RuntimeError: there is no state FILE on the 'dynamodb' backend; the run's
+        state is an item in 'theagentorg-runs'. Read it with gates.load(run_id) ...
+
+    `gates._state_path` refuses on that backend BY DESIGN (gates.py:116-121), and
+    gates.py:78-79 names this module as the caller that should use `gates.load`.
+    KNOWN DEBT, deliberately not fixed before the Aug 25 demo: the fix is to read
+    through `gates.load(run_id)` and turn its FileNotFoundError into the
+    SystemExit below, but that path has no test and this is the one script the
+    whole cloud run depends on. run-pipeline.yml sets no STATE_BACKEND, so the
+    demo runs on the `local` default and never reaches the broken path.
     """
     path = gates._state_path(run_id)
     if not path.is_file():
@@ -165,11 +181,17 @@ def _load(run_id: str) -> RunState:
 
 
 def _emit(state: RunState) -> None:
-    """Save the state and print the two lines a human reads off the job log."""
-    path = gates.save(state)
+    """Save the state and print the two lines a human reads off the job log.
+
+    `ref`, not `path`: gates.save returns a `StateRef`, which is only Path-SHAPED
+    to the extent of `read_text()`. The old name worked solely because it is
+    consumed by an f-string and StateRef defines __str__ -- a reader who trusted
+    it would reach for `.parent` or `.exists()` and get an AttributeError.
+    """
+    ref = gates.save(state)
     print(f"run_id={state.run_id}")
     print(f"status={state.status}")
-    print(f"state={path}")
+    print(f"state={ref}")
 
 
 def _stage_plan(args: argparse.Namespace) -> int:
