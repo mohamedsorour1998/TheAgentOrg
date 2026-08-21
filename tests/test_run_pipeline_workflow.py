@@ -63,6 +63,7 @@ live and is therefore the part that can be executed here.
 
 import argparse
 import itertools
+import os
 import re
 import subprocess
 import sys
@@ -1276,4 +1277,92 @@ def test_every_gate_has_a_rejection_recorder_wired_to_it():
         perms = job.get("permissions") or {}
         assert perms.get("id-token") != "write", (
             f"job {job_name} holds id-token: write; recording a refusal needs none"
+        )
+
+
+def test_the_run_id_guard_fires_when_the_plan_stage_prints_no_run_id():
+    """MINOR 7: the guard was unreachable in the exact case its message describes.
+
+    MEASURED, by running the shipped script rather than reading it. Under
+    `set -euo pipefail`, a `stage.log` with no `run_id=` line makes grep exit 1 and
+    kill the step at that line -- so the step failed, but the guard never ran and
+    its `::error::` diagnostic never printed. Probed against the original:
+
+        exit=1, and "GUARD FIRED" never printed
+
+    The guard therefore fired only for a literal empty `run_id=` line, never for
+    the missing-line case. That is the "cannot distinguish did-not-run from
+    passed" shape one level up: the failure and the diagnostic came apart, so a
+    plan stage that printed nothing looked like a crashed grep.
+
+    This EXECUTES the workflow's own run body -- extracted from the YAML, not
+    retyped -- against a log with no run_id, and requires the diagnostic in the
+    output. Retyping the script here would pin a copy and let the real one drift.
+    """
+    body = None
+    for step in _steps(_job("plan")):
+        if "run_stage.py plan" in (step.get("run") or ""):
+            body = step["run"]
+    assert body, "no step in the plan job invokes run_stage.py plan"
+
+    # Replace the python invocation with a stub that WRITES a log carrying no
+    # run_id line, then exits 0. Everything else runs as shipped.
+    #
+    # `printf > stage.log`, NOT `echo | tee stage.log`, and the difference is the
+    # whole validity of this test. A first version used the tee form and the
+    # mutation SURVIVED: `tee` is the last command of that pipeline, it succeeds,
+    # and with pipefail the pipeline's status is taken from the last failing
+    # command -- so the stub's own pipeline masked nothing, but it also meant the
+    # script under test no longer resembled the shipped one at the point that
+    # matters. Traced with `bash -x` to find it: under pipefail the ASSIGNMENT
+    # `run_id="$(grep ... | cut ...)"` inherits status 1 when grep matches
+    # nothing, which is what kills the step before the guard. A stub that cannot
+    # reproduce that assignment cannot test the guard.
+    lines = body.splitlines()
+    patched = []
+    skipping = False
+    for line in lines:
+        if line.strip().startswith("python scripts/run_stage.py plan"):
+            patched.append(
+                'printf "planner ran but printed no run_id\\n" > stage.log'
+            )
+            skipping = line.rstrip().endswith("\\")
+            continue
+        if skipping:
+            skipping = line.rstrip().endswith("\\")
+            continue
+        patched.append(line)
+    script = "\n".join(patched)
+    assert "stage.log" in script and "GITHUB_OUTPUT" in script, (
+        f"the extracted script does not look like the run_id plumbing:\n{script}"
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "gh_output"
+        out.touch()
+        result = subprocess.run(
+            ["bash", "-c", script],
+            capture_output=True,
+            text=True,
+            cwd=tmp,
+            env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(out)},
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+
+        assert result.returncode != 0, (
+            f"the step succeeded with no run_id; everything downstream would then "
+            f"look for a run that does not exist:\n{combined}"
+        )
+        # THE POINT OF THIS TEST. A non-zero exit alone was already true before the
+        # fix -- grep's own failure produced it. What was missing is the guard
+        # SAYING so, which is the difference between a diagnosable failure and a
+        # step that died at an unexplained grep.
+        assert "printed no run_id" in combined, (
+            f"the step failed without the guard's diagnostic, so the guard is "
+            f"unreachable in the case it documents -- grep's exit status killed "
+            f"the step first:\n{combined}"
+        )
+        assert not out.read_text().strip(), (
+            f"an empty run_id was still written to GITHUB_OUTPUT: {out.read_text()!r}"
         )

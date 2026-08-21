@@ -178,7 +178,19 @@ jobs:
             --ticket-id "$TICKET_ID" \
             --ticket-text "$TICKET_TEXT" \
             --poisoned "$POISONED" | tee stage.log
-          run_id="$(grep -m1 '^run_id=' stage.log | cut -d= -f2)"
+          # `|| true` is what makes the guard below REACHABLE, and it is the whole
+          # point of this line. MEASURED: under `set -euo pipefail`, a log with no
+          # `run_id=` line makes grep exit 1 and kill the step immediately -- so
+          # without this the guard fired only for a literal empty `run_id=` line,
+          # never for the missing-line case its own message describes. Probed:
+          # with the bare pipeline the step exits 1 and "GUARD FIRED" never
+          # prints; with `|| true` it prints and then exits 1 deliberately.
+          #
+          # Suppressing grep's status is safe here precisely BECAUSE the guard
+          # exists: the empty-string case is caught explicitly one line down, with
+          # a message naming what went wrong. `|| true` without that guard would
+          # be the real defect -- a missing run_id sailing on as an empty string.
+          run_id="$(grep -m1 '^run_id=' stage.log | cut -d= -f2 || true)"
           if [ -z "$run_id" ]; then
             echo "::error::the plan stage printed no run_id; nothing downstream can find its state"
             exit 1

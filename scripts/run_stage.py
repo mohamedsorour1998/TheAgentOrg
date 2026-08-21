@@ -33,12 +33,25 @@ of them could be if they lived in a `run:` body.
 WHAT THIS DELIBERATELY DOES NOT DO
 ==================================
 It does not re-implement the pipeline. Every stage below calls the SAME
-`agent_client.call_agent`, the SAME `github_ops` functions and the SAME
-`state.compute_security_verdict` that `graph._walk` calls, in the same order,
-with the same block rule. `graph.py` remains the definition of the pipeline for
-the local path; a second copy of the block rule -- the one deterministic thing
-this whole project is built to demonstrate -- would be the worst possible thing
-to duplicate.
+`agent_client.call_agent` and the SAME `github_ops` functions that `graph._walk`
+calls, in the same order. `graph.py` remains the definition of the pipeline for
+the local path.
+
+THE BLOCK RULE IS NOT COPIED HERE, and it is worth being exact about where it
+lives, because it is the one deterministic thing this whole project is built to
+demonstrate. `state.compute_security_verdict` is called in exactly one place on
+this path: `agentorg/agents/security.py:187`, inside the security agent. NEITHER
+this file NOR `graph.py` calls it -- both reach the verdict the same way, by
+`call_agent("security", state)` and then reading `state.security.verdict`. So the
+rule is evaluated once, behind the agent seam, whether the agent runs in this
+process or in its AgentCore runtime.
+
+(An earlier version of this paragraph claimed both files call
+`compute_security_verdict` directly. That was false -- measured with
+`grep -n compute_security_verdict agentorg/graph.py`, which returns nothing -- and
+it is corrected rather than quietly deleted because the false version was
+load-bearing prose about where the block rule lives, which is exactly the kind of
+claim a reader would take on trust.)
 
 What it does NOT reuse is `_walk` itself, and that is not a choice: `_walk` is one
 uninterruptible function containing all three gates. Splitting it is the entire
