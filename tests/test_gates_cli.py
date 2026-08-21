@@ -394,15 +394,27 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     security stage are both REACHED on an unapproved run, which is what keeps
     the block rule's coverage independent of what the reviewer decided.
 
-    post_comment is recorded too, and it is the sharpest of the three: it is
-    reachable ONLY from inside the block branch, so it distinguishes "the
-    scanners ran" from "the block rule actually fired". A halt placed between
-    security.run and that branch leaves the first two recorders satisfied and
-    only this one empty.
+    THE THIRD RECORDER'S DISCRIMINATOR CHANGED, and the reason is worth writing
+    down because it is rule 2 in the plan's shared context biting in the good
+    direction. This test used to assert `commented == []` on a clean run, on the
+    stated grounds that post_comment "is reachable ONLY from inside the block
+    branch". That was true when the block explanation was the only thing anyone
+    posted; it is false now that every stage posts its output to the repo (see
+    graph.COMMENT_HEADER), so a clean run legitimately produces eleven comments.
+    Left as it was, this assertion FAILED rather than going quietly vacuous --
+    which is the outcome the rule exists to produce.
+
+    The claim it was making is still worth pinning, so the discriminator moved to
+    the one that survives: the security comment's own VERDICT WORD. A clean run
+    posts `PASS`, a blocked run posts `BLOCK`, and both flow from
+    `state.security.verdict` rather than from wording this test invented. A halt
+    placed between security.run and the block branch still leaves the first two
+    recorders satisfied and no BLOCK comment anywhere -- which is exactly the
+    failure the original assertion was built to catch.
     """
     opened: list[str] = []
     scanned: list[str] = []
-    commented: list[str] = []
+    commented: list[tuple[str, str]] = []
     real_open_pr = github_ops.open_pr
     real_security = security.run
     real_post_comment = github_ops.post_comment
@@ -413,8 +425,19 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
         scanned.append(state.ticket_id) or real_security(state)
     ))
     monkeypatch.setattr(github_ops, "post_comment", lambda state, body, finding=None: (
-        commented.append(state.ticket_id) or real_post_comment(state, body, finding)
+        commented.append((state.ticket_id, body)) or real_post_comment(state, body, finding)
     ))
+
+    def _verdicts(word: str) -> list[str]:
+        """Tickets whose SECURITY comment carried this verdict word.
+
+        Keyed on the security stage's own label as well as the word, so a
+        `**BLOCK**` appearing in some other stage's prose -- a reviewer quoting
+        the block rule, say -- cannot be counted as the security stage speaking.
+        """
+        marker = f"{graph.COMMENT_HEADER}security"
+        return [tid for tid, body in commented
+                if body.startswith(marker) and f"**{word}**" in body]
 
     # Toggled rather than undone: monkeypatch.undo() would also revert the
     # autouse guards in conftest.py, which share this same monkeypatch object.
@@ -428,14 +451,17 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     assert graph.run_pipeline("CLEAN-1", TICKET).status == "failed"
     assert opened == ["CLEAN-1"], "the diff is published for the scanners to read"
     assert scanned == ["CLEAN-1"], "the block rule is evaluated on every diff"
-    assert commented == [], "a clean diff has nothing to explain"
+    # The security stage reported, and it reported a PASS -- so it was reached
+    # AND its verdict reached the repo, without the block branch being entered.
+    assert _verdicts("PASS") == ["CLEAN-1"]
+    assert _verdicts("BLOCK") == [], "a clean diff has no block to explain"
 
     # The same run on the poisoned ticket, still with a reviewer that never
     # approves: the block branch must be entered, not merely approached.
     assert graph.run_pipeline("POISON-1", TICKET, poisoned=True).status == "blocked"
     assert opened == ["CLEAN-1", "POISON-1"]
     assert scanned == ["CLEAN-1", "POISON-1"]
-    assert commented == ["POISON-1"], "the block reason is posted from inside the block"
+    assert _verdicts("BLOCK") == ["POISON-1"], "the block reason is posted"
 
     # The recorders are live rather than vacuously equal: the approving path
     # goes through the same patches and reaches the same stages.
@@ -443,7 +469,8 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     assert graph.run_pipeline("CLEAN-2", TICKET).status == "promoted"
     assert opened == ["CLEAN-1", "POISON-1", "CLEAN-2"]
     assert scanned == ["CLEAN-1", "POISON-1", "CLEAN-2"]
-    assert commented == ["POISON-1"]
+    assert _verdicts("BLOCK") == ["POISON-1"]
+    assert _verdicts("PASS") == ["CLEAN-1", "CLEAN-2"]
 
 
 # --------------------------------------------------------------------------

@@ -25,11 +25,17 @@ says so. Like the two above it degrades rather than raising -- no credentials,
 no network and a half-finished deploy each get an honest sentence -- because it
 is rendered beside the pipeline status and a fabricated deploy claim is worse
 than an admitted unknown.
+
+`post_comment` has TWO destinations, and it chooses between them by reading the
+state rather than by taking a parameter -- see `_target` for why. Plan and gate1
+output has to reach the ISSUE, because the PR does not exist until `open_pr`
+runs; everything from the developer onward belongs on the PR, where the diff is.
 """
 
 import hashlib
 import logging
 import os
+import re
 import subprocess
 
 from github import Auth, Github, GithubException
@@ -216,12 +222,18 @@ def open_pr(state: RunState) -> DevResult:
 
 
 def _undelivered(what: str, exc: Exception, body: str, ref: str) -> str:
-    """Report a block reason we could not deliver, and hand back the honest ref.
+    """Report a comment we could not deliver, and hand back the honest ref.
 
     Both of post_comment's paths degrade through here, so the function carries
     one pattern rather than two. The shape is security.run's scanner fallback:
-    one bounded line at WARNING naming the cause, the reason itself on stdout,
+    one bounded line at WARNING naming the cause, the body itself on stdout,
     and the traceback left to the DEBUG record its caller emits.
+
+    "comment" rather than "block reason", which is what this said when the block
+    explanation was the only thing anyone posted. Every stage's output goes
+    through post_comment now, so a failure here can lose the planner's tasks or
+    the SRE's verdict just as easily -- and a projector line naming the wrong
+    artifact sends the reader looking for a block that never happened.
 
     Bounded is the load-bearing word. During the demo this prints on the
     projector immediately above `status=blocked`, and a wall of text there
@@ -236,23 +248,114 @@ def _undelivered(what: str, exc: Exception, body: str, ref: str) -> str:
     """
     detail = f"{type(exc).__name__}: {_one_line(str(exc))}"
     logging.getLogger(__name__).warning(
-        "could not %s (%s); block reason to stdout instead",
+        "could not %s (%s); comment body to stdout instead",
         _one_line(what, limit=100), detail,
     )
     print(f"[post_comment] could not {what} ({detail}); reason: {body}")
     return ref
 
 
+# The two surfaces a comment can land on, in the words the offline NOTES header
+# records. Named constants rather than bare strings at four call sites, because
+# the NOTES header and the online branch must not be able to disagree about
+# which one a given comment was for -- that disagreement is unobservable.
+ON_ISSUE = "issue"
+ON_PULL_REQUEST = "pull request"
+
+
+def _destination(state: RunState) -> str:
+    """Which surface this comment belongs on: the run's issue, or its PR.
+
+    DERIVED FROM THE STATE, not passed in as a parameter, and that is a
+    deliberate choice rather than the lazy one. `post_comment(state, body,
+    finding=None)` is called from graph.py and from the reviewer lane, and its
+    signature is named in the plan's own type-consistency check as unchanged.
+    Adding a `target=` argument would mean every existing caller keeps whatever
+    the default is -- so the one call that most needs to reach the issue (the
+    planner's, which runs before any PR exists) would silently keep going to the
+    PR lookup, and the failure would be a comment that quietly went nowhere.
+
+    The discriminator is the branch, because that is the thing that only exists
+    once `open_pr` has run: it OVERWRITES `dev.branch` with the branch it
+    created (`open_pr` above, `dev.branch = branch`). Before the developer runs
+    at all, `state.dev` is None. So plan and gate1 -- the two stages that
+    precede the developer -- resolve to the issue, and everything after
+    `open_pr` resolves to the PR.
+
+    WHAT THIS CANNOT DO, stated because it is an accepted limit rather than an
+    oversight: between the developer returning and `open_pr` running, `state.dev`
+    carries the AGENT's branch (the fixture's is `feat/login-rate-limit`), which
+    is not a branch this run created and has no PR. A comment posted in that
+    window would resolve to ON_PULL_REQUEST and then fail to find one. graph.py
+    closes that window by holding the developer's and reviewer's comments until
+    `open_pr` has run rather than by asking this function to guess.
+    """
+    return ON_PULL_REQUEST if (state.dev and state.dev.branch) else ON_ISSUE
+
+
+# A ticket id that IS an issue reference, and nothing looser. `#7` is the form
+# GitHub itself writes; a bare `7` is what the ingress passes through.
+_ISSUE_REF = re.compile(r"\A#?([0-9]+)\Z")
+
+
+def _issue_number(ticket_id: str) -> int | None:
+    """The issue this run came from, or None when the ticket id is not one.
+
+    ANCHORED, and that is the whole point of the function. The lenient readings
+    -- the first digits in the string, or `int(re.sub(r"\\D", "", ticket_id))` --
+    turn every ticket id this repo actually uses into a real issue number on
+    somebody else's repository: `POISON-1` and `CLEAN-1` become #1, `T-1`
+    becomes #1, `DEMO-1` becomes #1. The next thing post_comment does with the
+    answer is WRITE, so this is the same refusal the branch check below makes
+    for the same reason: a lookup built from a value we did not really resolve
+    is not a lookup that finds nothing.
+
+    Returning None is not a failure to handle -- it is the ordinary case for
+    every locally-driven run, and post_comment answers it the way it answers a
+    missing PR: the body to stdout and a `comment://` ref back to the caller.
+    """
+    match = _ISSUE_REF.match((ticket_id or "").strip())
+    return int(match.group(1)) if match else None
+
+
+def _comment_on_issue(state: RunState, body: str, ref: str) -> str:
+    """Post on the issue that opened this run. Cannot raise; see post_comment."""
+    number = _issue_number(state.ticket_id)
+    if number is None:
+        # No issue to write on. NOT an error and not silent: this is every run
+        # driven from a terminal or a workflow_dispatch, so the body goes to
+        # stdout exactly as an unreachable PR's does.
+        print(f"[post_comment] ticket {state.ticket_id!r} is not an issue "
+              f"number, so there is no issue to comment on; reason: {body}")
+        return ref
+
+    try:
+        return _repo().get_issue(number).create_comment(body).html_url
+    except Exception as exc:
+        # The same two lines, in the same order, as the other two handlers in
+        # this function's family -- see the PR branch below for why the traceback
+        # is a separate inline DEBUG call rather than folded into _undelivered.
+        logging.getLogger(__name__).debug("post_comment failure traceback", exc_info=True)
+        return _undelivered(f"comment on issue #{number}", exc, body, ref)
+
+
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
-    """Post a comment on the PR (reviewer + security lanes). Returns a comment ref.
+    """Post a comment on this run's PR, or on its issue. Returns a comment ref.
+
+    WHICH OF THE TWO is decided by `_destination(state)`, not by an argument --
+    read that function for why. Plan and gate1 output reaches the ISSUE because
+    the PR does not exist until `open_pr`; everything from the developer onward
+    reaches the PR, where the diff is.
 
     Returns a ref string in every case, and does not raise. That is a hard
     requirement rather than politeness, because of WHERE it is called from:
-    graph.py sets `status="blocked"` and then, on the very next line, calls
-    `post_comment(state, state.security.explanation)`. The block is the
-    product; the comment is only how a human learns why. So a comment that
-    cannot be delivered must not be able to convert a correctly-blocked run
-    into a traceback -- on stage, in front of judges.
+    graph.py sets `status="blocked"` and then, on the very next line, records
+    the ref this returns. The block is the product; the comment is only how a
+    human learns why. So a comment that cannot be delivered must not be able to
+    convert a correctly-blocked run into a traceback -- on stage, in front of
+    judges. Since graph.py now posts after EVERY stage, that requirement got
+    nine times more load-bearing: any one of nine failures could take the demo
+    down, and none of them may.
 
     BOTH paths degrade, and the offline one matters most: the demo command is
     `OFFLINE=true`, so that is the branch stage actually takes.
@@ -264,14 +367,18 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         `local://` ref on a run whose bytes never reached disk would be the
         artifact claiming a delivery that did not happen.
 
-    Three more ways delivery fails online, all ending the same way (the reason
-    on stdout, a `comment://<run_id>` ref back to the caller):
+    Four more ways delivery fails online, all ending the same way (the body on
+    stdout, a `comment://<run_id>` ref back to the caller):
 
       * there is no branch to look a PR up by -- `state.dev` is None, or its
         branch is still "". We do not ASK GitHub in that case. `head="owner:"`
         is not a filter that selects nothing, so a query built from an empty
         branch is a query that can come back with somebody else's PR, and
-        this function's next move is to write on whatever came back.
+        this function's next move is to write on whatever came back. That state
+        now routes to the issue instead, which has the same refusal of its own:
+      * the ticket id is not an issue number, so there is no issue either. See
+        `_issue_number` -- a loose parse would write on issue #1 of the target
+        repository for every `CLEAN-1` run this suite performs.
       * the branch has no open PR. Ordinary: `open_pr` is skipped or the PR was
         merged or closed between the two calls.
       * the API call itself fails -- rate limit, 502, an expired token, a
@@ -292,14 +399,20 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         )
         body = header + body
 
-    # The "not delivered" ref, shared by both paths and computed before either
-    # of them runs. graph.py writes whatever comes back into the run's log row,
+    # The "not delivered" ref, shared by every path and computed before any of
+    # them runs. graph.py writes whatever comes back into the run's log row,
     # so this is the value that tells a reader the reason never landed anywhere.
     ref = f"comment://{state.run_id}"
+    destination = _destination(state)
 
     if _use_local():
-        # No network (or no credentials): append the reason to a local NOTES file.
+        # No network (or no credentials): append the body to a local NOTES file.
         # `or "."` because dirname("NOTES.md") is "", and makedirs("") raises.
+        #
+        # THE HEADER NAMES THE DESTINATION. Offline there is no issue and no PR,
+        # so both surfaces collapse onto this one file -- and without the word,
+        # the issue/PR split would be unobservable on the path the demo and the
+        # whole suite actually run, leaving it pinned by the online tests alone.
         #
         # Wrapped for the same reason the online branch is, and this is the
         # branch that matters more: the demo command is `OFFLINE=true`, so an
@@ -311,7 +424,8 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         try:
             os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
             with open(config.OFFLINE_NOTES, "a") as fh:
-                fh.write(f"\n## {state.ticket_id} ({state.run_id})\n{body}\n")
+                fh.write(f"\n## {state.ticket_id} ({state.run_id}) → {destination}"
+                         f"\n{body}\n")
         except Exception as exc:
             # Inline and at DEBUG: this is the "demote, don't drop" half, and
             # it is also what satisfies BLE001 -- the rule wants a logging call
@@ -319,19 +433,18 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
             # _undelivered would not provide.
             logging.getLogger(__name__).debug("post_comment failure traceback",
                                               exc_info=True)
-            return _undelivered("write the block reason to the offline NOTES file",
+            return _undelivered("write the comment to the offline NOTES file",
                                 exc, body, ref)
         # Only now -- a local:// ref means the bytes are on disk. Returning it
         # from anywhere above would be the artifact claiming a delivery that
         # did not happen, which is worse than the silence this replaced.
         return f"local://{config.OFFLINE_NOTES}"
 
+    if destination == ON_ISSUE:
+        return _comment_on_issue(state, body, ref)
+
     branch = state.dev.branch if state.dev and state.dev.branch else ""
     no_pr = f"[post_comment] no PR for {branch!r}; reason: {body}"
-
-    if not branch:
-        print(no_pr)
-        return ref
 
     try:
         repo = _repo()
