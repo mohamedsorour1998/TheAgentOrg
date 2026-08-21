@@ -58,11 +58,18 @@ It also subsumes, in one place, every way a decision can be phantom:
     failed;
   * a second decision on a gate that has already been decided;
   * a decision on a gate this run never paused at;
-  * a run_id that is not on disk at all -- including `../../etc/passwd`, which
-    `gates._state_path` would happily resolve OUTSIDE runs/ (verified). Nothing
-    here builds a path from request bytes: an accepted run_id came from
-    `_RUNS.glob`, so traversal is impossible by construction rather than by
-    pattern-matching.
+  * a run_id that is not stored at all -- including `../../etc/passwd`, which
+    `gates._state_path` would happily resolve OUTSIDE runs/ (verified). An
+    accepted run_id has passed `log.is_safe_run_id` AND been found by the
+    listing, and it is worth being precise about which of those does the work,
+    because it changed. It used to be the listing alone: run ids came out of
+    `_RUNS.glob`, so they were real directory entries and traversal was
+    impossible by construction. With `STATE_BACKEND=dynamodb` the listing is a
+    DynamoDB Query, which returns whatever bytes are in the table and promises
+    nothing about them -- so the containment the glob USED TO IMPLY is now
+    stated, in `log.is_safe_run_id`, and applied on BOTH backends before any
+    id is listed or served. The glob still runs on the local backend; it is no
+    longer what makes the refusal true.
 
 The underlying `gates.resume` gap is NOT fixed here -- that file is shared and
 owned elsewhere. Refusing at this boundary keeps the phantom off the screen; it
@@ -85,13 +92,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import gates, log
-from .state import HumanDecision, RunState
+from .common import config
+from .state import HumanDecision
 
 # This module's own runs directory, in the style of log._LOG_DIR,
 # gates._STATE_DIR and gates_cli._RUNS -- all four resolve to <repo>/runs. Its
 # own rather than a reach into another module's underscore, and module-level so
 # tests have one seam to patch. Patching this one does NOT redirect gates or
 # log; a hermetic test patches all three (see tests/test_approve_server.py).
+#
+# Read on the LOCAL backend only. `_run_ids` below dispatches on
+# config.STATE_BACKEND, and on `dynamodb` the runs come from a Query instead --
+# which is why the traversal guard no longer rests on this glob. See the
+# docstring above.
 _RUNS = pathlib.Path(__file__).resolve().parent.parent / "runs"
 
 # The gates a decision can name. Hardcoded for readability; kept honest by
@@ -147,6 +160,51 @@ class _Refused(Exception):
     """
 
 
+def _run_ids() -> tuple[list[str], int]:
+    """Every run this screen may consider, and how many ids it REFUSED.
+
+    THE PATH-TRAVERSAL DEFENCE LIVES HERE, and it is explicit rather than
+    geometric. This function used to be a single `_RUNS.glob("*.state.json")`
+    inline in `_awaiting`, and that glob did double duty: it was the listing AND
+    the guard, because a name it returned was by construction a real entry in
+    that one directory, so `../../etc/passwd` could not come out of it. See the
+    module docstring's refusal list.
+
+    With `STATE_BACKEND=dynamodb` the listing is a Query against a table, which
+    returns whatever bytes were written to it. There is no directory to be
+    contained by, so the guarantee is now asserted instead of inherited: every
+    id, on BOTH backends, must satisfy `log.is_safe_run_id` before it is listed
+    -- and therefore before `_one` will accept it in a POST, since the accepted
+    set IS this listing.
+
+    Validating on the local backend too is not redundancy for its own sake. It
+    means the property holds for one reason on both paths rather than two, so a
+    reader does not have to know which backend is live to know why a traversal
+    is impossible, and a future third backend inherits the guard by default.
+
+    THE REFUSED COUNT IS RETURNED, not swallowed, and it is added to the
+    unreadable count the page already reports. An id in the store that this
+    screen will not serve is a real fact about the store; rendering it as an
+    empty queue is precisely the "did not run versus passed" conflation this
+    module keeps paying for.
+    """
+    if config.STATE_BACKEND == config.STATE_BACKEND_LOCAL:
+        found = [path.name.removesuffix(".state.json")
+                 for path in sorted(_RUNS.glob("*.state.json"))]
+    else:
+        found = log.list_indexed_run_ids()
+
+    safe = [run_id for run_id in found if log.is_safe_run_id(run_id)]
+    refused = len(found) - len(safe)
+    if refused:
+        # Counted and logged, never echoed: these are untrusted bytes and this
+        # message reaches a log an operator reads.
+        logging.getLogger(__name__).warning(
+            "%d run id(s) from the %s state backend are not safe single "
+            "components and were not listed", refused, config.STATE_BACKEND)
+    return safe, refused
+
+
 def _awaiting() -> tuple[dict[str, list[str]], int]:
     """Which runs want a human, and how many state files could not be read.
 
@@ -156,6 +214,11 @@ def _awaiting() -> tuple[dict[str, list[str]], int]:
     no decision recorded, and is not already over:
 
         paused - decided, where paused comes from log.read(run_id)
+
+    The candidate runs come from `_run_ids`, which is where the traversal guard
+    now lives; nothing in this function builds a path or a key from request
+    bytes. `gates.load` reads the state through the backend rather than
+    `path.read_text()`, so this listing works unchanged on both.
 
     THE OBVIOUS FILTER IS WRONG, measured on this machine's 3466 state files:
     215 runs read `status == "running"` but only 129 are genuinely awaiting a
@@ -172,16 +235,17 @@ def _awaiting() -> tuple[dict[str, list[str]], int]:
     so `_page` says how many were skipped whenever any were.
     """
     awaiting: dict[str, list[str]] = {}
-    unreadable = 0
-    for path in sorted(_RUNS.glob("*.state.json")):
-        run_id = path.name.removesuffix(".state.json")
+    run_ids, unreadable = _run_ids()
+    for run_id in run_ids:
         try:
-            state = RunState.model_validate_json(path.read_text())
+            state = gates.load(run_id)
         except Exception:
-            # Truncated, mid-write, or written by an older contract. Broad on
-            # purpose: one bad file must not blank the whole screen.
+            # Truncated, mid-write, absent, or written by an older contract.
+            # Broad on purpose: one bad record must not blank the whole screen.
+            # The run_id is NOT interpolated -- it is untrusted and this logger
+            # writes where an operator reads.
             logging.getLogger(__name__).warning(
-                "could not read state file %s", path.name, exc_info=True)
+                "could not read the state record for a listed run", exc_info=True)
             unreadable += 1
             continue
         if state.status in _TERMINAL:

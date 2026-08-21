@@ -128,3 +128,46 @@ SCANNER_TIMEOUT_SECONDS = int(os.environ.get("SCANNER_TIMEOUT_SECONDS", "120"))
 # "false" as True, which here means every agent call leaving the machine because
 # somebody wrote the word "false" down.
 REMOTE_AGENTS = os.environ.get("REMOTE_AGENTS", "false").lower() == "true"
+
+# Run state storage (Task 6) ------------------------------------------------
+# STATE_BACKEND chooses WHERE a run's decision log and paused state live. The
+# readers are agentorg/log.py (append/read), agentorg/gates.py (save/pause/
+# resume) and agentorg/approve_server.py (the listing).
+#
+# Default `local`, and that default is load-bearing for the same two reasons
+# REMOTE_AGENTS' is. It keeps the LOCAL path the tested one -- the whole suite
+# writes JSONL and state files under runs/ -- and it is what keeps the judged
+# demo on the path that has been green all week. The timeline a judge reads is
+# the PR and the terminal, not a DynamoDB table, so this knob buys durability
+# for a deployed run and must never be needed for a demo.
+#
+# UNKNOWN VALUES RAISE, they do not fall back to `local`. A typo'd
+# STATE_BACKEND=dynamo silently writing to disk is the worst available outcome:
+# an operator who believes a run is durable and finds it in a container's
+# ephemeral filesystem. That is the same fail-open shape SCANNERS_REQUIRED's
+# parsing note above describes, and MAX_REVISION_LOOPS already sets the
+# precedent that a malformed knob fails at import rather than being guessed.
+#
+# Lowercased before comparison, matching OFFLINE / LLM_DISABLED /
+# SCANNERS_REQUIRED / REMOTE_AGENTS. Compared against a NAMED tuple rather than
+# two string literals so log.py, gates.py, approve_server.py and the tests all
+# read the same definition of "the legal backends".
+STATE_BACKEND_LOCAL = "local"
+STATE_BACKEND_DYNAMODB = "dynamodb"
+STATE_BACKENDS = (STATE_BACKEND_LOCAL, STATE_BACKEND_DYNAMODB)
+
+STATE_BACKEND = os.environ.get("STATE_BACKEND", STATE_BACKEND_LOCAL).lower()
+if STATE_BACKEND not in STATE_BACKENDS:
+    raise ValueError(
+        f"STATE_BACKEND={STATE_BACKEND!r} is not a storage backend; expected one "
+        f"of {', '.join(STATE_BACKENDS)}. Refused rather than defaulted to "
+        f"{STATE_BACKEND_LOCAL!r}: a typo that quietly wrote run state to local "
+        f"disk would leave an operator believing a run is durable when it is not."
+    )
+
+# The DynamoDB table holding every run's events and its current state document.
+# One table, one partition per run: PK `run_id`, SK `ts#event_id` for an event
+# row and one reserved sort key for the state document (see log.py). Created by
+# infra/Terraform/modules/state/, whose IAM grant is exactly PutItem, Query,
+# GetItem and UpdateItem on this table and nothing else.
+STATE_TABLE = os.environ.get("STATE_TABLE", "theagentorg-runs")

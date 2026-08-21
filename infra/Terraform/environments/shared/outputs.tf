@@ -34,3 +34,15 @@ output "github_ingress_log_group" {
   description = "`aws logs tail <this> --follow` while debugging a delivery"
   value       = module.ingress.log_group_name
 }
+
+# ── run state (DynamoDB) ──────────────────────────────────────────────────────
+
+output "run_state_table_name" {
+  description = "Set STATE_TABLE to this, and STATE_BACKEND=dynamodb, to move run state off local disk"
+  value       = module.state.table_name
+}
+
+output "run_state_table_arn" {
+  description = "The run-state table's ARN"
+  value       = module.state.table_arn
+}

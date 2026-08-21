@@ -91,3 +91,23 @@ variable "dispatch_token_secret_name" {
   type        = string
   default     = ""
 }
+
+################################################################################
+# Run state: the decision log and paused-run documents in DynamoDB.
+#
+# OFF BY DEFAULT IN THE APPLICATION, and that is the point of keeping the two
+# separate. This module creates the table; nothing reads or writes it until
+# STATE_BACKEND=dynamodb is set in the environment (agentorg/common/config.py
+# defaults to "local"). So applying this is safe on its own: the local JSONL path
+# stays the tested default and the demo's fallback.
+#
+# The two roles are named rather than wildcarded because this table holds the
+# audit trail of every human gate decision -- see the module's IAM section.
+################################################################################
+module "state" {
+  source = "../../modules/state"
+
+  name              = local.name
+  runtime_role_arns = [module.agentcore.runtime_role_arn, data.aws_iam_role.github_actions.arn]
+  tags              = local.tags
+}

@@ -277,8 +277,8 @@ APPROVAL_WORDS = frozenset({"a", "approve", "approved", "y", "yes"})
 
 def _cli_gate(state: RunState, gate: str) -> HumanDecision:
     """Real gate: pause, ask a human on the terminal, record their decision."""
-    path = gates.pause(state, gate)
-    print(f"\n[{gate}] paused. state saved -> {path}")
+    ref = gates.pause(state, gate)
+    print(f"\n[{gate}] paused. state saved -> {ref}")
     answer = input(f"[{gate}] approve / reject? [a = approve, anything else rejects] ")
     decision = "approved" if answer.strip().lower() in APPROVAL_WORDS else "rejected"
     return HumanDecision(gate=gate, decision=decision,
