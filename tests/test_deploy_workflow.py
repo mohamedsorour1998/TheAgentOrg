@@ -69,6 +69,7 @@ NO LIVE AWS. Nothing here runs aws, terraform, docker, agentcore or git push. Th
 only subprocesses are actionlint and shellcheck over local files.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -1126,3 +1127,284 @@ def test_the_image_ships_every_runtime_path_the_code_reads_from_disk():
     assert "plan_result.json" in present, (
         f"fixtures/ does not contain plan_result.json; found {sorted(present)}"
     )
+
+
+# --------------------------------------------------------------------------
+# SCANNERS_REQUIRED: the knob that decides whether the cloud verdict is REAL.
+#
+# THE ASYMMETRY IS THE WHOLE POINT AND IT CUTS BOTH WAYS.
+#
+# Without the knob, a security runtime whose image lacks the three binaries
+# takes the ABSENT path: every wrapper raises, agents/security.py catches it,
+# and the verdict is read out of fixtures/security_result_block.json. The gate
+# still says "blocked" -- from JSON deserialisation, not from
+# compute_security_verdict. That is failing OPEN while looking green, which is
+# the single defect this repository exists to prevent.
+#
+# With the knob on an agent whose image lacks the binaries, absent is promoted
+# to FAULT: three *-scanner-error findings, blocking=3, and the CLEAN run
+# blocks too (agentorg/common/config.py:64-100). Set on all five, the demo's
+# first half dies on a projector.
+#
+# So the property is not "the knob is present". It is "the knob is present on
+# EXACTLY ONE of the five agents, and that agent is security, in BOTH the
+# update and the create branch". Nothing short of that is the property.
+# --------------------------------------------------------------------------
+
+# agentorg/common/config.py parses this knob case-insensitively against the
+# literal "true", so "1", "yes" and "TRUE " are all read as False. A workflow
+# setting an unparseable value would produce a runtime that believes it has
+# fail-closed scanners and does not -- config.py's own comment calls that the
+# worst available outcome. Pinned here as the value, and below as the parse.
+SCANNERS_REQUIRED_NAME = "SCANNERS_REQUIRED"
+SCANNERS_REQUIRED_VALUE = "true"
+
+# The one agent whose image is expected to carry gitleaks, trivy and semgrep,
+# and therefore the only one that may demand them.
+SCANNER_AGENT = "security"
+
+# Record separator for the stub's argv log. Chosen because no argument in
+# deploy.yml contains it, so splitting on it recovers argv exactly -- unlike
+# splitting on spaces, which the --description argument would break.
+_ARGV_SEP = "\x1f"
+
+
+def _runtime_loop_script():
+    """deploy.yml's one run body that creates or updates the five runtimes.
+
+    Asserts it found exactly one. If the loop is ever split across two steps,
+    every test below would silently start checking half of it, so this refuses
+    to guess.
+    """
+    scripts = [
+        s
+        for s in _all_run_scripts(DEPLOY)
+        if "create-agent-runtime" in s and "update-agent-runtime" in s
+    ]
+    assert len(scripts) == 1, (
+        f"expected exactly one run body holding BOTH the update and create "
+        f"branches of the runtime loop; found {len(scripts)}. Splitting them "
+        f"would let the two branches drift apart unnoticed."
+    )
+    return scripts[0]
+
+
+def test_both_runtime_api_calls_pass_the_SAME_environment_variables():
+    """update-agent-runtime and create-agent-runtime must not drift apart.
+
+    `--environment-variables` appears TWICE in the loop, once per branch. An
+    existing runtime is updated; an absent one is created. A knob added to only
+    one branch means the first deploy of a fresh runtime and every deploy after
+    it configure the environment differently -- and which branch runs depends
+    on account state, not on this repository, so the difference would surface
+    as an intermittent demo failure rather than as a diff.
+
+    Compares the two argument values as text rather than requiring a
+    particular variable name, so a refactor that keeps them equal passes.
+    """
+    script = _runtime_loop_script()
+    values = re.findall(r"--environment-variables\s+(\S+)", script)
+    assert values, (
+        "the runtime loop passes no --environment-variables at all; AGENT_ROLE "
+        "would be unset and every runtime would fail at startup"
+    )
+    assert len(values) == 2, (
+        f"expected one --environment-variables per branch (2 total), found "
+        f"{len(values)}: {values}"
+    )
+    assert values[0] == values[1], (
+        f"the update branch passes {values[0]} and the create branch passes "
+        f"{values[1]}. A fresh runtime's first deploy would then differ from "
+        f"every later one."
+    )
+
+
+def test_config_still_parses_the_knob_the_way_this_file_assumes():
+    """Pins the PARSE, not just the name.
+
+    These tests assert the workflow sets SCANNERS_REQUIRED=true. That is only
+    meaningful while config.py reads the value with `.lower() == "true"`. If
+    the parser changed, the tests below would keep passing while pinning a
+    value the code no longer honours -- a test that stopped testing.
+    """
+    config = (REPO_ROOT / "agentorg" / "common" / "config.py").read_text(encoding="utf-8")
+    expected = f'{SCANNERS_REQUIRED_NAME} = os.environ.get("{SCANNERS_REQUIRED_NAME}", "false").lower() == "true"'
+    assert expected in config, (
+        f"agentorg/common/config.py no longer parses {SCANNERS_REQUIRED_NAME} as "
+        f"{expected!r}. The workflow sets {SCANNERS_REQUIRED_VALUE!r}; re-measure "
+        f"what the code now accepts before trusting the tests below."
+    )
+
+
+def _stub_aws(bin_dir, calls_log, existing_runtimes):
+    """An `aws` that records its argv and answers from a file. Never calls AWS.
+
+    Written into a directory placed FIRST on PATH, which is how
+    tests/provenance.py shadows the scanner binaries. Shadowing is enough: the
+    workflow body invokes plain `aws`, and the first PATH match wins. The
+    caller asserts the shadow took effect BEFORE running anything, so a real
+    credentialed call cannot happen by accident.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    stub = bin_dir / "aws"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "{ for a in \"$@\"; do printf '%s\\x1f' \"$a\"; done; printf '\\n'; } "
+        f'>> "{calls_log}"\n'
+        'case "$1 $2" in\n'
+        '  "sts get-caller-identity") echo 339712964409 ;;\n'
+        "  \"bedrock-agentcore-control list-agent-runtimes\")\n"
+        f'    cat "{existing_runtimes}" ;;\n'
+        "  *)\n"
+        "    echo arn:aws:bedrock-agentcore:us-east-1:339712964409:runtime/stub ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _env_vars_per_agent(tmp_path, *, runtimes_exist):
+    """Run deploy.yml's runtime loop for real, with `aws` stubbed, and read back
+    the environment each of the five agents would be configured with.
+
+    THIS EXECUTES THE GUARD RATHER THAN GREPPING FOR IT, which is the only way
+    to tell "a line mentioning security exists somewhere in the body" from "the
+    knob actually reaches security and only security". deploy.yml is heavily
+    commented -- this file's own header records `id-token: write` appearing on
+    three lines, only two of them real -- so a substring check for either the
+    knob or the guard is satisfiable by prose.
+
+    `runtimes_exist` picks the branch: True feeds `list-agent-runtimes` five
+    existing runtimes so the loop UPDATEs, False feeds it nothing so the loop
+    CREATEs. Both branches carry their own --environment-variables argument.
+
+    Returns {agent: {NAME: value}} parsed from the recorded argv.
+    """
+    script = _runtime_loop_script()
+    # GitHub expands ${{ }} before the shell sees it. env.* resolve from the
+    # workflow's own env block so ECR_PREFIX and AWS_REGION are real; anything
+    # else (github.sha) becomes an inert token.
+    shell = re.sub(r"\$\{\{[^}]*\}\}", "EXPANDED", _resolve_env(DEPLOY, script))
+
+    bin_dir = tmp_path / "stub-bin"
+    calls_log = tmp_path / "aws-calls.log"
+    existing = tmp_path / "existing-runtimes.txt"
+    existing.write_text(
+        "".join(f"theagentorg_{a}\tstub-id-{a}\n" for a in AGENTS)
+        if runtimes_exist
+        else "",
+        encoding="utf-8",
+    )
+    _stub_aws(bin_dir, calls_log, existing)
+
+    path = os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")])
+    # BEFORE running: prove the stub shadows any real aws. Without this the
+    # body would reach a credentialed CLI, which no test in this file may do.
+    resolved = shutil.which("aws", path=path)
+    assert resolved == str(bin_dir / "aws"), (
+        f"the aws stub is not first on PATH (resolved {resolved!r}); refusing "
+        f"to run the loop, because a real AWS call would be billable and could "
+        f"mutate live runtimes"
+    )
+
+    target = tmp_path / "runtime-loop.sh"
+    target.write_text("#!/usr/bin/env bash\n" + shell, encoding="utf-8")
+    result = subprocess.run(
+        ["bash", str(target)],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={**os.environ, "PATH": path},
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"deploy.yml's runtime loop exited {result.returncode} under the stub, "
+        f"so nothing below is measuring the real thing:\n"
+        f"--- stdout\n{result.stdout}\n--- stderr\n{result.stderr}"
+    )
+
+    assert calls_log.is_file(), (
+        "the aws stub was never invoked; the loop cannot have configured "
+        "anything and every assertion below would pass vacuously"
+    )
+    per_agent = {}
+    for line in calls_log.read_text(encoding="utf-8").splitlines():
+        argv = [a for a in line.split(_ARGV_SEP) if a]
+        if not any(
+            a in ("update-agent-runtime", "create-agent-runtime") for a in argv
+        ):
+            continue
+        if "--environment-variables" not in argv:
+            continue
+        raw = argv[argv.index("--environment-variables") + 1]
+        pairs = dict(
+            item.split("=", 1) for item in raw.split(",") if "=" in item
+        )
+        role = pairs.get("AGENT_ROLE")
+        assert role, f"a runtime was configured without AGENT_ROLE: {raw!r}"
+        per_agent[role] = pairs
+
+    assert sorted(per_agent) == sorted(AGENTS), (
+        f"the loop configured {sorted(per_agent)}, expected all of {AGENTS}. "
+        f"The recorded calls were:\n{calls_log.read_text(encoding='utf-8')!r}"
+    )
+    return per_agent
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+@pytest.mark.parametrize("runtimes_exist", [True, False], ids=["update", "create"])
+def test_only_the_security_runtime_demands_its_scanners(tmp_path, runtimes_exist):
+    """SCANNERS_REQUIRED on an agent without binaries blocks the CLEAN run too.
+
+    config.py:64-100 measures it: the knob promotes ABSENT to FAULT, so a
+    runtime that cannot find gitleaks returns three *-scanner-error findings
+    and blocking=3. Setting it on all five would take the demo's first half
+    down; setting it on none leaves the cloud verdict a fixture read.
+
+    Parametrised over BOTH branches of the loop, because `--environment-
+    variables` is passed twice and which one runs depends on whether the
+    runtime already exists in the account.
+    """
+    per_agent = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
+
+    demanding = sorted(a for a, e in per_agent.items() if SCANNERS_REQUIRED_NAME in e)
+    assert demanding, (
+        f"no runtime sets {SCANNERS_REQUIRED_NAME}: the deployed security agent "
+        f"would take the ABSENT path, catch every FileNotFoundError and read its "
+        f"verdict out of fixtures/security_result_block.json. 'The security gate "
+        f"ran in the cloud' would be false."
+    )
+    assert demanding == [SCANNER_AGENT], (
+        f"{SCANNERS_REQUIRED_NAME} reaches {demanding}, expected only "
+        f"[{SCANNER_AGENT!r}]. On any agent whose image lacks the three binaries "
+        f"the knob promotes ABSENT to FAULT, so even the CLEAN run blocks with "
+        f"blocking=3 (agentorg/common/config.py:64-100)."
+    )
+    assert per_agent[SCANNER_AGENT][SCANNERS_REQUIRED_NAME] == SCANNERS_REQUIRED_VALUE, (
+        f"{SCANNER_AGENT} gets {SCANNERS_REQUIRED_NAME}="
+        f"{per_agent[SCANNER_AGENT][SCANNERS_REQUIRED_NAME]!r}, expected "
+        f"{SCANNERS_REQUIRED_VALUE!r}. config.py compares against the literal "
+        f'"true" after .lower(), so any other spelling reads as False and the '
+        f"runtime falls back to the fixture while appearing configured."
+    )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+@pytest.mark.parametrize("runtimes_exist", [True, False], ids=["update", "create"])
+def test_every_runtime_still_gets_its_own_agent_role(tmp_path, runtimes_exist):
+    """The knob must not be added by clobbering what was already there.
+
+    `env_vars` is now built up rather than passed as a literal, so the failure
+    mode this guards is an assignment that drops AGENT_ROLE: five runtimes
+    would serve whatever the image defaults to -- except the image has no
+    default, so all five would fail at startup instead. Cheap to pin, and it
+    keeps the accumulation honest.
+    """
+    per_agent = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
+    for agent in AGENTS:
+        assert per_agent[agent]["AGENT_ROLE"] == agent, (
+            f"runtime for {agent} was configured with AGENT_ROLE="
+            f"{per_agent[agent]['AGENT_ROLE']!r}"
+        )

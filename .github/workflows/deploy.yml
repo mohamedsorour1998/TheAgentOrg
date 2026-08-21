@@ -221,12 +221,41 @@ jobs:
 
             id="$(awk -v n="$name" '$1 == n {print $2}' <<<"$existing" | head -1)"
 
+            # SCANNERS_REQUIRED GOES ON THE SECURITY RUNTIME AND NOWHERE ELSE.
+            #
+            # Off (the default), a container with no gitleaks/trivy/semgrep on
+            # PATH takes the ABSENT path: every wrapper raises
+            # FileNotFoundError, agents/security.py catches it, and the verdict
+            # is read out of fixtures/security_result_block.json. The gate then
+            # says "blocked" because a JSON file deserialised, not because
+            # compute_security_verdict decided -- failing OPEN while looking
+            # green, which is the one shape this project exists to prevent. Only
+            # this agent's image carries the three binaries, so only this agent
+            # can honestly demand them.
+            #
+            # ON THE OTHER FOUR IT WOULD BREAK THE DEMO, not harden it. The knob
+            # promotes ABSENT to FAULT (agentorg/common/config.py:64-100), so a
+            # runtime that cannot find gitleaks returns three *-scanner-error
+            # findings and blocks with blocking=3 -- including the CLEAN run,
+            # which is the demo's first half.
+            #
+            # Accumulated into a variable rather than written inline because
+            # BOTH branches below need the same value: an existing runtime is
+            # updated and an absent one created, which branch runs depends on
+            # account state rather than on this repository, and a knob added to
+            # only one would surface as an intermittent difference between a
+            # fresh runtime's first deploy and every later one.
+            env_vars="AGENT_ROLE=${agent}"
+            if [ "$agent" = "security" ]; then
+              env_vars="${env_vars},SCANNERS_REQUIRED=true"
+            fi
+
             if [ -n "$id" ]; then
               aws bedrock-agentcore-control update-agent-runtime \
                 --agent-runtime-id "$id" \
                 --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${uri}\"}}" \
                 --role-arn "${{ env.RUNTIME_ROLE }}" \
-                --environment-variables "AGENT_ROLE=${agent}" \
+                --environment-variables "$env_vars" \
                 --network-configuration '{"networkMode":"PUBLIC"}' \
                 --query 'agentRuntimeArn' --output text
             else
@@ -234,7 +263,7 @@ jobs:
                 --agent-runtime-name "$name" \
                 --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${uri}\"}}" \
                 --role-arn "${{ env.RUNTIME_ROLE }}" \
-                --environment-variables "AGENT_ROLE=${agent}" \
+                --environment-variables "$env_vars" \
                 --network-configuration '{"networkMode":"PUBLIC"}' \
                 --description "The ${agent} agent of The Agent Org, from ${{ github.sha }}" \
                 --query 'agentRuntimeArn' --output text
