@@ -92,10 +92,15 @@ from . import config
 # The DATA-plane invoke is the opposite shape: it runs a real agent, which makes
 # a Bedrock model call inside the container. 5s would time out every honest
 # invocation. 300s is the ceiling, chosen against what the local path already
-# tolerates -- the full suite with all three real scanners on PATH takes ~117s
-# (measured 116.88s at 793 passed on 2026-08-21; an earlier form of this comment
-# said ~173s, which was inherited from config.py rather than measured here), and
-# the security agent is the slowest of the five. The ceiling is deliberately far
+# tolerates -- the full suite with all three real scanners on PATH takes roughly
+# 100-150s, and the security agent is the slowest of the five.
+#
+# A RANGE, NOT A POINT, and the range is the honest form. Three runs of the same
+# 793 tests on 2026-08-21 gave 102.83s, 116.88s and 149.68s; the spread is machine
+# load, not test count (load average was 3.6 during the slowest, with other work
+# running). An earlier form of this comment said ~173s, inherited from config.py
+# rather than measured here. Quoting any single figure as "the" cost would be the
+# same defect in a newer coat. The ceiling is deliberately far
 # above either number: it bounds a HUNG call, and a ceiling that tripped on an
 # honest slow invocation would be a self-inflicted failure on a projector.
 #
