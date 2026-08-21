@@ -43,9 +43,15 @@ WHY THESE PARSE THE YAML INSTEAD OF GREPPING IT
 A substring assertion over a whole workflow file can be satisfied by that file's
 own comments, and these files are heavily commented. Two measured examples:
 
-  * `id-token: write` appears on 3 lines of deploy.yml, only TWO of which are
-    the actual permission -- the rest is prose. So `"id-token: write" in text`
-    stays green after a permission is deleted from a job.
+  * `id-token: write` is a real permission on exactly TWO jobs of deploy.yml
+    (build and deploy), and the same string also appears in prose in this file's
+    own hazard notes. RE-MEASURED 2026-08-21: `grep -c "id-token: write"
+    .github/workflows/deploy.yml` returns 2, and returned 2 at every one of the
+    last eight commits that touched the file -- an earlier version of this note
+    claimed 3, which was never true. The point survives the correction: a
+    workflow can carry the string in a comment, so `"id-token: write" in text`
+    is not evidence that any job holds the permission. Hence the parsed-`
+    permissions:`-mapping tests below.
   * deploy.yml:7-8 reads "do not add an AWS_ACCESS_KEY_ID secret". A test
     asserting that string is ABSENT from the file therefore fails on the comment
     forbidding it -- the inverse defect, a test that can only ever fail.
@@ -65,8 +71,22 @@ read it that way. `_triggers()` goes through True, and
 test_the_on_key_is_the_yaml_boolean_trap_not_the_string pins the trap itself so
 nobody "fixes" the accessor into something that silently reads nothing.
 
-NO LIVE AWS. Nothing here runs aws, terraform, docker, agentcore or git push. The
-only subprocesses are actionlint and shellcheck over local files.
+NO LIVE AWS, BUT NOT "NO SUBPROCESSES" -- THE DISTINCTION MATTERS, SO STATE IT
+EXACTLY. Nothing here runs terraform, docker, agentcore or git push, and nothing
+reaches a real AWS endpoint. Three kinds of subprocess do run:
+
+  * actionlint and shellcheck, over local files;
+  * `bash`, executing deploy.yml's own runtime-loop `run:` body; and
+  * a STUB named `aws`, written into a tmp_path directory that is placed first on
+    PATH for that bash call. It records its argv to a file and answers from a
+    fixture; it never makes a network call.
+
+The stub exists because the property under test -- which of the five agents
+receives SCANNERS_REQUIRED -- is a property of the loop's CONTROL FLOW, and a
+substring assertion over the file text cannot see control flow. Before running
+anything, `_env_vars_per_agent` asserts `shutil.which("aws")` resolves to the
+stub, so a real credentialed CLI cannot be reached even if PATH construction
+changes; a real call would be billable and could mutate the five live runtimes.
 """
 
 import os
@@ -1271,16 +1291,29 @@ def _env_vars_per_agent(tmp_path, *, runtimes_exist):
 
     THIS EXECUTES THE GUARD RATHER THAN GREPPING FOR IT, which is the only way
     to tell "a line mentioning security exists somewhere in the body" from "the
-    knob actually reaches security and only security". deploy.yml is heavily
-    commented -- this file's own header records `id-token: write` appearing on
-    three lines, only two of them real -- so a substring check for either the
-    knob or the guard is satisfiable by prose.
+    knob actually reaches security and only security". Measured, not assumed:
+    with the guard line left intact and only the assignment inside it commented
+    out -- so the knob reaches NOBODY -- all three of the substring assertions
+    originally proposed for this test still pass. A file this heavily commented
+    cannot be pinned by matching strings in it.
 
     `runtimes_exist` picks the branch: True feeds `list-agent-runtimes` five
     existing runtimes so the loop UPDATEs, False feeds it nothing so the loop
     CREATEs. Both branches carry their own --environment-variables argument.
 
-    Returns {agent: {NAME: value}} parsed from the recorded argv.
+    WHICH API CALL RAN IS ASSERTED, NOT ASSUMED. Filtering the recorded calls on
+    "either update-agent-runtime or create-agent-runtime" is satisfied by either
+    one, so a workflow whose id lookup never matches would take the CREATE
+    branch for all five runtimes and every assertion here would still pass while
+    the update branch went entirely unexecuted. That is not hypothetical: it is
+    what happens when the lookup is keyed on the HYPHEN namespace
+    (theagentorg-planner) instead of the UNDERSCORE one (theagentorg_planner),
+    a conflation this file already has a separate test for. In the account that
+    means every deploy against the five live runtimes attempts a create and
+    fails on a name conflict -- and whoever repairs the lookup then silently
+    inherits whatever the unexercised update branch happens to say.
+
+    Returns ({agent: {NAME: value}}, api_call) parsed from the recorded argv.
     """
     script = _runtime_loop_script()
     # GitHub expands ${{ }} before the shell sees it. env.* resolve from the
@@ -1329,13 +1362,18 @@ def _env_vars_per_agent(tmp_path, *, runtimes_exist):
         "the aws stub was never invoked; the loop cannot have configured "
         "anything and every assertion below would pass vacuously"
     )
+    expected_call = "update-agent-runtime" if runtimes_exist else "create-agent-runtime"
     per_agent = {}
+    calls_seen = []
     for line in calls_log.read_text(encoding="utf-8").splitlines():
         argv = [a for a in line.split(_ARGV_SEP) if a]
-        if not any(
-            a in ("update-agent-runtime", "create-agent-runtime") for a in argv
-        ):
+        call = next(
+            (a for a in argv if a in ("update-agent-runtime", "create-agent-runtime")),
+            None,
+        )
+        if call is None:
             continue
+        calls_seen.append(call)
         if "--environment-variables" not in argv:
             continue
         raw = argv[argv.index("--environment-variables") + 1]
@@ -1346,11 +1384,31 @@ def _env_vars_per_agent(tmp_path, *, runtimes_exist):
         assert role, f"a runtime was configured without AGENT_ROLE: {raw!r}"
         per_agent[role] = pairs
 
+    # THE BRANCH UNDER TEST MUST BE THE BRANCH THAT RAN. Without this the
+    # `[update]` parametrisation is decorative: five existing runtimes are fed
+    # in, and if the loop still CREATEs, the update branch's
+    # --environment-variables is never evaluated at all.
+    assert calls_seen, (
+        "no configure call was recorded; every assertion below would be vacuous"
+    )
+    assert set(calls_seen) == {expected_call}, (
+        f"fed {'five existing' if runtimes_exist else 'no existing'} runtimes, so "
+        f"the loop must call {expected_call} for all five, but it called "
+        f"{sorted(set(calls_seen))}. Either the id lookup does not match the "
+        f"names that list-agent-runtimes returns -- check the underscore vs "
+        f"hyphen namespaces -- or the branch condition is inverted. Against the "
+        f"five live runtimes a create attempt fails on a name conflict."
+    )
+    assert len(calls_seen) == len(AGENTS), (
+        f"expected one {expected_call} per agent ({len(AGENTS)}), got "
+        f"{len(calls_seen)}"
+    )
+
     assert sorted(per_agent) == sorted(AGENTS), (
         f"the loop configured {sorted(per_agent)}, expected all of {AGENTS}. "
         f"The recorded calls were:\n{calls_log.read_text(encoding='utf-8')!r}"
     )
-    return per_agent
+    return per_agent, expected_call
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
@@ -1367,7 +1425,7 @@ def test_only_the_security_runtime_demands_its_scanners(tmp_path, runtimes_exist
     variables` is passed twice and which one runs depends on whether the
     runtime already exists in the account.
     """
-    per_agent = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
+    per_agent, api_call = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
 
     demanding = sorted(a for a, e in per_agent.items() if SCANNERS_REQUIRED_NAME in e)
     assert demanding, (
@@ -1389,6 +1447,15 @@ def test_only_the_security_runtime_demands_its_scanners(tmp_path, runtimes_exist
         f'"true" after .lower(), so any other spelling reads as False and the '
         f"runtime falls back to the fixture while appearing configured."
     )
+    # Names the branch in the failure, because "the knob is missing" and "the
+    # knob is missing FROM THE UPDATE BRANCH" are different repairs and the
+    # second one only reproduces when a runtime already exists in the account.
+    assert SCANNERS_REQUIRED_NAME in per_agent[SCANNER_AGENT], (
+        f"{SCANNER_AGENT} reached {api_call} without {SCANNERS_REQUIRED_NAME}. "
+        f"The knob is set before the branch but does not survive into this one, "
+        f"so which deploy is correct depends on whether the runtime already "
+        f"exists -- an intermittent difference rather than a diff."
+    )
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
@@ -1402,9 +1469,181 @@ def test_every_runtime_still_gets_its_own_agent_role(tmp_path, runtimes_exist):
     default, so all five would fail at startup instead. Cheap to pin, and it
     keeps the accumulation honest.
     """
-    per_agent = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
+    per_agent, _ = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
     for agent in AGENTS:
         assert per_agent[agent]["AGENT_ROLE"] == agent, (
             f"runtime for {agent} was configured with AGENT_ROLE="
             f"{per_agent[agent]['AGENT_ROLE']!r}"
         )
+
+
+# The three scanner tools, in run_all_scanners' fan-out order. Mirrors
+# tests/provenance.py's SCANNER_TOOLS; named here because this file must not
+# import a module that pulls in agentorg just to read three strings.
+SCANNER_BINARIES = ("semgrep", "gitleaks", "trivy")
+
+# The Dockerfile ARG that pins each tool, and the shell invocation that proves
+# the downloaded binary can actually EXECUTE.
+SCANNER_VERSION_ARGS = {
+    "gitleaks": "GITLEAKS_VERSION",
+    "trivy": "TRIVY_VERSION",
+    "semgrep": "SEMGREP_VERSION",
+}
+SCANNER_VERSION_CHECKS = ("gitleaks version", "trivy --version", "semgrep --version")
+
+
+def _dockerfile_text():
+    dockerfile = REPO_ROOT / "agentorg" / "agents" / "Dockerfile"
+    assert dockerfile.is_file(), f"no Dockerfile at {dockerfile}"
+    return dockerfile.read_text(encoding="utf-8")
+
+
+def _ci_scanner_versions():
+    """The scanner versions ci.yml installs, read from its parsed job env.
+
+    Read as DATA rather than grepped out of the install commands, so this
+    compares what CI actually sets. Asserts it found all three: a renamed env
+    key would otherwise return an empty mapping and take the comparison below
+    green with it.
+    """
+    versions = {}
+    for job in _jobs(CI).values():
+        for key, value in (job.get("env") or {}).items():
+            if key.endswith("_VERSION"):
+                versions[key] = str(value)
+    expected = set(SCANNER_VERSION_ARGS.values())
+    missing = expected - set(versions)
+    assert not missing, (
+        f"ci.yml no longer declares {sorted(missing)} in a job env block, so the "
+        f"Dockerfile's pins cannot be compared against CI's. Found: {sorted(versions)}"
+    )
+    return versions
+
+
+def test_the_image_installs_all_three_scanners_or_the_cloud_verdict_is_a_fixture():
+    """THE DEPLOYED SECURITY GATE IS ONLY REAL IF THESE BINARIES ARE IN THE IMAGE.
+
+    Measured before the install layer existed: the deployed security runtime
+    returned a FIXTURE verdict. Without the binaries every wrapper raises
+    FileNotFoundError, agents/security.py catches it, and the verdict is read
+    out of fixtures/security_result_block.json -- so "the security gate ran in
+    the cloud" is false while the gate still reports "blocked".
+
+    AND IT IS NOW WORSE THAN A WRONG LABEL. deploy.yml sets
+    SCANNERS_REQUIRED=true on the security runtime, which promotes ABSENT to
+    FAULT (agentorg/common/config.py:64-100). Delete this layer and the
+    security runtime returns three *-scanner-error findings with blocking=3 --
+    blocking the CLEAN run, which is the demo's first half. The knob and the
+    layer are one mechanism in two files, and nothing else in this repository
+    pins the layer.
+    """
+    body = _dockerfile_text()
+    # /usr/local/bin is what the wrappers resolve through: they shell out by bare
+    # name, so a binary left in /tmp is as absent as one never downloaded.
+    for tool in SCANNER_BINARIES:
+        assert f"/usr/local/bin/{tool}" in body, (
+            f"the image never puts `{tool}` on PATH. run_all_scanners fans out "
+            f"over {list(SCANNER_BINARIES)} and every wrapper shells out by bare "
+            f"name, so ONE missing binary is a fault on the security runtime, "
+            f"which carries SCANNERS_REQUIRED=true -- and a fault blocks the "
+            f"clean run too"
+        )
+
+
+def test_the_images_scanner_pins_are_the_versions_ci_gates_against():
+    """Same versions in the image as in the suite, or the image is untested.
+
+    CI's `scan` job runs the real scanners against the poisoned diff and asserts
+    the exact findings, down to the LINE NUMBERS that
+    tests/provenance.py:REAL_SCANNER_LINES records. That evidence transfers to
+    the deployed image only if the image runs the same versions -- a different
+    gitleaks may move a reported line, and moving one silently invalidates the
+    only field that distinguishes a real scan from a fixture read.
+
+    Compares two parsed sources, so neither side is hardcoded here and a
+    coordinated bump passes without editing this test.
+    """
+    body = _dockerfile_text()
+    ci_versions = _ci_scanner_versions()
+
+    args = dict(re.findall(r"^ARG\s+([A-Z_]+)=(\S+)", body, re.MULTILINE))
+    for tool, arg in sorted(SCANNER_VERSION_ARGS.items()):
+        assert arg in args, (
+            f"the Dockerfile does not pin {arg}. An unpinned {tool} means the "
+            f"image's scanner version drifts from the one CI gates against, and "
+            f"the deployed gate is no longer the tested gate. ARGs found: "
+            f"{sorted(args)}"
+        )
+        assert args[arg] == ci_versions[arg], (
+            f"the image pins {arg}={args[arg]} but ci.yml gates against "
+            f"{ci_versions[arg]}. The suite's finding assertions -- including "
+            f"the line numbers in tests/provenance.py -- were measured on CI's "
+            f"version, so they do not transfer to this image."
+        )
+
+
+def test_the_image_proves_each_scanner_can_execute_before_it_ships():
+    """A BINARY THAT DOWNLOADS BUT CANNOT RUN IS A DIFFERENT AND WORSE FAULT.
+
+    Wrong architecture or a truncated tarball produces a present-but-BROKEN
+    scanner, and broken is not absent: it blocks EVERY run including the clean
+    one, on the runtime that carries SCANNERS_REQUIRED=true. The version-check
+    tail turns that into a failed build, which costs a red pipeline instead of a
+    dead demo.
+
+    Pinned per tool AND pinned to the install layer, because a check that ran in
+    some later, unrelated RUN would not fail the layer that produced the bad
+    binary.
+    """
+    body = _dockerfile_text()
+
+    install_layers = [
+        layer
+        for layer in re.findall(r"^RUN\s(.*?)(?=^\S|\Z)", body, re.MULTILINE | re.DOTALL)
+        if "curl" in layer and "gitleaks" in layer
+    ]
+    assert len(install_layers) == 1, (
+        f"expected exactly one RUN layer that downloads the scanners; found "
+        f"{len(install_layers)}. Splitting the install across layers would let "
+        f"the version checks drift into a layer that cannot fail the download."
+    )
+    layer = install_layers[0]
+
+    for check in SCANNER_VERSION_CHECKS:
+        assert check in layer, (
+            f"the scanner install layer never runs `{check}`, so a binary that "
+            f"downloads but cannot execute would ship. On the security runtime, "
+            f"which sets SCANNERS_REQUIRED=true, a BROKEN scanner blocks every "
+            f"run including the clean one."
+        )
+
+    # The checks must be the TAIL of the layer, chained with && -- not an early
+    # step whose failure a later `|| true` could absorb.
+    tail = layer.rstrip().rstrip("\\").rstrip().splitlines()[-1]
+    for check in SCANNER_VERSION_CHECKS:
+        assert check in tail, (
+            f"`{check}` is not on the layer's final line (found: {tail.strip()!r}). "
+            f"The version checks are the guarantee and must be the last thing "
+            f"the layer does, so any earlier failure cannot be masked."
+        )
+
+
+def test_the_scanners_are_installed_before_the_app_is_copied():
+    """Layer ORDER, so a source edit does not re-download ~100 MB of scanners.
+
+    Also the reason the layer sits above WORKDIR /app: the install is the
+    slowest step in the build and the least likely to change, so it belongs
+    where Docker's cache can keep it across every source-only rebuild -- five
+    tags at a time.
+    """
+    body = _dockerfile_text()
+    install = body.find("GITLEAKS_VERSION")
+    workdir = body.find("WORKDIR /app")
+    copy_app = body.find("COPY agentorg")
+    assert install != -1, "the Dockerfile does not install the scanners at all"
+    assert workdir != -1, "the Dockerfile has no WORKDIR /app"
+    assert copy_app != -1, "the Dockerfile never COPYs agentorg/"
+    assert install < workdir < copy_app, (
+        "the scanner install must come before WORKDIR /app and before the source "
+        "COPY, or every source edit re-downloads the three scanners"
+    )
