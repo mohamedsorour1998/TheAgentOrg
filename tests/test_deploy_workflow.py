@@ -545,10 +545,12 @@ def test_every_agent_loop_in_the_deploy_workflow_covers_all_five_agents():
         )
     # A loop that stops being reached is as bad as one that lost an agent, so pin
     # the count too -- re-measured from this file, not carried forward.
-    # Re-measured, not carried forward. Four loops: the tag list, the pushed-image
-    # verification, the runtime create/update, and the endpoint-liveVersion wait.
-    # The runtime-status wait polls the whole set in one query, so it adds none.
-    assert len(loops) == 4, f"expected 4 agent loops in deploy.yml, found {len(loops)}"
+    # Re-measured, not carried forward. Three loops: the tag list, the
+    # pushed-image verification, and the runtime create/update. The runtime-status
+    # wait polls the whole set in one query, and the endpoint readiness check is
+    # now a retrying invoke of one agent rather than a per-agent poll, so neither
+    # adds a loop.
+    assert len(loops) == 3, f"expected 3 agent loops in deploy.yml, found {len(loops)}"
 
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -840,7 +842,12 @@ def test_the_smoke_invoke_asserts_on_response_content_not_just_exit_status():
     steps = [
         step
         for step in _steps(_job(DEPLOY, "deploy"))
-        if "agentcore invoke" in (step.get("run") or "")
+        # `invoke-agent-runtime`, not "agentcore invoke": the deploy calls the
+        # runtime API directly rather than the agentcore CLI, and this matcher
+        # silently matched nothing after that change -- so every assertion below
+        # it stopped running while the test stayed green. A matcher that can
+        # match nothing has to be asserted on, which is what the next line does.
+        if "invoke-agent-runtime" in (step.get("run") or "")
     ]
     assert steps, "nothing invokes a runtime; READY is not the same as working"
 

@@ -273,64 +273,26 @@ jobs:
           exit 1
 
       # A RUNTIME REPORTS READY BEFORE ITS ENDPOINT WILL SERVE THE NEW VERSION.
-      # Measured: the wait above passed at 23:59:21 and the invoke fired inside
-      # the same second, giving
+      # Measured: the runtime-status wait passed at 23:59:21 and the invoke fired
+      # inside the same second, giving
       #
       #   ResourceNotFoundException: No endpoint or agent found with qualifier
       #
-      # with the correct ARN and --qualifier DEFAULT, while a by-hand invoke of
-      # the same runtime minutes later returned statusCode 200 and a real plan.
-      # The endpoint's liveVersion had moved to "2" by then: update-agent-runtime
-      # creates a new version and the DEFAULT endpoint promotes it a moment after
-      # the runtime itself says READY. Runtime READY is necessary and not
-      # sufficient, so this waits on the endpoint too rather than sleeping and
-      # hoping.
-      - name: Wait for every DEFAULT endpoint to serve a live version
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 40); do
-            pending=0
-            for agent in planner developer reviewer security sre; do
-              id="$(aws bedrock-agentcore-control list-agent-runtimes \
-                --query "agentRuntimes[?agentRuntimeName=='theagentorg_${agent}'].agentRuntimeId | [0]" \
-                --output text)"
-              # A FAILED CALL IS NOT "NOT READY YET". The first version of this
-              # loop swallowed the CLI's exit status, so an
-              # AccessDeniedException on ListAgentRuntimeEndpoints looked
-              # identical to a pending endpoint: it polled all forty attempts
-              # and timed out ten minutes later, reporting the wrong cause. A
-              # poll that cannot tell "denied" from "pending" is the same
-              # reassuring non-answer this project keeps having to eliminate.
-              if ! ep="$(aws bedrock-agentcore-control list-agent-runtime-endpoints \
-                    --agent-runtime-id "$id" \
-                    --query "runtimeEndpoints[?name=='DEFAULT'].[status,liveVersion] | [0]" \
-                    --output text 2>&1)"; then
-                echo "::error::cannot read ${agent}'s endpoint: ${ep}"
-                exit 1
-              fi
-              read -r status live <<<"$ep"
-              echo "  ${agent}: endpoint=${status} live=${live}"
-              # A live version of None means nothing is serving yet, however
-              # healthy the endpoint claims to be.
-              if [ "$status" != "READY" ] || [ "$live" = "None" ] || [ -z "$live" ]; then
-                pending=$((pending + 1))
-              fi
-            done
-            if [ "$pending" = "0" ]; then
-              echo "::notice::all five DEFAULT endpoints are serving a live version"
-              exit 0
-            fi
-            echo "--- attempt ${attempt}: ${pending} endpoint(s) not serving yet"
-            sleep 15
-          done
-          echo "::error::timed out waiting for the DEFAULT endpoints to serve"
-          exit 1
-
-      # The done-when: a real completion, not merely a 200. Asserts on content,
-      # because a runtime returning an empty body still exits 0 and "the call
-      # succeeded" is exactly the reassuring non-answer this project keeps having
-      # to distinguish from a real one.
-      - name: Invoke the planner and require a real completion
+      # with the correct ARN and --qualifier DEFAULT. A by-hand invoke of the same
+      # runtime minutes later returned statusCode 200 and a real plan, its
+      # endpoint's liveVersion having reached "2". So runtime READY is necessary
+      # and not sufficient.
+      #
+      # THIS RETRIES THE INVOKE INSTEAD OF POLLING THE ENDPOINT. The obvious
+      # version polled ListAgentRuntimeEndpoints until liveVersion appeared, and
+      # that call is not grantable to this role: simulate-principal-policy returns
+      # `allowed` for the action with no resource, and `implicitDeny` with the
+      # runtime ARN or the runtime-endpoint ARN, matching NO statement, while the
+      # policy grants bedrock-agentcore:* on "*". Two live runs confirmed the
+      # deny. Retrying the thing we actually need is both simpler and a stronger
+      # check: it asserts the endpoint can serve rather than that a status field
+      # claims it can.
+      - name: Invoke the planner until it returns a real plan
         run: |
           set -euo pipefail
           arn="$(aws bedrock-agentcore-control list-agent-runtimes \
@@ -339,26 +301,45 @@ jobs:
           echo "planner runtime: ${arn}"
 
           # Both of these were found by running the call by hand, not assumed:
-          #   * --payload must be BASE64. Passing raw JSON gives
-          #     `Invalid base64: "{...}"` before the request leaves the CLI.
-          #   * --qualifier is required. Without it the call fails with
-          #     `ResourceNotFoundException: No endpoint or agent found with
-          #     qualifier` even though the runtime is READY and its DEFAULT
-          #     endpoint is READY too.
+          #   * --payload must be BASE64. Raw JSON gives `Invalid base64: "{...}"`
+          #     before the request leaves the CLI.
+          #   * --qualifier is required, or the call fails with
+          #     ResourceNotFoundException even against a READY runtime.
           payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
           encoded="$(printf '%s' "$payload" | base64 | tr -d '\n')"
 
-          aws bedrock-agentcore invoke-agent-runtime \
-            --agent-runtime-arn "$arn" \
-            --qualifier DEFAULT \
-            --payload "$encoded" \
-            --content-type application/json \
-            /tmp/invoke-out.json
+          for attempt in $(seq 1 20); do
+            if err="$(aws bedrock-agentcore invoke-agent-runtime \
+                  --agent-runtime-arn "$arn" \
+                  --qualifier DEFAULT \
+                  --payload "$encoded" \
+                  --content-type application/json \
+                  /tmp/invoke-out.json 2>&1)"; then
+              echo "--- response"
+              cat /tmp/invoke-out.json
+              # Asserts on CONTENT, not exit status. A runtime returning 200 with
+              # an empty body exits 0, and "the call succeeded" is exactly the
+              # reassuring non-answer this project keeps having to distinguish
+              # from a real completion.
+              if grep -q '"tasks"' /tmp/invoke-out.json; then
+                echo "::notice::planner returned a real plan on attempt ${attempt}"
+                exit 0
+              fi
+              echo "::error::planner answered without tasks; not a real completion"
+              exit 1
+            fi
 
-          echo "--- response"
-          cat /tmp/invoke-out.json
-          grep -q '"tasks"' /tmp/invoke-out.json || {
-            echo "::error::planner returned no tasks; that is not a real completion"
+            # Only the endpoint-not-ready race is worth waiting out. Anything
+            # else -- a denial, a bad ARN, a 500 from our own container -- must
+            # fail now rather than be retried nineteen more times.
+            if grep -q 'ResourceNotFoundException' <<<"$err"; then
+              echo "--- attempt ${attempt}: endpoint not serving yet"
+              sleep 15
+              continue
+            fi
+            echo "::error::invoke failed for a reason retrying cannot fix: ${err}"
             exit 1
-          }
-          echo "::notice::planner returned a real plan"
+          done
+          echo "::error::endpoint never began serving within the retry budget"
+          exit 1
+
