@@ -272,6 +272,49 @@ jobs:
           echo "::error::timed out waiting for five READY runtimes (last: ${ready:-0}/${total:-0})"
           exit 1
 
+      # A RUNTIME REPORTS READY BEFORE ITS ENDPOINT WILL SERVE THE NEW VERSION.
+      # Measured: the wait above passed at 23:59:21 and the invoke fired inside
+      # the same second, giving
+      #
+      #   ResourceNotFoundException: No endpoint or agent found with qualifier
+      #
+      # with the correct ARN and --qualifier DEFAULT, while a by-hand invoke of
+      # the same runtime minutes later returned statusCode 200 and a real plan.
+      # The endpoint's liveVersion had moved to "2" by then: update-agent-runtime
+      # creates a new version and the DEFAULT endpoint promotes it a moment after
+      # the runtime itself says READY. Runtime READY is necessary and not
+      # sufficient, so this waits on the endpoint too rather than sleeping and
+      # hoping.
+      - name: Wait for every DEFAULT endpoint to serve a live version
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 40); do
+            pending=0
+            for agent in planner developer reviewer security sre; do
+              id="$(aws bedrock-agentcore-control list-agent-runtimes \
+                --query "agentRuntimes[?agentRuntimeName=='theagentorg_${agent}'].agentRuntimeId | [0]" \
+                --output text)"
+              read -r status live <<<"$(aws bedrock-agentcore-control \
+                list-agent-runtime-endpoints --agent-runtime-id "$id" \
+                --query "runtimeEndpoints[?name=='DEFAULT'].[status,liveVersion] | [0]" \
+                --output text)"
+              echo "  ${agent}: endpoint=${status} live=${live}"
+              # A live version of None means nothing is serving yet, however
+              # healthy the endpoint claims to be.
+              if [ "$status" != "READY" ] || [ "$live" = "None" ] || [ -z "$live" ]; then
+                pending=$((pending + 1))
+              fi
+            done
+            if [ "$pending" = "0" ]; then
+              echo "::notice::all five DEFAULT endpoints are serving a live version"
+              exit 0
+            fi
+            echo "--- attempt ${attempt}: ${pending} endpoint(s) not serving yet"
+            sleep 15
+          done
+          echo "::error::timed out waiting for the DEFAULT endpoints to serve"
+          exit 1
+
       # The done-when: a real completion, not merely a 200. Asserts on content,
       # because a runtime returning an empty body still exits 0 and "the call
       # succeeded" is exactly the reassuring non-answer this project keeps having

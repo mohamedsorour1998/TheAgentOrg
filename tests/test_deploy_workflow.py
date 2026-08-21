@@ -545,10 +545,10 @@ def test_every_agent_loop_in_the_deploy_workflow_covers_all_five_agents():
         )
     # A loop that stops being reached is as bad as one that lost an agent, so pin
     # the count too -- re-measured from this file, not carried forward.
-    # Re-measured after the deploy step moved from the agentcore CLI to the
-    # runtime API: the status wait no longer loops per agent, it polls the whole
-    # set at once, so there are three loops rather than four.
-    assert len(loops) == 3, f"expected 3 agent loops in deploy.yml, found {len(loops)}"
+    # Re-measured, not carried forward. Four loops: the tag list, the pushed-image
+    # verification, the runtime create/update, and the endpoint-liveVersion wait.
+    # The runtime-status wait polls the whole set in one query, so it adds none.
+    assert len(loops) == 4, f"expected 4 agent loops in deploy.yml, found {len(loops)}"
 
 
 @pytest.mark.parametrize("agent", AGENTS)
@@ -802,9 +802,13 @@ def test_the_status_check_fails_the_job_when_a_runtime_is_not_ready():
     # calls list-agent-runtimes and also mentions READY in a comment, and a
     # matcher loose enough to catch it reported this assertion as unsatisfied
     # against a correct workflow.
+    # Keyed on the runtime-status poll specifically. Two polling loops exist now
+    # -- one on runtime status, one on endpoint liveVersion -- and both call
+    # list-agent-runtimes inside a `for attempt in` loop, so a matcher that
+    # catches either reported a correct workflow as broken.
     status = [
         s for s in _all_run_scripts(DEPLOY)
-        if "list-agent-runtimes" in s and "for attempt in" in s
+        if "for attempt in" in s and "agentRuntimeName,status" in s
     ]
     assert status, "no status wait; a deploy could report success with nothing READY"
     for script in status:
