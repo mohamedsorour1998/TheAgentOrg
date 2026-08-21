@@ -295,10 +295,26 @@ jobs:
       - name: Invoke the planner until it returns a real plan
         run: |
           set -euo pipefail
+          # `head -1` IS LOAD-BEARING. With `--output text`, this CLI emits the
+          # ARN and then a literal "None" on a second line -- verified with od:
+          #   ...theagentorg_planner-td4Fou4YjY \n N o n e \n
+          # so the variable held a two-line value and every invoke failed with
+          # ResourceNotFoundException. The retry loop then classified that as the
+          # endpoint-promotion race and polled eleven times against a runtime
+          # that was answering statusCode 200 to a by-hand call the whole time.
+          # The stray "None" was visible in the job log directly under the ARN
+          # and read as a diagnostic rather than as part of the value.
           arn="$(aws bedrock-agentcore-control list-agent-runtimes \
             --query "agentRuntimes[?agentRuntimeName=='theagentorg_planner'].agentRuntimeArn | [0]" \
-            --output text)"
-          echo "planner runtime: ${arn}"
+            --output text | head -1)"
+          echo "planner runtime: [${arn}]"
+
+          # A malformed ARN must fail here, not as a retried "not serving yet".
+          case "$arn" in
+            arn:aws:bedrock-agentcore:*:runtime/theagentorg_planner-*) ;;
+            *) echo "::error::resolved planner ARN is not a single valid ARN: [${arn}]"
+               exit 1 ;;
+          esac
 
           # Both of these were found by running the call by hand, not assumed:
           #   * --payload must be BASE64. Raw JSON gives `Invalid base64: "{...}"`
