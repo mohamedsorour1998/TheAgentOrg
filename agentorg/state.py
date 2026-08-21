@@ -173,6 +173,22 @@ class RunState(BaseModel):
     revision_count: int = 0         # capped by MAX_REVISION_LOOPS
     status: Literal["running", "blocked", "rejected", "promoted", "failed"] = "running"
 
+    # THE DEMO SAFETY NET, CARRIED ON THE STATE. Added in week 3 for remote
+    # execution; an ADDITION, per the rule at the top of this file.
+    #
+    # `developer.run(state, poisoned=...)` is a Python keyword argument, and
+    # agents/server.py:164 calls `AGENTS[role].run(state)` with no kwargs --
+    # over HTTP there is nowhere to put one. The state IS the payload, so a
+    # per-call argument the container must see has to travel as a field.
+    #
+    # The kwarg still wins where it is passed: developer.run reads this only
+    # when the kwarg is absent, so graph.py's local call site behaves exactly as
+    # it did before this field existed. See agentorg/agents/developer.py.
+    #
+    # Defaults False, which is what keeps every run already on disk -- and every
+    # RunState built without it -- a clean run.
+    poisoned: bool = False
+
 
 # --------------------------------------------------------------------------
 # Decision log — one row per event, append only. Never update, never delete.

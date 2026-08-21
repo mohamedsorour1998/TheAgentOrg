@@ -9,6 +9,10 @@ block depends on that key being present every single time, and "present" means
 present in the change the scanners will actually read -- see
 _key_is_in_the_change below, which is where that distinction was lost once.
 
+It arrives two ways, and `run`'s docstring says why: as a keyword argument from
+every in-process caller, or as `state.poisoned` for the HTTP caller that has no
+way to pass one.
+
 As in planner.py there is deliberately no try/except around the model call.
 `llm.structured` already absorbs every model-side failure and returns None,
 which is the one signal this function acts on.
@@ -78,8 +82,24 @@ def _prompt(state: RunState) -> str:
     return "\n\n".join(parts)
 
 
-def run(state: RunState, poisoned: bool = False) -> DevResult:
-    """Write the diff. Falls back to the fixture if no model is available."""
+def run(state: RunState, poisoned: bool | None = None) -> DevResult:
+    """Write the diff. Falls back to the fixture if no model is available.
+
+    `poisoned` defaults to None, not False, and the difference is the whole
+    point. None means "nobody said", so the answer comes from `state.poisoned`;
+    False means a caller explicitly asked for a clean run and must be able to
+    override a poisoned state. Written as `poisoned or state.poisoned` -- which
+    is the obvious one-liner -- `poisoned=False` could not turn poisoning OFF,
+    and the failure would be invisible until a clean demo shipped an AWS key.
+
+    Every existing caller passes the kwarg explicitly (graph.py, the DORA
+    harness, the shape-stability tests), so this changes nothing for them. The
+    state field exists for the callers that CANNOT pass it: agents/server.py:164
+    invokes `run(state)` with no kwargs, because over HTTP the state is the only
+    channel there is.
+    """
+    if poisoned is None:
+        poisoned = state.poisoned
     dev = llm.structured(DevResult, SYSTEM_PROMPT, _prompt(state))
     if dev is None:
         dev = fixtures_loader.dev(poisoned=poisoned)

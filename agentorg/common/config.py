@@ -110,3 +110,21 @@ SCANNERS_REQUIRED = os.environ.get("SCANNERS_REQUIRED", "false").lower() == "tru
 # a vulnerability database. A ceiling that trips on an honest slow scan would be
 # a self-inflicted block, since a timeout is a fault and fails closed.
 SCANNER_TIMEOUT_SECONDS = int(os.environ.get("SCANNER_TIMEOUT_SECONDS", "120"))
+
+# Remote execution (Sorour) -------------------------------------------------
+# REMOTE_AGENTS routes every agent call to its deployed AgentCore runtime
+# instead of calling the in-process function. The one reader is
+# common/agent_client.call_agent, which graph.py's five call sites go through.
+#
+# Default false, and that default is load-bearing twice over. It is what keeps
+# the LOCAL path the tested one -- the whole suite runs through call_agent, and a
+# true default would point the suite at a network call it has no credentials for
+# and no business making. It is also the demo's fallback: if the runtimes
+# misbehave on Tuesday, unsetting one variable puts the pipeline back on the path
+# that has been green all week.
+#
+# Parsed `== "true"` case-insensitively to match OFFLINE, LLM_DISABLED and
+# SCANNERS_REQUIRED above. Plain bool(os.environ.get(...)) would read the string
+# "false" as True, which here means every agent call leaving the machine because
+# somebody wrote the word "false" down.
+REMOTE_AGENTS = os.environ.get("REMOTE_AGENTS", "false").lower() == "true"

@@ -40,8 +40,7 @@ import os
 from collections.abc import Callable
 
 from . import gates, github_ops, log
-from .agents import developer, planner, reviewer, security, sre
-from .common import config
+from .common import agent_client, config
 from .state import (
     HumanDecision,
     LogEvent,
@@ -163,7 +162,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     ask = _auto_gate if auto_approve else _cli_gate
 
     # 1. PLAN ---------------------------------------------------------------
-    state.plan = planner.run(state)
+    state.plan = agent_client.call_agent("planner", state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
 
     # 2. GATE 1 -------------------------------------------------------------
@@ -175,10 +174,10 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     # line: one says the reviewer approved this diff, the other says the run
     # ran out of chances to make one it would.
     while True:
-        state.dev = developer.run(state, poisoned=poisoned)
+        state.dev = agent_client.call_agent("developer", state, poisoned=poisoned)
         _log(state, "developer", "develop", "proposed", summary=state.dev.summary)
 
-        state.review = reviewer.run(state)
+        state.review = agent_client.call_agent("reviewer", state)
         if state.review.verdict == "approve":
             _log(state, "reviewer", "review", "reviewed", verdict="approve",
                  summary="reviewer approved the diff")
@@ -198,7 +197,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
          )
 
     # 5. SECURITY (deterministic block rule) -------------------------------
-    state.security = security.run(state)
+    state.security = agent_client.call_agent("security", state)
     # scan_provenance is the answer to "did the scanners actually run, or did
     # this verdict come from a fixture?" -- a question the count in `summary`
     # cannot answer, because the fixture fallback produces a real count too.
@@ -258,7 +257,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
         return state
 
     # 7. SRE ----------------------------------------------------------------
-    state.sre = sre.run(state)
+    state.sre = agent_client.call_agent("sre", state)
     _log(state, "sre", "sre", "reviewed", verdict=state.sre.verdict)
     if state.sre.verdict == "no_go":
         state.status = "failed"
