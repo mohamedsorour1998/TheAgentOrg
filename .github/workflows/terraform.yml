@@ -53,6 +53,32 @@ env:
   AWS_ROLE: arn:aws:iam::339712964409:role/github-actions-role
   TF_DIR: infra/Terraform/environments/shared
 
+  # ── the ingress rule's dispatch target ──────────────────────────────────────
+  #
+  # A NAME, NOT A TOKEN. This is the Secrets Manager secret whose value
+  # EventBridge dispatches run-pipeline.yml with; the literal never appears in
+  # this repository. Terraform reads it at PLAN time, which is why the module
+  # gates the whole target on this variable being non-empty -- an ungated read of
+  # a secret nobody had written yet failed every plan, and this workflow is green
+  # end to end and must stay that way.
+  #
+  # IT IS SET HERE RATHER THAN IN terraform.tfvars, AND THAT IS NOT A STYLE
+  # CHOICE. `.gitignore:14` ignores `*.tfvars`, so that file exists only on the
+  # laptop that wrote it while this job applies from a fresh checkout. Setting it
+  # there looks like it opens the rule's target and does nothing: CI keeps
+  # applying the empty default and the rule stays at zero targets, with no
+  # evidence anywhere pointing at the cause. Measured before moving it here --
+  # `git ls-files --error-unmatch` on that path answers "did not match any
+  # file(s) known to git".
+  #
+  # TF_VAR_ is Terraform's own env-var convention, so no `-var` flag is needed on
+  # either the plan or the apply and the two cannot drift apart.
+  #
+  # THE TOKEN LANDS IN S3 STATE. Unavoidable with an API_KEY connection: the
+  # provider takes the value through configuration. So it is scoped to this
+  # account's repositories only, and ROTATE IT AFTER THE Aug 25 DEMO.
+  TF_VAR_dispatch_token_secret_name: theagentorg-shared-github-dispatch-token
+
 jobs:
   # No credentials and no state. This is the job that can fail on a fork PR
   # without anyone granting the fork access to the account.

@@ -69,6 +69,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE = REPO_ROOT / "infra" / "Terraform" / "modules" / "ingress"
@@ -622,4 +623,113 @@ def test_every_resource_task_five_owns_is_still_present(resource):
     assert _block(_code(MAIN_TF), "resource", kind, name) is not None, (
         f"resource {kind}.{name} is gone from the ingress module. Tests keyed on "
         "it would pass while asserting nothing."
+    )
+
+
+# ── the dispatch target's variable must reach the APPLY, not just a laptop ─────
+#
+# The module gates its whole event target on `dispatch_token_secret_name` being
+# non-empty, so wherever that value is set is the difference between "an opened
+# issue starts a run" and "an opened issue reaches the bus and stops". Nothing
+# asserted where it was set, and the obvious-looking place is wrong in a way that
+# leaves no evidence -- see the test below.
+
+
+def test_the_dispatch_token_secret_name_is_set_where_the_apply_can_read_it():
+    r"""The value must be in terraform.yml's `env:`, NOT in terraform.tfvars.
+
+    MEASURED, and this test exists because the mistake was made: the value was
+    first written to `infra/Terraform/environments/shared/terraform.tfvars`, which
+    `.gitignore:14` ignores as `*.tfvars`.
+
+        $ git check-ignore -v infra/Terraform/environments/shared/terraform.tfvars
+        .gitignore:14:*.tfvars  infra/Terraform/environments/shared/terraform.tfvars
+        $ git ls-files --error-unmatch infra/Terraform/environments/shared/terraform.tfvars
+        error: pathspec '...' did not match any file(s) known to git
+
+    `terraform.yml` applies from a fresh `actions/checkout`, so that file is not
+    there. The failure is the quiet kind: `terraform plan` locally shows the
+    target being created, CI applies the empty default, the rule stays at zero
+    targets, and nothing in either output mentions a variable. It is the same
+    shape as every defect this repository's discipline is aimed at -- a check that
+    cannot distinguish "configured" from "never read".
+
+    The ignore rule is correct and is not the thing to change: a .tfvars file is
+    where a token would land if anyone pasted one.
+
+    Asserts on BOTH jobs that run terraform against real state. A workflow-level
+    `env:` covers them together, but a future edit could move it into one job's
+    `env:` and leave the other applying the default -- and plan/apply disagreeing
+    about a variable is worse than both being wrong, because the plan a human
+    reviews would not be the one that runs.
+    """
+    workflow = REPO_ROOT / ".github" / "workflows" / "terraform.yml"
+    assert workflow.is_file(), f"{workflow} is missing; this test pins nothing"
+
+    doc = yaml.safe_load(workflow.read_text())
+    jobs = doc.get("jobs") or {}
+    assert jobs, "terraform.yml declares no jobs; this test would check nothing"
+
+    var_name = "TF_VAR_dispatch_token_secret_name"
+
+    # The module's variable name, read from the module rather than restated, so a
+    # rename there fails here instead of silently decoupling the two.
+    module_var = _block(_code(VARIABLES_TF), "variable", "dispatch_token_secret_name")
+    assert module_var is not None, (
+        "the ingress module no longer declares `dispatch_token_secret_name`. If it "
+        f"was renamed, {var_name} in terraform.yml now sets a variable that does "
+        "not exist -- Terraform ignores an unknown TF_VAR_ silently, so the rule "
+        "would go back to zero targets with nothing to say why."
+    )
+
+    top_level = (doc.get("env") or {})
+    for job_name in ("plan", "apply"):
+        assert job_name in jobs, (
+            f"terraform.yml has no `{job_name}` job; this test's premise is stale"
+        )
+        job_env = (jobs[job_name].get("env") or {})
+        value = job_env.get(var_name, top_level.get(var_name))
+        assert value, (
+            f"the `{job_name}` job does not see {var_name}, so its terraform run "
+            f"uses the module's empty default and the ingress rule gets NO "
+            f"TARGET -- an opened issue reaches the bus and starts nothing. Set it "
+            f"in the workflow's `env:`; terraform.tfvars is gitignored "
+            f"(.gitignore:14) and never reaches a checkout."
+        )
+        # A NAME, never the token itself. `github_pat_` and `ghp_` are GitHub's own
+        # prefixes; a value carrying one means somebody pasted a credential into a
+        # committed file.
+        assert not str(value).startswith(("github_pat_", "ghp_", "gho_", "ghs_")), (
+            f"{var_name} in `{job_name}` looks like a TOKEN, not a secret NAME. "
+            f"This variable names a Secrets Manager secret; the literal must never "
+            f"appear in this repository."
+        )
+
+
+def test_the_tfvars_file_sets_no_values_because_ci_cannot_read_it():
+    """The other half of the test above: the ignored file must stay value-free.
+
+    Without this, the value could be added BACK to terraform.tfvars alongside the
+    workflow env and the two would drift -- a laptop plan reading one and CI
+    applying the other, which is harder to diagnose than either being absent.
+
+    The file is gitignored, so it may legitimately not exist in a fresh clone.
+    That is not a failure; a file that is absent sets nothing. What fails is an
+    assignment inside it.
+    """
+    tfvars = REPO_ROOT / "infra" / "Terraform" / "environments" / "shared" / "terraform.tfvars"
+    if not tfvars.is_file():
+        pytest.skip("terraform.tfvars is gitignored and absent in this checkout")
+
+    code = _strip_comments(tfvars.read_text())
+    assignments = [
+        line.strip() for line in code.splitlines()
+        if re.match(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*=", line)
+    ]
+    assert not assignments, (
+        f"terraform.tfvars assigns {assignments}, but `.gitignore:14` ignores "
+        f"`*.tfvars` -- so this file exists only on the machine that wrote it and "
+        f"`terraform.yml` applies from a fresh checkout without it. Any value set "
+        f"here is invisible to CI while looking configured locally. Put it in the "
+        f"workflow's `env:` as TF_VAR_<name> instead."
     )
