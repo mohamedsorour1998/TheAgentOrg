@@ -1015,7 +1015,8 @@ def test_a_block_verdict_is_reported_with_its_own_exit_code():
 # --------------------------------------------------------------------------
 
 
-def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None):
+def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None,
+               comment_ref=None, never_approves=False):
     """Drive the stage script end to end the way the workflow does, in-process.
 
     Returns (posted_bodies, final_state). `reject_at` names a gate whose
@@ -1037,11 +1038,35 @@ def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None):
 
     def _record(state, body, finding=None):
         posted.append(body)
+        # `comment_ref` exists so a test can choose a DELIVERED (https://) ref.
+        # The default stays local:// -- github_ops.post_comment returns the
+        # comment's https:// url when the body reached the PR and
+        # comment://<run_id> when it did not, and a harness that can only
+        # produce one of those two cannot tell them apart.
+        if comment_ref is not None:
+            return comment_ref
         return f"local://captured/{len(posted)}"
 
     # Patched on github_ops as a module attribute, because that is how graph.py's
     # comment helpers reach it -- resolved at call time.
     monkeypatch.setattr(module.github_ops, "post_comment", _record)
+
+    if never_approves:
+        # The SHIPPED fixtures approve on the first pass -- measured:
+        # revision_count=0, one develop comment, one review comment. So without
+        # this branch the harness CANNOT produce a multi-pass run, and
+        # "each pass captures its OWN results" (run_stage.py:316-319) is
+        # satisfied in shape while being untestable in substance. The local path
+        # already learned this: tests/test_agent_comments.py:283-289 records the
+        # mutation that survived its whole file until per-pass markers existed.
+        #
+        # Imported from the local path's test rather than restated so the two
+        # cannot drift on the thing that makes them discriminating.
+        from test_agent_comments import _developer_per_pass, _never_approves
+
+        from agentorg.agents import developer, reviewer
+        monkeypatch.setattr(reviewer, "run", _never_approves)
+        monkeypatch.setattr(developer, "run", _developer_per_pass)
 
     def args(**kw):
         base = {
@@ -1068,7 +1093,137 @@ def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None):
     state = module.RunState.model_validate_json(
         (tmp_path / f"{run_id}.state.json").read_text()
     )
-    return posted, state
+    # `rc` is the exit code of the LAST stage that ran -- the one that stopped the
+    # chain. Returned rather than discarded because "the run stopped" and "the run
+    # stopped WITH THE RIGHT CODE" are different facts, and only the second one
+    # keeps a block distinguishable from a crash.
+    return posted, state, rc
+
+
+# One comment per stage on a run that goes all the way through is
+# _PROMOTED_RUN_COMMENTS, imported from the local path's test. A run whose
+# reviewer NEVER approves is a different shape and needs its OWN expectation:
+# the promoted dict declares `develop: 1, review: 1`, so it cannot describe a
+# capped run and must not be stretched to try. See the multi-pass test below.
+_CAPPED_RUN_STAGE_COMMENTS = {"plan", "gate1", "develop", "review", "security"}
+
+
+def test_the_cloud_paths_revision_loop_renders_each_pass_not_the_last_one(
+    monkeypatch, tmp_path
+):
+    """Each flushed comment must carry ITS OWN pass's diff, not the final one.
+
+    `scripts/run_stage.py:316-319` warns about this exact failure in prose --
+    "re-reading would render the same diff into all three attempt comments --
+    append in shape, replace in substance, green either way" -- copied across
+    from `graph.py`. THE WARNING WAS COPIED; THE TEST THAT ENFORCES IT WAS NOT.
+
+    MEASURED: replacing the captured per-pass results at the flush loop with
+    `state.dev` / `state.review` survived all 793 tests, because the SHIPPED
+    fixture reviewer approves on pass 1 -- so `loop_results` was always length 1
+    and there was no second pass to render wrongly. A harness that cannot vary
+    cannot tell appending from overwriting, which is Task 4's mutation E one path
+    over.
+
+    WHY THE SHARED CONSTANT COULD NOT CATCH IT, and this is the point:
+    `_PROMOTED_RUN_COMMENTS` is what keeps the two paths from drifting (a stage
+    added to one fails until the other posts it), but it declares
+    `develop: 1, review: 1` -- so the only run shape that discriminates here
+    would fail that equality. The shared definition is a real control and a blind
+    spot in the same line. Hence the separate expectation above.
+    """
+    from test_agent_comments import _PASS_MARKER, _by_stage
+
+    assert _PASS_MARKER, "the shared per-pass marker is empty"
+
+    posted, state, _rc = _cloud_run(monkeypatch, tmp_path, never_approves=True)
+
+    assert state.revision_count >= 2, (
+        f"this test needs a MULTI-PASS run to mean anything; got "
+        f"revision_count={state.revision_count}. Without more than one pass, "
+        f"rendering 'the last pass' and 'its own pass' are the same string."
+    )
+
+    grouped = _by_stage(posted)
+    assert "unlabelled" not in grouped, (
+        f"comments with no stage label: {[b[:80] for b in grouped.get('unlabelled', [])]}"
+    )
+    assert set(grouped) == _CAPPED_RUN_STAGE_COMMENTS, (
+        f"a capped cloud run posted for {sorted(grouped)}, expected "
+        f"{sorted(_CAPPED_RUN_STAGE_COMMENTS)}"
+    )
+
+    develop = grouped["develop"]
+    passes = state.revision_count + 1
+    assert len(develop) == passes, (
+        f"{passes} developer passes ran but {len(develop)} develop comments were "
+        f"posted; the loop replaced rather than appended"
+    )
+
+    # THE DISCRIMINATOR. Each body must carry its own marker and NO other pass's.
+    for n, body in enumerate(develop, start=1):
+        assert f"{_PASS_MARKER}{n}\n" in body, (
+            f"develop comment {n} does not carry pass {n}'s diff -- it rendered "
+            f"another pass's, which is 'append in shape, replace in substance'"
+        )
+        others = [m for m in range(1, passes + 1) if m != n]
+        assert not [m for m in others if f"{_PASS_MARKER}{m}\n" in body], (
+            f"develop comment {n} also carries another pass's diff: "
+            f"{[m for m in others if f'{_PASS_MARKER}{m}' in body]}"
+        )
+
+
+def test_a_blocked_cloud_run_exits_with_the_block_code_and_logs_a_delivered_ref(
+    monkeypatch, tmp_path
+):
+    """The poisoned run's two facts: the code it exits with, and what it recorded.
+
+    Both were unpinned. `_cloud_run` accepted a `poisoned=` argument that NO
+    CALLER EVER PASSED, so the blocked branch of `_stage_develop` had never been
+    executed by a test at all. MEASURED, two separate survivors:
+
+      * `return EXIT_BLOCKED` -> `return EXIT_OK` survived all 793. The only
+        existing check asserts the CONSTANT (`EXIT_BLOCKED != 0`, `!= 1`), never
+        that the branch returns it -- while `EXIT_REJECTED` IS asserted against an
+        executed stage. Parallel code, non-parallel coverage.
+      * `artifact_ref=ref` -> a hardcoded `comment://` survived all 793. That is
+        the same property `graph.py`'s R8 step pins on the local path, where it
+        takes four tests red.
+
+    WHY THE REF MATTERS MORE THAN IT LOOKS: `post_comment` cannot raise, so a
+    delivery failure leaves no trace unless it is recorded. The log row is the
+    artifact, and without a truthful ref `runs/<run_id>.jsonl` is byte-identical
+    whether the block reason reached the PR or evaporated. A run that shows a
+    block on screen while the log says nobody was told is the worst available
+    outcome on the surface the judges read.
+    """
+    delivered = "https://github.com/o/r/pull/1#issuecomment-999"
+    _posted, state, rc = _cloud_run(
+        monkeypatch, tmp_path, poisoned="true", comment_ref=delivered
+    )
+    module = _stage_module()
+
+    assert state.status == "blocked", (
+        f"the poisoned run ended status={state.status!r}; this test is about a "
+        f"run the deterministic block rule stopped"
+    )
+    assert rc == module.EXIT_BLOCKED, (
+        f"the blocked stage exited {rc}, not EXIT_BLOCKED "
+        f"({module.EXIT_BLOCKED}). EXIT_OK here would let gate2 run on a run the "
+        f"scanners refused; 1 would make it indistinguishable from a crash."
+    )
+
+    blocked = [e for e in module.log.read(state.run_id)
+               if e.stage == "security" and e.action == "blocked"]
+    assert blocked, (
+        "no security/blocked row was logged for a blocked run, so the refusal "
+        "exists nowhere a reader of the run can find it"
+    )
+    assert any(e.artifact_ref == delivered for e in blocked), (
+        f"the block was DELIVERED as {delivered!r} but no log row carries that "
+        f"ref: {[e.artifact_ref for e in blocked]}. A run whose block reached the "
+        f"PR must not be recorded as one where nobody was told."
+    )
 
 
 def test_the_cloud_path_posts_the_same_per_stage_comments_as_the_local_path(
@@ -1093,7 +1248,7 @@ def test_the_cloud_path_posts_the_same_per_stage_comments_as_the_local_path(
 
     assert _PROMOTED_RUN_COMMENTS, "the shared expectation is empty"
 
-    posted, state = _cloud_run(monkeypatch, tmp_path)
+    posted, state, _rc = _cloud_run(monkeypatch, tmp_path)
     assert state.status == "promoted", (
         f"this test is about a run that finishes; got status={state.status!r}"
     )
@@ -1157,7 +1312,7 @@ def test_a_rejected_gate_is_recorded_on_disk_and_the_run_stops():
             tempfile.TemporaryDirectory() as tmp,
             pytest.MonkeyPatch.context() as mp,
         ):
-            posted, state = _cloud_run(mp, Path(tmp), reject_at=gate)
+            posted, state, _rc = _cloud_run(mp, Path(tmp), reject_at=gate)
 
         assert state.status == "rejected", (
             f"after {gate} was refused the state reads status={state.status!r}. "
