@@ -82,6 +82,8 @@ import pathlib
 import re
 from types import SimpleNamespace
 
+import pytest
+
 from agentorg import github_ops
 from agentorg.agents import developer, reviewer
 from agentorg.common import config
@@ -173,6 +175,21 @@ def _attempts(bodies: list[str]) -> list[int]:
         match = _ATTEMPT.search(body)
         assert match, f"comment carries no attempt number: {body[:160]!r}"
         found.append(int(match.group(1)))
+    return found
+
+
+def _attempts_or_none(bodies: list[str]) -> list[int | None]:
+    """The attempt number on each body in order, or None where there is none.
+
+    Positional counterpart to `_attempts`: that one asserts every body carried a
+    number, which is right for a list already filtered to one stage. This one is
+    applied to the WHOLE posted list, where plan/gate1/security legitimately
+    carry none, so it must be able to say "none here" rather than fail.
+    """
+    found = []
+    for body in bodies:
+        match = _ATTEMPT.search(body)
+        found.append(int(match.group(1)) if match else None)
     return found
 
 
@@ -340,6 +357,29 @@ def test_the_reviewer_loop_appends_a_comment_per_revision(monkeypatch, provenanc
 
     assert len(set(grouped["review"])) == passes, "revisions must be distinguishable"
     assert len(set(grouped["develop"])) == passes, "revisions must be distinguishable"
+
+    # CROSS-STAGE ORDER, which `grouped` cannot see. Grouping by stage discards
+    # the sequence BETWEEN stages, so a flush that posted all four diffs and then
+    # all four reviews satisfies every assertion above -- and renders attempt 1's
+    # review three comments below attempt 4's diff, so the PR reads as four
+    # unexplained diffs followed by four unattached verdicts. The shipped order
+    # pairs them: develop 1, review 1, develop 2, review 2, ...
+    #
+    # This is the cross-stage twin of the "append in shape, replace in substance"
+    # gap that mutation E exposed: the per-stage view was blind to it, and the
+    # single-pass ordering test above cannot see it either, because with one pass
+    # `[develop, review]` is the same list under both orders.
+    order = [_stage_of(body) for body in posted]
+    loop_order = [stage for stage in order if stage in ("develop", "review")]
+    assert loop_order == ["develop", "review"] * passes, loop_order
+
+    # And the pairing is by ATTEMPT, not merely alternating: an alternating flush
+    # that emitted develop 1, review 2, develop 2, review 1 satisfies the line
+    # above. Read the attempt number off each body in posting order instead.
+    paired = [(_stage_of(b), n) for b, n in zip(posted, _attempts_or_none(posted), strict=True)
+              if _stage_of(b) in ("develop", "review")]
+    assert paired == [(stage, n) for n in range(1, passes + 1)
+                      for stage in ("develop", "review")], paired
 
     # The stages a capped run never reaches must not have commented, or the
     # comment set is telling a judge about work that did not happen.
@@ -542,8 +582,28 @@ def _state(ticket_id: str) -> RunState:
     return RunState(ticket_id=ticket_id, ticket_text=TICKET_TEXT)
 
 
+# Ticket ids that are NOT issue references, and the reason each one is listed.
+# The first four are the ids this repo actually uses. The last four are the ones
+# that separate the shipped anchored pattern from a merely-`.match`ed one:
+# MEASURED, `re.compile(r"#?([0-9]+)").match` yields issue 7, 7, 7 and 1 for
+# them, so each is a comment written on a real issue nobody named. Those four are
+# the coverage that a survivor mutation on `_ISSUE_REF`'s anchors slipped
+# through, and the report that called that mutation benign was wrong.
+_NOT_AN_ISSUE = [
+    "POISON-1",     # the poisoned demo ticket
+    "CLEAN-1",      # the clean demo ticket
+    "T-1",          # this file's own ticket
+    "DEMO-POISON",  # `python -m agentorg.graph --poisoned`
+    "7-extra",      # anchors: trailing text after a real number
+    "7 7",          # anchors: two numbers, neither one named
+    "#7x",          # anchors: the GitHub form with a suffix
+    "1-2",          # anchors: leading number of a range
+]
+
+
+@pytest.mark.parametrize("ticket_id", _NOT_AN_ISSUE)
 def test_a_ticket_id_that_merely_contains_a_digit_is_not_an_issue_number(
-        monkeypatch, capsys):
+        monkeypatch, capsys, ticket_id):
     """`POISON-1` must not become issue #1 on the target repo.
 
     This is the same failure `post_comment` already refuses for branches: a
@@ -554,12 +614,17 @@ def test_a_ticket_id_that_merely_contains_a_digit_is_not_an_issue_number(
     `DEMO-POISON`) into a real issue number on somebody else's repository. So
     the witness is not that it returned a ref: it is that GitHub was never
     asked. `_repo` is left as conftest's raiser, which fails by name if it is.
+
+    PARAMETRISED over `_NOT_AN_ISSUE` rather than asserting on one id, because
+    one id cannot distinguish the shipped pattern from a partly-anchored one.
+    `POISON-1` alone is refused by BOTH, so it proves the guard exists without
+    proving it is tight; `7-extra` is refused only by the shipped one.
     """
     monkeypatch.setattr(config, "OFFLINE", False)
     monkeypatch.setattr(config, "GITHUB_TOKEN", "x")
     monkeypatch.setattr(config, "GITHUB_REPO", "someone/auth-service")
 
-    state = _state("POISON-1")
+    state = _state(ticket_id)
     ref = github_ops.post_comment(state, "the plan, with nowhere to go")
 
     assert ref == f"comment://{state.run_id}"
@@ -586,3 +651,127 @@ def test_a_numeric_ticket_id_is_the_issue_it_names(monkeypatch):
         # It went STRAIGHT to the issue: a PR lookup here would mean the run's
         # own branch was consulted for a run that has no branch.
         assert repo.heads == [], ticket_id
+
+
+# =========================================================================
+# THE ISSUE PATH DEGRADES TOO. This is the mirror of
+# test_post_comment_survives_a_github_failure in tests/test_offline_mode.py,
+# which covers the PR path only.
+#
+# WHY THIS IS THE MOST EXPENSIVE GAP IN THIS FILE. The plan and gate1 comments
+# are the FIRST TWO things a judge sees, and they are the only two that take the
+# issue path. `_comment_on_issue` had no test at all -- measured, `grep -rn
+# "_comment_on_issue" tests/` matched nothing -- so replacing its `except
+# Exception` with a bare raise passed all 735 tests while turning a routine 403
+# ("Resource not accessible by integration", which is what a GitHub App without
+# Issues:write returns) into a traceback at the plan stage, before anything
+# renders at all.
+#
+# post_comment's contract is that it CANNOT raise, because graph.py calls it on
+# the line after `status = "blocked"`. That contract was tested on one of its two
+# online branches.
+# =========================================================================
+
+ISSUE_BOOM = "403 Resource not accessible by integration"
+
+
+class _RefusingRepo:
+    """A repo handle whose issue lookup or comment write fails.
+
+    `failing` names the ONE call that raises, so each step of the issue path can
+    be broken on its own -- a guard around only the write would look right and
+    still crash on the lookup. Recording matters as much as raising: the claim
+    includes that nothing was written when the lookup failed.
+    """
+
+    def __init__(self, failing: str):
+        self.failing = failing
+        self.calls: list[str] = []
+        self.owner = SimpleNamespace(login="someone")
+
+    def _record(self, name: str) -> None:
+        self.calls.append(name)
+        if self.failing == name:
+            raise RuntimeError(ISSUE_BOOM)
+
+    def get_issue(self, number):
+        self._record("get_issue")
+        repo = self
+
+        class _Issue:
+            def create_comment(self, body):
+                repo._record("create_comment")
+                return SimpleNamespace(html_url=f"https://github.com/o/r/issues/{number}#c1")
+
+        return _Issue()
+
+
+@pytest.mark.parametrize("failing", ["_repo", "get_issue", "create_comment"])
+def test_post_comment_survives_a_github_failure_on_the_issue_path(monkeypatch,
+                                                                 capsys, failing):
+    """A 403 on the issue must not crash the plan stage -- the demo's first beat.
+
+    Every step of the issue path is broken on its own, `_repo()` included, so
+    this cannot pass by hardening only the first call. The witness is not just
+    "did not raise": the real exception's own text has to reach stdout, because a
+    canned "something went wrong" string would satisfy a handler that never
+    looked at what it caught. And the ref must be the honest `comment://` one --
+    a `https://` ref here would be the run's log row claiming a delivery that
+    did not happen.
+    """
+    repo = _RefusingRepo(failing)
+
+    def _explode():
+        raise RuntimeError(ISSUE_BOOM)
+
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "GITHUB_TOKEN", "x")
+    monkeypatch.setattr(config, "GITHUB_REPO", "someone/auth-service")
+    monkeypatch.setattr(github_ops, "_repo",
+                        _explode if failing == "_repo" else (lambda: repo))
+
+    state = _state(ISSUE_TICKET)
+    ref = github_ops.post_comment(state, "the plan nobody could deliver")
+
+    assert ref == f"comment://{state.run_id}", "the ref must not claim a delivery"
+
+    out = capsys.readouterr().out
+    assert "the plan nobody could deliver" in out, "the body still has to reach a human"
+    assert ISSUE_BOOM in out, "the caught exception's own text, not a canned string"
+    # It is the failure ending naming the ISSUE, not the PR path's wording -- a
+    # handler that reported every problem as a PR failure would send a reader
+    # looking for a pull request that was never involved.
+    assert f"could not comment on issue #{ISSUE_NUMBER}" in out, out
+    assert "no PR for" not in out
+
+
+def test_the_whole_pipeline_survives_an_issue_that_refuses_every_comment(
+        monkeypatch, provenance):
+    """End to end: a repo that 403s every issue comment still promotes the run.
+
+    The unit test above pins post_comment; this pins that graph.py does not
+    convert its degraded return into a stopped run. Driven through run_pipeline
+    with the ISSUE lookup failing and the PR path working, so plan and gate1
+    both fail to deliver while the six later comments succeed -- and the verdict
+    is unchanged.
+    """
+    provenance.none_installed()
+
+    class _IssueRefusing(_RecordingRepo):
+        def get_issue(self, number):
+            if number == ISSUE_NUMBER:      # the issue, not the PR
+                raise RuntimeError(ISSUE_BOOM)
+            return super().get_issue(number)
+
+    repo = _IssueRefusing()
+    _online(monkeypatch, repo)
+    monkeypatch.setattr(github_ops, "open_pr", _open_pr_on_local_git)
+
+    state = run_pipeline(ISSUE_TICKET, TICKET_TEXT)
+
+    assert state.status == "promoted", "an undeliverable issue comment is not a verdict"
+    # The six PR comments still landed, so the failure was contained to the two
+    # that had nowhere to go rather than poisoning the rest of the run.
+    assert [_stage_of(b) for _, b in repo.comments] == [
+        "develop", "review", "security", "gate2", "sre", "gate3",
+    ], repo.comments

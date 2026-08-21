@@ -294,7 +294,22 @@ def _destination(state: RunState) -> str:
 
 
 # A ticket id that IS an issue reference, and nothing looser. `#7` is the form
-# GitHub itself writes; a bare `7` is what the ingress passes through.
+# GitHub itself writes; a bare `7` is what the ingress passes through
+# (infra/Terraform/modules/ingress/main.tf sends `"ticket_id": "<issue_number>"`).
+#
+# BOTH ANCHORS ARE LOAD-BEARING, and `.match` is not a substitute for them.
+# MEASURED over 15 ticket ids: dropping `\A`/`\Z` while keeping `.match` still
+# diverges on `7-extra`, `7 7`, `#7x` and `1-2` -- each yields issue 7 (or 1)
+# where this pattern yields None, which is a comment written on a real issue
+# nobody named. An earlier version of this file's report called that mutation
+# benign; it is not, and the refusal test below now covers it.
+#
+# `[0-9]` NOT `\d`, deliberately -- do not "tidy" this. `\d` is Unicode-aware, so
+# `\d+` matches the Arabic-Indic `\u0667` and `int()` accepts it, returning 7. A
+# ticket id in another numeral system would therefore resolve to an issue number
+# no reader of the id would predict. Measured:
+#     re.match(r"\A#?\d+\Z", "\u0667") -> matches, int("\u0667") == 7
+#     re.match(r"\A#?[0-9]+\Z", "\u0667") -> None
 _ISSUE_REF = re.compile(r"\A#?([0-9]+)\Z")
 
 
@@ -318,6 +333,28 @@ def _issue_number(ticket_id: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _delivered_ref(comment, ref: str) -> str:
+    """The posted comment's URL, or the undelivered ref if it has none.
+
+    post_comment is annotated `-> str` and the timeline splits its return value
+    on "://" to classify delivery, so a None here would be a TypeError inside the
+    renderer -- on the artifact a judge is reading -- rather than at the point of
+    the fault. PyGithub types `html_url` as a plain attribute off the API
+    response, so an unexpected payload shape (a proxy error body, a future API
+    change) can leave it None while `create_comment` itself succeeded.
+
+    `ref` rather than "" for the fallback, because "" would render as a delivery
+    that simply carried no ref, which is indistinguishable from a comment nobody
+    tried to post. `comment://<run_id>` says the attempt was made and the proof
+    of delivery is missing -- which is exactly what happened.
+
+    Shared by BOTH online paths, the issue one and the PR one, so the annotation
+    cannot be honoured in one and broken in the other.
+    """
+    url = getattr(comment, "html_url", None)
+    return url if isinstance(url, str) and url else ref
+
+
 def _comment_on_issue(state: RunState, body: str, ref: str) -> str:
     """Post on the issue that opened this run. Cannot raise; see post_comment."""
     number = _issue_number(state.ticket_id)
@@ -330,7 +367,8 @@ def _comment_on_issue(state: RunState, body: str, ref: str) -> str:
         return ref
 
     try:
-        return _repo().get_issue(number).create_comment(body).html_url
+        posted = _repo().get_issue(number).create_comment(body)
+        return _delivered_ref(posted, ref)
     except Exception as exc:
         # The same two lines, in the same order, as the other two handlers in
         # this function's family -- see the PR branch below for why the traceback
@@ -452,7 +490,8 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         if pulls.totalCount == 0:
             print(no_pr)
             return ref
-        return repo.get_issue(pulls[0].number).create_comment(body).html_url
+        posted = repo.get_issue(pulls[0].number).create_comment(body)
+        return _delivered_ref(posted, ref)
     except Exception as exc:
         # Same two lines as the offline branch above, in the same order, for
         # the same reasons. BLE001 can force a logging call carrying exc_info

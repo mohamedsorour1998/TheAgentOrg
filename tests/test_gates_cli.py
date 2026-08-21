@@ -400,7 +400,11 @@ def test_the_security_stage_runs_for_a_change_no_one_approved(monkeypatch):
     stated grounds that post_comment "is reachable ONLY from inside the block
     branch". That was true when the block explanation was the only thing anyone
     posted; it is false now that every stage posts its output to the repo (see
-    graph.COMMENT_HEADER), so a clean run legitimately produces eleven comments.
+    graph.COMMENT_HEADER), so a clean run legitimately produces EIGHT comments --
+    plan, gate1, develop, review, security, gate2, sre, gate3. MEASURED by
+    counting `### Agent Org · ` headers in the offline NOTES file of
+    `python -m agentorg.graph`, not recalled; the figure this docstring carried
+    first time round was eleven, which was wrong.
     Left as it was, this assertion FAILED rather than going quietly vacuous --
     which is the outcome the rule exists to produce.
 
