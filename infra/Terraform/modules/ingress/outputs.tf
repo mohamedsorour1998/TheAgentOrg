@@ -54,3 +54,28 @@ output "log_group_name" {
   description = "CloudWatch log group carrying the handler's accept/reject lines"
   value       = aws_cloudwatch_log_group.ingress.name
 }
+
+# ── the rule's target ─────────────────────────────────────────────────────────
+
+output "dispatch_target_enabled" {
+  description = <<-EOT
+    Whether the rule actually has a target.
+
+    FALSE means an opened issue reaches the bus, matches the rule, and starts
+    NOTHING -- while every resource in this module looks healthy in the console.
+    That is the state until `dispatch_token_secret_name` is set, and it is
+    surfaced as an output rather than left implicit precisely because it is
+    invisible everywhere else.
+  EOT
+  value       = local.dispatch_enabled == 1
+}
+
+output "dispatch_endpoint" {
+  description = "The GitHub REST endpoint the API destination POSTs to. Read it to confirm the repo, workflow file and ref are the ones you meant."
+  value       = local.dispatch_endpoint
+}
+
+output "dispatch_dlq_url" {
+  description = "SQS queue holding dispatches that failed every retry. A run that never appeared is diagnosed from here; empty string when the target is disabled."
+  value       = local.dispatch_enabled == 1 ? aws_sqs_queue.dispatch_dlq[0].id : ""
+}

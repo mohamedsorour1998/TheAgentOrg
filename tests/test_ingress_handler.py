@@ -259,6 +259,29 @@ def _assert_the_stub_would_have_recorded(events_stub, secret: str = FAKE_SECRET)
     )
 
 
+def _assert_the_stub_could_still_have_recorded(events_stub) -> None:
+    """Vacuity control for tests whose SECRET stub is deliberately broken.
+
+    `_assert_the_stub_would_have_recorded` replays a valid delivery, which is
+    impossible when the secret is unreadable or misspelled -- no correct
+    signature exists to send. So instead this proves the events stub passed to
+    the handler is a LIVE recorder by invoking it directly and then restoring its
+    ledger.
+
+    Weaker than the replay, and deliberately so: it shows the stub can record,
+    not that the handler is wired to it. It is used only where the replay is
+    impossible by construction, and the tests that use it say so.
+    """
+    before = list(events_stub.calls)
+    events_stub.put_events(Entries=[{"Detail": "{}"}])
+
+    assert len(events_stub.calls) == len(before) + 1, (
+        "the EventBridge stub does not record calls at all, so the "
+        "'zero PutEvents' assertion beside this one is vacuous."
+    )
+    events_stub.calls[:] = before
+
+
 # ── the happy path ────────────────────────────────────────────────────────────
 
 
@@ -607,6 +630,10 @@ def test_the_signature_is_compared_with_compare_digest_and_not_equality(
         f"any non-ASCII header value instead of returning False. saw {seen!r}"
     )
     assert events.calls == [], events.calls
+    # Restore only the spy -- `monkeypatch.undo()` would also revert the autouse
+    # fixture's env vars and the stub wiring, breaking the replay it enables.
+    monkeypatch.setattr(handler.hmac, "compare_digest", real_compare)
+    _assert_the_stub_would_have_recorded(events)
 
 
 # ── failures that must not look like success ───────────────────────────────────
@@ -659,6 +686,9 @@ def test_an_unreadable_secret_is_a_500_and_never_a_401(wired):
         f"{response!r}"
     )
     assert events.calls == [], events.calls
+    # The replay cannot run here: the secret is unreadable, so no valid signature
+    # exists to send. Prove the recorder is live instead.
+    _assert_the_stub_could_still_have_recorded(events)
 
 
 def test_a_json_secret_without_the_expected_key_is_a_500_and_never_a_401(wired):
@@ -675,6 +705,9 @@ def test_a_json_secret_without_the_expected_key_is_a_500_and_never_a_401(wired):
         f"key itself, so every delivery 401s. got {response!r}"
     )
     assert events.calls == [], events.calls
+    # As above: the handler refuses this secret outright, so there is no valid
+    # signature to replay.
+    _assert_the_stub_could_still_have_recorded(events)
 
 
 def test_an_undecodable_base64_body_is_rejected_and_publishes_nothing(wired):
@@ -703,6 +736,7 @@ def test_a_verified_body_that_is_not_json_is_rejected_before_publishing(wired):
 
     assert response["statusCode"] == 400, response
     assert events.calls == [], events.calls
+    _assert_the_stub_would_have_recorded(events)
 
 
 # ── the response must not become an oracle ────────────────────────────────────
@@ -729,4 +763,259 @@ def test_no_response_ever_echoes_the_secret_or_the_expected_signature(wired, cas
     assert _sign(FAKE_SECRET, SIMPLE_BODY) not in rendered, (
         f"{case}: the response echoed the expected signature, which lets a "
         "caller obtain a valid signature for a body of their choosing"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX ROUND 1: the digest comparison's EXACTNESS, and the empty-secret guard.
+#
+# A reviewer defeated the original suite with four mutations that every gate
+# passed. All four were reproduced independently before these tests were written,
+# and the probes below record what each one actually let through -- because two of
+# the four had a different real consequence than first diagnosed:
+#
+#   TRUNCATION  comparing only `sha256=` + 8 hex chars. Measured: a signature
+#               carrying 8 correct hex chars and 56 WRONG ones returns 202. That
+#               reduces forgery from 2^256 to ~2^32. A real break, and nothing in
+#               the suite varied signature LENGTH against a valid body.
+#   CASE-FOLD   `.lower()` on both operands. Measured: correct-hex-uppercased goes
+#               401 -> 202, and nothing else changes; every wrong digest is still
+#               refused. So it is a WIDENING, not a break -- an attacker still
+#               needs the full correct digest. Pinned anyway: GitHub sends
+#               lowercase hex, so accepting other cases is latitude nobody asked
+#               for, and the next edit in that direction may not be so harmless.
+#   PREFIX `in` `startswith` -> `in` on the prefix gate. Measured: it forges
+#               nothing, but `XXsha256=<correct digest>` now reaches Secrets
+#               Manager, where before it was refused at the gate with ZERO
+#               GetSecretValue calls. The property it breaks is therefore the
+#               anonymous-cost one, not authentication.
+#   EMPTY KEY   deleting `if not secret: raise`. Measured: with an empty secret
+#               version, a signature computed with an EMPTY key returns 202 and
+#               publishes -- forgeable by anyone who knows the secret is empty,
+#               with no secret material at all. Baseline correctly answers 500.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _valid_hex(secret: str, body: bytes) -> str:
+    """The correct digest, no prefix -- so tests can mutate it structurally."""
+    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("label", "keep"),
+    [
+        pytest.param("prefix + 8 hex", 8, id="8-hex"),
+        pytest.param("prefix + 16 hex", 16, id="16-hex"),
+        pytest.param("prefix + 32 hex", 32, id="32-hex"),
+        pytest.param("prefix + 63 hex (one short)", 63, id="63-hex"),
+    ],
+)
+def test_a_truncated_signature_is_rejected_however_correct_its_prefix(
+    wired, label, keep
+):
+    """THE SERIOUS ONE. A prefix-only comparison reduces forgery to brute force.
+
+    Every signature here is a genuine PREFIX of the correct digest, against a
+    body whose signature is otherwise valid -- so a handler comparing any leading
+    slice accepts them all. At 8 hex characters that is ~32 bits, which is
+    online-guessable against an endpoint that anyone can reach.
+    """
+    events, _ = wired()
+    truncated = "sha256=" + _valid_hex(FAKE_SECRET, SIMPLE_BODY)[:keep]
+
+    response = handler.handler(
+        _event(body=SIMPLE_BODY, signature=truncated), None
+    )
+
+    assert response["statusCode"] == 401, (
+        f"{label}: a truncated signature was ACCEPTED. The comparison is not "
+        "over the full digest, so an attacker needs only the leading "
+        f"{keep} hex characters -- roughly {keep * 4} bits. got {response!r}"
+    )
+    assert events.calls == [], f"{label}: published on a truncated signature"
+    _assert_the_stub_would_have_recorded(events)
+
+
+def test_a_signature_with_a_correct_prefix_and_wrong_tail_is_rejected(wired):
+    """Full LENGTH, wrong content past the first 8 characters.
+
+    Separate from the truncation cases because it defeats a different bad
+    implementation: one that compares `len` correctly but only the first N bytes.
+    This is the exact shape the reviewer's `[:15]` mutation accepted.
+    """
+    events, _ = wired()
+    good = _valid_hex(FAKE_SECRET, SIMPLE_BODY)
+    forged = "sha256=" + good[:8] + ("0" * (len(good) - 8))
+    assert len(forged) == len("sha256=" + good), "the forgery must match in length"
+    assert forged != "sha256=" + good, "the forgery must differ from the real digest"
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=forged), None)
+
+    assert response["statusCode"] == 401, (
+        "a signature sharing only its first 8 hex characters with the real "
+        f"digest was accepted: {response!r}"
+    )
+    assert events.calls == [], events.calls
+    _assert_the_stub_would_have_recorded(events)
+
+
+def test_a_signature_longer_than_the_real_digest_is_rejected(wired):
+    """The other side of the length axis: correct digest plus trailing junk."""
+    events, _ = wired()
+    padded = "sha256=" + _valid_hex(FAKE_SECRET, SIMPLE_BODY) + "deadbeef"
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=padded), None)
+
+    assert response["statusCode"] == 401, (
+        f"a signature with trailing junk after a correct digest was accepted: {response!r}"
+    )
+    assert events.calls == [], events.calls
+    _assert_the_stub_would_have_recorded(events)
+
+
+@pytest.mark.parametrize(
+    ("label", "transform"),
+    [
+        pytest.param("hex UPPERCASED", lambda h: h.upper(), id="upper-hex"),
+        pytest.param("hex MiXeD case", lambda h: h[:32].upper() + h[32:], id="mixed-hex"),
+    ],
+)
+def test_the_hex_digest_is_compared_case_sensitively(wired, label, transform):
+    """A WIDENING rather than a break -- and pinned for that reason, not despite it.
+
+    Measured: case-folding both operands changes exactly one outcome, correct-hex
+    uppercased going 401 -> 202. Every wrong digest is still refused, so an
+    attacker gains nothing without the true digest. But GitHub documents
+    lowercase hex, so anything else is latitude the protocol never asked for, and
+    an unpinned comparison invites the next edit to relax something that does
+    matter. This test says which direction is intended.
+    """
+    events, _ = wired()
+    recased = "sha256=" + transform(_valid_hex(FAKE_SECRET, SIMPLE_BODY))
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=recased), None)
+
+    assert response["statusCode"] == 401, (
+        f"{label}: accepted. GitHub sends a lowercase hex digest; comparing "
+        "case-insensitively widens what counts as a valid signature beyond the "
+        f"protocol. got {response!r}"
+    )
+    assert events.calls == [], events.calls
+    _assert_the_stub_would_have_recorded(events)
+
+
+@pytest.mark.parametrize(
+    ("label", "signature_for"),
+    [
+        pytest.param("prefix buried after junk", lambda h: "XX" + "sha256=" + h, id="leading-junk"),
+        pytest.param("uppercase prefix", lambda h: "SHA256=" + h, id="upper-prefix"),
+        pytest.param("sha1 prefix", lambda h: "sha1=" + h, id="sha1-prefix"),
+    ],
+)
+def test_the_prefix_gate_requires_the_prefix_at_the_START(wired, label, signature_for):
+    """`startswith`, never `in`.
+
+    What the `in` variant actually costs is NOT authentication -- measured, it
+    forges nothing. It is that `XXsha256=<correct digest>` stops being refused at
+    the gate and instead reaches `_webhook_secret()`, so an anonymous caller can
+    drive a Secrets Manager call against a public endpoint. That is the same
+    property `test_an_unsigned_delivery_never_even_reads_the_secret` protects,
+    which could not see this shape because its input had no prefix anywhere.
+    """
+    events, secrets = wired()
+    signature = signature_for(_valid_hex(FAKE_SECRET, SIMPLE_BODY))
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=signature), None)
+
+    assert response["statusCode"] == 401, f"{label}: {response!r}"
+    assert events.calls == [], f"{label}: {events.calls}"
+    assert secrets.calls == [], (
+        f"{label}: a malformed signature header reached Secrets Manager. The "
+        "prefix gate must refuse before the secret is read, or anonymous "
+        f"traffic can drive GetSecretValue on a public endpoint. {secrets.calls}"
+    )
+    _assert_the_stub_would_have_recorded(events)
+
+
+def test_a_doubled_prefix_is_rejected_at_the_comparison_not_at_the_gate(wired):
+    """`sha256=sha256=<hex>` genuinely STARTS WITH the prefix, so it passes the
+    structural gate and is refused by the digest comparison instead.
+
+    Written as its own test rather than folded into the prefix-gate cases because
+    the expectation is different, and pretending otherwise would be asserting a
+    property the handler does not have: this input DOES legitimately reach
+    Secrets Manager. What matters is that it is refused and publishes nothing.
+    """
+    events, _ = wired()
+    signature = "sha256=sha256=" + _valid_hex(FAKE_SECRET, SIMPLE_BODY)
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=signature), None)
+
+    assert response["statusCode"] == 401, response
+    assert events.calls == [], events.calls
+    _assert_the_stub_would_have_recorded(events)
+
+
+@pytest.mark.parametrize(
+    ("label", "secret_string"),
+    [
+        pytest.param("empty string", "", id="empty"),
+        pytest.param("whitespace only", "   ", id="whitespace"),
+        pytest.param("empty JSON value", json.dumps({"webhook_secret": ""}), id="empty-json-value"),
+    ],
+)
+def test_an_empty_webhook_secret_is_a_500_and_never_authenticates_anyone(
+    wired, label, secret_string
+):
+    """An empty HMAC key is a universal forgery, and it needs no secret material.
+
+    Anyone who knows (or guesses) that the secret version is empty can compute
+    `hmac.new(b"", body)` and be believed. This is reachable by accident: a human
+    running `put-secret-value --secret-string ""`, or writing the JSON key with an
+    empty value, in step 6.
+
+    So the forged signature below is built with an EMPTY key -- exactly what an
+    attacker could produce -- and the handler must answer 500 (we are
+    misconfigured) rather than 202 (you are GitHub) or 401 (your signature is
+    wrong, which would send the next person hunting a signature bug).
+    """
+    events, _ = wired(secret_string=secret_string)
+    forged = "sha256=" + hmac.new(b"", SIMPLE_BODY, hashlib.sha256).hexdigest()
+
+    response = handler.handler(_event(body=SIMPLE_BODY, signature=forged), None)
+
+    assert response["statusCode"] == 500, (
+        f"{label}: an empty webhook secret produced {response['statusCode']}. "
+        "With an empty key the HMAC is forgeable by anyone, so this must fail "
+        "closed as a configuration fault -- not 202, and not 401."
+    )
+    assert events.calls == [], f"{label}: published on an empty-key signature"
+    # Replay impossible: the handler refuses this secret, so no signature it
+    # would accept can be constructed.
+    _assert_the_stub_could_still_have_recorded(events)
+
+
+def test_an_empty_secret_does_not_even_reach_the_comparison(wired, monkeypatch):
+    """Fail closed BEFORE the compare, not by happening to mismatch.
+
+    Without this, a handler could pass the test above for the wrong reason -- an
+    empty key still produces a digest, so most signatures would mismatch and 401
+    anyway. The property is that an empty secret is rejected as a fault, so the
+    comparison must never run.
+    """
+    wired(secret_string="")
+    calls: list[tuple] = []
+    real = hmac.compare_digest
+    monkeypatch.setattr(
+        handler.hmac, "compare_digest", lambda a, b: (calls.append((a, b)), real(a, b))[1]
+    )
+
+    response = handler.handler(
+        _event(body=SIMPLE_BODY, signature=_sign(FAKE_SECRET, SIMPLE_BODY)), None
+    )
+
+    assert response["statusCode"] == 500, response
+    assert calls == [], (
+        "the handler compared a signature against a digest keyed on an EMPTY "
+        "secret. It must reject the secret as unusable before computing anything."
     )

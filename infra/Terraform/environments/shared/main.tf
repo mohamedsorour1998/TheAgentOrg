@@ -66,4 +66,28 @@ module "ingress" {
   # requirements.txt.
   handler_source_dir = "${path.root}/../../../ingress"
   tags               = local.tags
+
+  # Empty by default: the rule gets no target. See the block below.
+  dispatch_token_secret_name = var.dispatch_token_secret_name
+}
+
+################################################################################
+# The ingress rule's TARGET: dispatching run-pipeline.yml
+#
+# Set `dispatch_token_secret_name` to the Secrets Manager secret holding a GitHub
+# token and the module creates the connection, API destination, target, its role
+# and a dead-letter queue. Leave it unset and the rule has no target -- an opened
+# issue reaches the bus and starts nothing.
+#
+# UNSET IS THE DEFAULT, AND DELIBERATELY SO. An API_KEY connection needs the
+# token's VALUE at PLAN time, so an ungated read of a secret nobody has written
+# yet fails the plan -- which would turn this workflow, currently green end to
+# end, red until somebody minted a token. The variable's own description in the
+# module carries the full reasoning, including that the token lands in S3 state
+# and must therefore be scoped to `actions: write` on this one repository.
+################################################################################
+variable "dispatch_token_secret_name" {
+  description = "Secrets Manager secret NAME holding the GitHub token EventBridge dispatches with. Empty leaves the rule without a target -- see the module's variables.tf."
+  type        = string
+  default     = ""
 }

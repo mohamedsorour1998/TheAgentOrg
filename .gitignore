@@ -15,6 +15,10 @@ dist/
 
 # Terraform
 .terraform/
+# `data.archive_file` writes the Lambda zip here at PLAN time, so any local
+# `terraform plan` would otherwise leave an untracked build artifact in
+# `git status`. `build/` above does not match a dot-prefixed directory.
+infra/Terraform/modules/*/.build/
 *.tfstate
 *.tfstate.*
 .terraform.lock.hcl

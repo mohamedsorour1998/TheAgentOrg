@@ -227,8 +227,13 @@ def _webhook_secret() -> str:
             )
         secret = str(parsed[SECRET_JSON_KEY])
 
-    if not secret:
-        raise ValueError("the webhook secret is empty")
+    # `not secret` alone misses a whitespace-only value, which is reachable by
+    # accident (`put-secret-value --secret-string " "`, or a JSON value of "  ").
+    # Such a key is not empty, so the HMAC succeeds and every delivery merely
+    # 401s -- but it is a 1-3 byte key an attacker can guess outright, which is
+    # the same universal-forgery hazard as an empty one. Both fail closed here.
+    if not secret.strip():
+        raise ValueError("the webhook secret is empty or whitespace only")
 
     _SECRET_CACHE = secret
     return secret

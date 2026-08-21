@@ -52,9 +52,6 @@
 # SaaS partner -- GitHub is not on that list. So something has to terminate the
 # HTTPS POST and verify the signature, and that something is this function.
 
-data "aws_region" "current" {}
-data "aws_caller_identity" "current" {}
-
 locals {
   function_name = "${var.name}-github-ingress"
   bus_name      = "${var.name}-github-ingress"
@@ -220,9 +217,9 @@ resource "aws_iam_role_policy" "ingress" {
 # ── the log group ─────────────────────────────────────────────────────────────
 #
 # Declared rather than left to Lambda's implicit creation, for two reasons: the
-# retention above applies (an implicitly created group never expires, and this
-# function's log volume is driven by public traffic), and the IAM statement
-# above can name it instead of granting logs on `*`.
+# `retention_in_days` below applies (an implicitly created group never expires,
+# and this function's log volume is driven by public traffic), and the IAM
+# statement above can name it instead of granting logs on `*`.
 
 resource "aws_cloudwatch_log_group" "ingress" {
   name              = "/aws/lambda/${local.function_name}"
@@ -290,4 +287,251 @@ resource "aws_lambda_function" "ingress" {
 resource "aws_lambda_function_url" "ingress" {
   function_name      = aws_lambda_function.ingress.function_name
   authorization_type = "NONE"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE RULE'S TARGET: dispatching run-pipeline.yml
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Added after run-pipeline.yml existed. The note above -- "NO TARGET IS ATTACHED
+# HERE" -- described the state before this block and is left in place because it
+# still explains WHY the target could not be written earlier.
+#
+# The path an opened issue now takes to a pipeline run:
+#
+#   rule (issue opened)
+#     -> input_transformer  reshapes GitHub's issue payload into the REST
+#                           dispatch body
+#     -> api_destination    POST .../actions/workflows/run-pipeline.yml/dispatches
+#     -> connection         supplies `Authorization: Bearer <token>`
+#
+# ── EVERYTHING HERE IS COUNT-GATED, AND THAT IS THE LOAD-BEARING DECISION ────
+#
+# `aws_cloudwatch_event_connection` with API_KEY auth needs the token's VALUE as
+# a configuration value, so Terraform has to READ it at plan time. The secret
+# exists but its value is written by a HUMAN, and reading a secret with no
+# version fails the PLAN, not the apply. Ungated, that would turn terraform.yml
+# -- currently green end to end -- red on every run until somebody minted a
+# token, and the failure would be blamed on Terraform rather than on the missing
+# value.
+#
+# So the whole target is created only when `dispatch_token_secret_name` is set.
+# Empty is the default: this module applies exactly as it did before, and the
+# rule has no target. `terraform validate` passes in both states -- measured, not
+# assumed.
+#
+# ── WHY API_KEY AND NOT OAUTH ────────────────────────────────────────────────
+#
+# The connection's auth types are API_KEY, BASIC and OAUTH_CLIENT_CREDENTIALS.
+# GitHub's REST API takes a bearer token in a header, which is API_KEY with the
+# key literally named `Authorization` and the value `Bearer <token>` -- EventBridge
+# sends `<key>: <value>` verbatim, it does not prepend anything. OAuth here would
+# mean a GitHub App's client-credentials flow, which GitHub does not offer for
+# this endpoint.
+#
+# THE TOKEN ENDS UP IN TERRAFORM STATE. Unavoidable with API_KEY: the provider
+# takes the value through config, and state lives in S3. The mitigation is scope,
+# not secrecy -- a fine-grained token with `actions: write` on this ONE repository
+# and nothing else, rotated after the demo. Recorded here because a reader who
+# assumes otherwise would grant it more than it needs.
+
+data "aws_secretsmanager_secret_version" "dispatch_token" {
+  count     = var.dispatch_token_secret_name == "" ? 0 : 1
+  secret_id = var.dispatch_token_secret_name
+}
+
+locals {
+  # Whether the target wiring exists at all. One expression, five readers.
+  dispatch_enabled = var.dispatch_token_secret_name == "" ? 0 : 1
+
+  # A bare-string secret, or one key out of a JSON secret. Both shapes exist for
+  # the same reason handler.py accepts both for the webhook secret: which one you
+  # get depends on how the human wrote it.
+  dispatch_token = local.dispatch_enabled == 0 ? "" : (
+    var.dispatch_token_secret_json_key == ""
+    ? data.aws_secretsmanager_secret_version.dispatch_token[0].secret_string
+    : jsondecode(data.aws_secretsmanager_secret_version.dispatch_token[0].secret_string)[var.dispatch_token_secret_json_key]
+  )
+
+  # The REST endpoint that starts a run. The workflow FILE NAME is accepted in
+  # place of a numeric workflow id, which is what keeps this readable and what
+  # makes the coupling to run-pipeline.yml visible in the URL.
+  dispatch_endpoint = "https://api.github.com/repos/${var.dispatch_repo}/actions/workflows/${var.dispatch_workflow_file}/dispatches"
+}
+
+resource "aws_cloudwatch_event_connection" "github_dispatch" {
+  count = local.dispatch_enabled
+
+  name               = "${var.name}-github-dispatch"
+  description        = "Bearer token for dispatching run-pipeline.yml. Value read from Secrets Manager, never written by Terraform."
+  authorization_type = "API_KEY"
+
+  auth_parameters {
+    api_key {
+      # EventBridge sends this header verbatim, so the scheme belongs in the
+      # VALUE. `key = "Bearer"` would send `Bearer: <token>`, which GitHub
+      # ignores -- and an ignored auth header on this endpoint answers 404, not
+      # 401, because an unauthenticated caller cannot see the workflow at all.
+      # That 404 reads as "the workflow does not exist" and sends the next person
+      # to look for a missing file.
+      key   = "Authorization"
+      value = "Bearer ${local.dispatch_token}"
+    }
+  }
+}
+
+resource "aws_cloudwatch_event_api_destination" "github_dispatch" {
+  count = local.dispatch_enabled
+
+  name                = "${var.name}-run-pipeline-dispatch"
+  description         = "POST workflow_dispatch to run-pipeline.yml in ${var.dispatch_repo}"
+  invocation_endpoint = local.dispatch_endpoint
+  http_method         = "POST"
+  connection_arn      = aws_cloudwatch_event_connection.github_dispatch[0].arn
+
+  # One dispatch per second is far above real traffic -- a human opens issues one
+  # at a time -- and it is the second spend cap in this module, for the same
+  # reason as the Lambda's reserved concurrency: the front door is public. A
+  # signed flood cannot become a thousand pipeline runs.
+  invocation_rate_limit_per_second = 1
+}
+
+resource "aws_iam_role" "dispatch" {
+  count = local.dispatch_enabled
+
+  name = "${var.name}-github-dispatch-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = var.tags
+}
+
+# One action on one ARN. An API-destination target is the one EventBridge target
+# type that needs a role at all, and this is the whole of what it may do.
+resource "aws_iam_role_policy" "dispatch" {
+  count = local.dispatch_enabled
+
+  name = "${var.name}-github-dispatch-policy"
+  role = aws_iam_role.dispatch[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid      = "InvokeTheRunPipelineDestinationAndNothingElse"
+      Effect   = "Allow"
+      Action   = ["events:InvokeApiDestination"]
+      Resource = [aws_cloudwatch_event_api_destination.github_dispatch[0].arn]
+    }]
+  })
+}
+
+# ── THE INPUT TRANSFORMER, WHICH IS WHERE THE TYPES BITE ─────────────────────
+#
+# `input_paths` are JSONPath-ish selectors over the EventBridge envelope, so the
+# issue body sits under `$.detail` -- the handler puts GitHub's raw payload
+# there verbatim.
+#
+# EVERY VALUE IN `inputs` IS QUOTED, INCLUDING THE BOOLEANS. The REST dispatch
+# API rejects real JSON booleans inside `inputs`; each one must be a string. So
+# the template writes "false", not false -- and `scripts/run_stage.py:flag`
+# parses exactly those strings, refusing anything it does not recognise rather
+# than defaulting to False. tests/test_run_pipeline_workflow.py pins both halves.
+#
+# `poisoned` is hardcoded "false" and NOT read off the payload. A label is
+# attached AFTER an issue is opened, so `$.detail.issue.labels` is reliably empty
+# on the event this rule matches -- reading it would produce a clean run while
+# looking as though it honoured the label. The poisoned demo run is dispatched by
+# hand with `gh workflow run -f poisoned=true`. Stated rather than left as an
+# apparent oversight.
+#
+# `auto_approve` is "false" so an issue-triggered run pauses at all three
+# Environments. An issue is opened by anyone with access to the repository; a run
+# it starts must not approve itself.
+#
+# The issue NUMBER becomes ticket_id and the TITLE becomes ticket_text. The body
+# is deliberately not used: it is unbounded, may hold anything, and goes straight
+# into an agent prompt.
+resource "aws_cloudwatch_event_target" "run_pipeline" {
+  count = local.dispatch_enabled
+
+  rule           = aws_cloudwatch_event_rule.issue_opened.name
+  event_bus_name = aws_cloudwatch_event_bus.github.name
+  target_id      = "run-pipeline-dispatch"
+  arn            = aws_cloudwatch_event_api_destination.github_dispatch[0].arn
+  role_arn       = aws_iam_role.dispatch[0].arn
+
+  input_transformer {
+    input_paths = {
+      issue_number = "$.detail.issue.number"
+      issue_title  = "$.detail.issue.title"
+    }
+
+    # <issue_number> and <issue_title> are EventBridge's substitution syntax, not
+    # Terraform's. The JSON is written by hand rather than through jsonencode()
+    # because those placeholders must survive unquoted-into-a-string-position,
+    # which jsonencode would escape.
+    input_template = <<-EOT
+      {
+        "ref": "${var.dispatch_ref}",
+        "inputs": {
+          "ticket_id": "<issue_number>",
+          "ticket_text": "<issue_title>",
+          "poisoned": "false",
+          "auto_approve": "false"
+        }
+      }
+    EOT
+  }
+
+  # A dispatch that fails is a demo that does not start, so failures are retried
+  # and then KEPT. Without a dead-letter queue a 401 from a rotated token, or a
+  # 404 from a workflow not yet on `main`, disappears silently: the rule reports
+  # healthy, the run never appears, and there is nothing to read afterwards.
+  retry_policy {
+    maximum_retry_attempts       = 3
+    maximum_event_age_in_seconds = 600
+  }
+
+  dead_letter_config {
+    arn = aws_sqs_queue.dispatch_dlq[0].arn
+  }
+}
+
+resource "aws_sqs_queue" "dispatch_dlq" {
+  count = local.dispatch_enabled
+
+  name                      = "${var.name}-github-dispatch-dlq"
+  message_retention_seconds = 1209600 # 14 days, the maximum
+
+  tags = var.tags
+}
+
+# EventBridge needs an explicit resource-policy grant to write to the queue; the
+# target's role_arn does not cover the DLQ. Scoped by SourceArn to this one rule,
+# so no other rule in the account can use this queue as its dead-letter.
+resource "aws_sqs_queue_policy" "dispatch_dlq" {
+  count = local.dispatch_enabled
+
+  queue_url = aws_sqs_queue.dispatch_dlq[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AllowThisRuleToDeadLetterHere"
+      Effect    = "Allow"
+      Principal = { Service = "events.amazonaws.com" }
+      Action    = "sqs:SendMessage"
+      Resource  = aws_sqs_queue.dispatch_dlq[0].arn
+      Condition = {
+        ArnEquals = { "aws:SourceArn" = aws_cloudwatch_event_rule.issue_opened.arn }
+      }
+    }]
+  })
 }
