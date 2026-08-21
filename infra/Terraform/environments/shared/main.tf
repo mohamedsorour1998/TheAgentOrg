@@ -37,3 +37,33 @@ module "agentcore" {
   image_retention_count = var.image_retention_count
   tags                  = local.tags
 }
+
+################################################################################
+# Ingress: the GitHub App's webhook -> a Lambda Function URL -> EventBridge
+#
+# THIS MODULE CREATES THE ONLY INTERNET-FACING, UNAUTHENTICATED ENTRY POINT IN
+# THIS ACCOUNT'S SHARE OF THE PROJECT. The Function URL is `auth-type NONE`
+# because GitHub cannot sign a SigV4 request, so the HMAC-SHA256 check inside
+# the handler is the whole of the access control. The module's own main.tf opens
+# with what that costs and what limits it -- read that before changing anything
+# here.
+#
+# Two things this deliberately does NOT do:
+#   * It does not write the webhook secret's value. Terraform creates the
+#     container; a human writes the value once (task brief step 6), so the
+#     secret never lands in S3 state.
+#   * The event rule has no target yet. That needs an API destination aimed at
+#     run-pipeline.yml's workflow_dispatch, which is Task 3's file.
+################################################################################
+module "ingress" {
+  source = "../../modules/ingress"
+
+  name = local.name
+  # The handler is one file under infra/ingress/, zipped at plan time. It is NOT
+  # part of the agentorg package on purpose: it imports boto3, which the Lambda
+  # runtime provides, and tests/test_agentcore_deploy_assets.py fails a
+  # third-party import under agentorg/ that is absent from the agents'
+  # requirements.txt.
+  handler_source_dir = "${path.root}/../../../ingress"
+  tags               = local.tags
+}
