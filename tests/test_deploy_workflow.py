@@ -110,7 +110,13 @@ ALL_WORKFLOWS = sorted(WORKFLOWS.glob("*.yml"))
 
 # The workflows allowed to reach AWS at all. A new workflow assuming a role must
 # be added here deliberately, which is the point.
-AWS_WORKFLOW_NAMES = {"deploy.yml", "terraform.yml"}
+#
+# run-pipeline.yml joined the set when the pipeline moved onto AgentCore:
+# REMOTE_AGENTS=true makes every agent call an invoke_agent_runtime, so its
+# per-stage jobs assume the role through OIDC exactly as deploy.yml does. Adding
+# the name here is this test's mechanism working, not a workaround for it -- the
+# registration IS the deliberate decision the docstring below asks for.
+AWS_WORKFLOW_NAMES = {"deploy.yml", "terraform.yml", "run-pipeline.yml"}
 
 # Read from docs/plan/week1-verification-log.md:11-30. Never recalled, never
 # re-derived from live AWS state -- Task 6 is forbidden from calling AWS at all.
