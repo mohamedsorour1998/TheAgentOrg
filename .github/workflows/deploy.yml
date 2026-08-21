@@ -294,10 +294,21 @@ jobs:
               id="$(aws bedrock-agentcore-control list-agent-runtimes \
                 --query "agentRuntimes[?agentRuntimeName=='theagentorg_${agent}'].agentRuntimeId | [0]" \
                 --output text)"
-              read -r status live <<<"$(aws bedrock-agentcore-control \
-                list-agent-runtime-endpoints --agent-runtime-id "$id" \
-                --query "runtimeEndpoints[?name=='DEFAULT'].[status,liveVersion] | [0]" \
-                --output text)"
+              # A FAILED CALL IS NOT "NOT READY YET". The first version of this
+              # loop swallowed the CLI's exit status, so an
+              # AccessDeniedException on ListAgentRuntimeEndpoints looked
+              # identical to a pending endpoint: it polled all forty attempts
+              # and timed out ten minutes later, reporting the wrong cause. A
+              # poll that cannot tell "denied" from "pending" is the same
+              # reassuring non-answer this project keeps having to eliminate.
+              if ! ep="$(aws bedrock-agentcore-control list-agent-runtime-endpoints \
+                    --agent-runtime-id "$id" \
+                    --query "runtimeEndpoints[?name=='DEFAULT'].[status,liveVersion] | [0]" \
+                    --output text 2>&1)"; then
+                echo "::error::cannot read ${agent}'s endpoint: ${ep}"
+                exit 1
+              fi
+              read -r status live <<<"$ep"
               echo "  ${agent}: endpoint=${status} live=${live}"
               # A live version of None means nothing is serving yet, however
               # healthy the endpoint claims to be.
