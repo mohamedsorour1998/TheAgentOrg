@@ -92,8 +92,12 @@ from . import config
 # The DATA-plane invoke is the opposite shape: it runs a real agent, which makes
 # a Bedrock model call inside the container. 5s would time out every honest
 # invocation. 300s is the ceiling, chosen against what the local path already
-# tolerates -- the full suite with three real scanners takes ~173s, and the
-# security agent is the slowest of the five.
+# tolerates -- the full suite with all three real scanners on PATH takes ~117s
+# (measured 116.88s at 793 passed on 2026-08-21; an earlier form of this comment
+# said ~173s, which was inherited from config.py rather than measured here), and
+# the security agent is the slowest of the five. The ceiling is deliberately far
+# above either number: it bounds a HUNG call, and a ceiling that tripped on an
+# honest slow invocation would be a self-inflicted failure on a projector.
 #
 # retries={"max_attempts": 0} on BOTH, deliberately. An agent invocation is not
 # idempotent: it writes a PR comment and burns model tokens, so a silent botocore

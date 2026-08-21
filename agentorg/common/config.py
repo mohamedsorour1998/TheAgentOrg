@@ -106,8 +106,11 @@ SCANNERS_REQUIRED = os.environ.get("SCANNERS_REQUIRED", "false").lower() == "tru
 # subprocess's timeout=.
 #
 # 120s is chosen against measured cost, not guessed: the full suite with all
-# three real binaries takes ~173s in total, and trivy's first run has to resolve
-# a vulnerability database. A ceiling that trips on an honest slow scan would be
+# three real binaries on PATH takes ~117s in total (measured 116.88s at 793
+# passed on 2026-08-21; this comment previously said ~173s, from an earlier and
+# smaller suite), and trivy's first run has to resolve a vulnerability database.
+# The ceiling is per-scanner, not per-suite, so it sits well above any single
+# invocation's honest cost. A ceiling that trips on an honest slow scan would be
 # a self-inflicted block, since a timeout is a fault and fails closed.
 SCANNER_TIMEOUT_SECONDS = int(os.environ.get("SCANNER_TIMEOUT_SECONDS", "120"))
 
