@@ -214,6 +214,14 @@ jobs:
     environment: gate1
     permissions:
       contents: read
+    # The gate posts its decision to the issue/PR, so it needs the GitHub seam --
+    # but NO AWS credentials: recording an approval reaches no runtime. Without
+    # these two, `github_ops._use_local()` takes its offline branch and the gate
+    # comment degrades to a `local://` ref, so the approval a judge is looking for
+    # never appears while the job still reports green.
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -326,6 +334,14 @@ jobs:
     environment: gate2
     permissions:
       contents: read
+    # The gate posts its decision to the issue/PR, so it needs the GitHub seam --
+    # but NO AWS credentials: recording an approval reaches no runtime. Without
+    # these two, `github_ops._use_local()` takes its offline branch and the gate
+    # comment degrades to a `local://` ref, so the approval a judge is looking for
+    # never appears while the job still reports green.
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -424,6 +440,14 @@ jobs:
     environment: gate3
     permissions:
       contents: read
+    # The gate posts its decision to the issue/PR, so it needs the GitHub seam --
+    # but NO AWS credentials: recording an approval reaches no runtime. Without
+    # these two, `github_ops._use_local()` takes its offline branch and the gate
+    # comment degrades to a `local://` ref, so the approval a judge is looking for
+    # never appears while the job still reports green.
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -497,6 +521,183 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.STATE_ARTIFACT }}-final
+          path: runs/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── gate1 REJECTION RECORDER ─────────────────────────────────────────────────
+  #
+  # Runs when `gate1` did NOT. GitHub SKIPS a job whose Environment a reviewer
+  # rejected, so nothing inside the gate job executes on a refusal -- which is why
+  # a branch in there could never record one. This job's `if:` fires on exactly
+  # the states the gate did not reach.
+  #
+  # `always()` here is the ONE correct use of an outcome-ignoring condition in
+  # this file, and it is the opposite of the defect the tests forbid elsewhere: it
+  # does not ADVANCE a run past a gate, it RECORDS that the run stopped. Without
+  # it a refused run and an in-flight run are byte-identical on disk -- both
+  # `status="running"` -- which is the bug `agentorg/gates.py:16-20` documents
+  # being fixed once already.
+  #
+  # No credentials, no agent call: it writes a decision and posts a comment.
+  gate1-rejected:
+    needs: [plan, gate1]
+    if: always() && needs.gate1.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e "."
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}
+          path: runs/
+
+      - name: Record the gate1 refusal
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          APPROVER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          python scripts/run_stage.py gate1-rejected \
+            --run-id "$RUN_ID" \
+            --approver "$APPROVER"
+
+      - name: Upload the rejected run state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}-gate1-rejected
+          path: runs/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── gate2 REJECTION RECORDER ─────────────────────────────────────────────────
+  #
+  # Runs when `gate2` did NOT. GitHub SKIPS a job whose Environment a reviewer
+  # rejected, so nothing inside the gate job executes on a refusal -- which is why
+  # a branch in there could never record one. This job's `if:` fires on exactly
+  # the states the gate did not reach.
+  #
+  # `always()` here is the ONE correct use of an outcome-ignoring condition in
+  # this file, and it is the opposite of the defect the tests forbid elsewhere: it
+  # does not ADVANCE a run past a gate, it RECORDS that the run stopped. Without
+  # it a refused run and an in-flight run are byte-identical on disk -- both
+  # `status="running"` -- which is the bug `agentorg/gates.py:16-20` documents
+  # being fixed once already.
+  #
+  # No credentials, no agent call: it writes a decision and posts a comment.
+  gate2-rejected:
+    needs: [plan, gate2]
+    if: always() && needs.gate2.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e "."
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}-develop
+          path: runs/
+
+      - name: Record the gate2 refusal
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          APPROVER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          python scripts/run_stage.py gate2-rejected \
+            --run-id "$RUN_ID" \
+            --approver "$APPROVER"
+
+      - name: Upload the rejected run state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}-gate2-rejected
+          path: runs/
+          if-no-files-found: error
+          retention-days: 30
+
+  # ── gate3 REJECTION RECORDER ─────────────────────────────────────────────────
+  #
+  # Runs when `gate3` did NOT. GitHub SKIPS a job whose Environment a reviewer
+  # rejected, so nothing inside the gate job executes on a refusal -- which is why
+  # a branch in there could never record one. This job's `if:` fires on exactly
+  # the states the gate did not reach.
+  #
+  # `always()` here is the ONE correct use of an outcome-ignoring condition in
+  # this file, and it is the opposite of the defect the tests forbid elsewhere: it
+  # does not ADVANCE a run past a gate, it RECORDS that the run stopped. Without
+  # it a refused run and an in-flight run are byte-identical on disk -- both
+  # `status="running"` -- which is the bug `agentorg/gates.py:16-20` documents
+  # being fixed once already.
+  #
+  # No credentials, no agent call: it writes a decision and posts a comment.
+  gate3-rejected:
+    needs: [plan, gate3]
+    if: always() && needs.gate3.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e "."
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}-sre
+          path: runs/
+
+      - name: Record the gate3 refusal
+        env:
+          RUN_ID: ${{ needs.plan.outputs.run_id }}
+          APPROVER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          python scripts/run_stage.py gate3-rejected \
+            --run-id "$RUN_ID" \
+            --approver "$APPROVER"
+
+      - name: Upload the rejected run state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.STATE_ARTIFACT }}-gate3-rejected
           path: runs/
           if-no-files-found: error
           retention-days: 30

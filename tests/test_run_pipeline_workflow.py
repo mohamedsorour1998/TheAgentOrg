@@ -61,10 +61,12 @@ over `scripts/run_stage.py`, which is where the workflow's decisions actually
 live and is therefore the part that can be executed here.
 """
 
+import argparse
 import itertools
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -92,6 +94,19 @@ STAGE_CHAIN = ["plan", "gate1", "develop", "gate2", "sre", "gate3", "promote"]
 # Literal["gate1", "gate2", "gate3"], so these names are not cosmetic: a job
 # named gate4 would produce a decision the state model refuses to validate.
 GATE_JOBS = ["gate1", "gate2", "gate3"]
+
+# The rejection recorders: one per gate, each running when its gate job did NOT.
+# GitHub SKIPS a job whose Environment a reviewer rejected, so nothing inside the
+# gate job runs on a refusal and a branch in there could never record one. These
+# jobs are the path that executes on rejection, and without them a refused run and
+# an in-flight run are byte-identical on disk -- the bug agentorg/gates.py:16-20
+# documents being fixed once already.
+#
+# They are the ONE place in this workflow where an outcome-ignoring `if:` is
+# correct, because they RECORD that a run stopped rather than ADVANCING it past a
+# gate. test_no_job_runs_regardless_of_whether_its_dependency_succeeded exempts
+# exactly these names and no others.
+REJECTION_RECORDER_JOBS = ["gate1-rejected", "gate2-rejected", "gate3-rejected"]
 
 # The jobs that reach AWS, because they invoke an AgentCore runtime through
 # `agent_client.call_agent`. Everything else -- the three gates and promote --
@@ -193,15 +208,16 @@ def test_the_run_pipeline_workflow_and_its_stage_script_exist():
     assert STAGE_SCRIPT.is_file(), f"{STAGE_SCRIPT} is missing"
 
 
-def test_the_workflow_parses_and_holds_exactly_the_seven_stage_jobs():
+def test_the_workflow_parses_and_holds_exactly_the_expected_jobs():
     """Set equality, not containment.
 
     Containment would let an extra job appear -- one holding credentials, or one
     quietly bypassing a gate -- while this stayed green.
     """
     jobs = _jobs()
-    assert set(jobs) == set(STAGE_CHAIN), (
-        f"run-pipeline.yml jobs are {sorted(jobs)}, expected {sorted(STAGE_CHAIN)}"
+    expected = set(STAGE_CHAIN) | set(REJECTION_RECORDER_JOBS)
+    assert set(jobs) == expected, (
+        f"run-pipeline.yml jobs are {sorted(jobs)}, expected {sorted(expected)}"
     )
 
 
@@ -362,13 +378,46 @@ def test_no_job_runs_regardless_of_whether_its_dependency_succeeded():
     exits non-zero on purpose and its state -- the verdict, the findings, the PR
     url -- is the most valuable artifact the run produces. `always()` on a step
     preserves evidence; `always()` on a job discards a decision.
+
+    `continue-on-error` IS COVERED HERE TOO, and it was added after a second
+    surviving mutation. It is the same defect one keyword over: a job marked
+    `continue-on-error: true` reports SUCCESS to everything that `needs` it even
+    when it failed. Put on `develop`, a blocked poisoned run would sail into
+    gate2; put on a gate job itself, a failed gate would no longer stop anything.
+    Measured before the fix: `continue-on-error` appeared NOWHERE in `tests/` or
+    `.github/workflows/` in the whole repository, and 148 tests passed with it set
+    on `develop` and again with it set on `gate2`.
+
+    THE ONE LEGITIMATE EXEMPTION is the rejection recorders, and it is narrow by
+    name rather than by pattern. They exist BECAUSE GitHub skips a rejected gate
+    job, so their whole purpose is to run when their dependency did not -- they
+    RECORD that a run stopped rather than ADVANCING it past a gate. Exempting them
+    by exact name means a new job cannot inherit the exemption by looking similar.
     """
     # `success()` is the default and needs no `if:` at all. Anything in this set
     # detaches a job from its dependency's outcome.
     outcome_ignoring = ("always(", "failure(", "cancelled(", "!cancelled(")
     jobs = _jobs()
     assert jobs, "no jobs found; this test would check nothing"
+
+    # Asserted non-empty, and asserted to be REAL jobs: an exemption list naming
+    # jobs that do not exist would silently exempt nothing while looking like it
+    # covered something -- and, worse, would let the recorders be deleted entirely
+    # without this test noticing.
+    exempt = set(REJECTION_RECORDER_JOBS)
+    assert exempt, "the exemption list is empty; it would exempt nothing"
+    missing = exempt - set(jobs)
+    assert not missing, (
+        f"the exemption list names jobs that do not exist in the workflow: "
+        f"{sorted(missing)}. Either the rejection recorders were removed -- in "
+        f"which case a refused gate now leaves no record at all -- or they were "
+        f"renamed and this list was not updated."
+    )
+
+    checked = 0
     for name, job in jobs.items():
+        if name in exempt:
+            continue
         condition = str(job.get("if") or "")
         for token in outcome_ignoring:
             assert token not in condition, (
@@ -377,6 +426,16 @@ def test_no_job_runs_regardless_of_whether_its_dependency_succeeded():
                 f"gate upstream of it becomes advisory -- a rejected gate2 or a "
                 f"blocked develop would no longer stop the run."
             )
+        # `continue-on-error: true` makes a FAILED job report success to every job
+        # that needs it, which defeats `needs` from the other direction.
+        assert job.get("continue-on-error") in (None, False), (
+            f"job {name} sets continue-on-error="
+            f"{job.get('continue-on-error')!r}: it reports SUCCESS to everything "
+            f"that `needs` it even when it failed. A blocked develop would reach "
+            f"gate2, and a failed gate would stop nothing."
+        )
+        checked += 1
+    assert checked, "every job was exempt; this test checked nothing"
 
 
 # --------------------------------------------------------------------------
@@ -482,14 +541,25 @@ def test_no_aws_key_arrives_through_env_or_a_secret():
         for name in KEY_ENV_NAMES:
             assert name not in mapping, f"{label} defines {name}; OIDC only"
 
+    bodies = 0
     for job_name, job in _jobs().items():
         for step in job.get("steps") or []:
             script = step.get("run") or ""
+            bodies += 1
             for name in KEY_ENV_NAMES:
                 assert name not in script, f"job {job_name} run body references {name}"
             assert "secrets.AWS" not in script, (
                 f"job {job_name} run body reads an AWS secret; OIDC needs none"
             )
+
+    # The `len(scopes) > 1` guard above covers the env loop and NOTHING ELSE: it is
+    # satisfied by one job merely existing, while this second loop needs a job with
+    # STEPS. With no steps anywhere, the assertions above would run zero times and
+    # this test would report green having read no run body at all -- the
+    # guard-on-A-iterate-B shape a vacuity sweep found elsewhere in this file.
+    # Counted rather than assumed, because a universal negative passes loudest
+    # when it examines nothing.
+    assert bodies, "no run bodies were examined; this half of the test was vacuous"
 
 
 def test_no_key_shaped_string_appears_anywhere_in_the_file():
@@ -608,8 +678,32 @@ def test_the_github_seam_is_configured_from_a_secret_and_a_repo_variable():
     repo name here is a workflow that can only ever target one repository, and a
     literal token is a leaked credential.
     """
-    jobs_needing_github = [name for name in _jobs() if name != "promote"]
-    assert jobs_needing_github, "no jobs found; this test would check nothing"
+    # The jobs that must configure the seam, named rather than derived. `promote`
+    # is excluded because it posts nothing -- it writes a status and a log row.
+    #
+    # THIS LIST IS USED, not merely computed. An earlier version of this test built
+    # exactly this list, asserted it was non-empty, and then iterated `_jobs()`
+    # instead -- so it read as though it pinned WHICH jobs configure GitHub while
+    # actually pinning only that at least one did. That is the shape this lane keeps
+    # finding: protection that is really decoration. The `checked` counter below is
+    # what made the test non-vacuous, and it is kept for that reason, but the set
+    # equality here is what makes it say what it appears to say.
+    must_configure_github = {
+        name for name in _jobs()
+        if name not in ("promote",)
+    }
+    assert must_configure_github, "no jobs found; this test would check nothing"
+
+    configured = {
+        name for name in _jobs()
+        if "DEMO_REPO" in _effective_env(name) or "GITHUB_TOKEN" in _effective_env(name)
+    }
+    assert configured == must_configure_github, (
+        f"jobs configuring the GitHub seam are {sorted(configured)}, expected "
+        f"{sorted(must_configure_github)}. A stage missing it posts its output "
+        f"nowhere -- github_ops takes the offline branch and every comment "
+        f"degrades to a local:// ref while the job still reports green."
+    )
 
     checked = 0
     for name in _jobs():
@@ -851,9 +945,10 @@ def test_the_stage_script_is_invoked_for_every_stage_in_the_chain():
             )
             invoked.setdefault(name, set()).update(found)
 
-    assert set(invoked) == set(STAGE_CHAIN), (
+    expected = set(STAGE_CHAIN) | set(REJECTION_RECORDER_JOBS)
+    assert set(invoked) == expected, (
         f"jobs invoking run_stage.py are {sorted(invoked)}, expected all of "
-        f"{sorted(STAGE_CHAIN)}"
+        f"{sorted(expected)}"
     )
 
 
@@ -907,3 +1002,278 @@ def test_a_block_verdict_is_reported_with_its_own_exit_code():
         "a block shares its exit code with a crash, so the poisoned demo run is "
         "indistinguishable from a broken pipeline"
     )
+
+
+# --------------------------------------------------------------------------
+# The stage script's BEHAVIOUR, executed rather than inspected.
+#
+# Everything above reads the workflow as data. These run the stage functions,
+# because the three defects they pin -- a rejection that leaves no record, a
+# missing state file that starts a fresh run, and a cloud path that posts one
+# comment where the local path posts eight -- are all invisible to a YAML parse.
+# --------------------------------------------------------------------------
+
+
+def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None):
+    """Drive the stage script end to end the way the workflow does, in-process.
+
+    Returns (posted_bodies, final_state). `reject_at` names a gate whose
+    Environment the reviewer refuses -- modelled the way GitHub actually behaves:
+    the gate job is SKIPPED and its rejection recorder job runs instead. That
+    distinction is the whole of CRITICAL 2, so the harness has to reproduce it
+    rather than call the gate stage with a flag.
+
+    `runs/` is redirected at tmp_path so a test never writes into the repository,
+    and both state and log go to the same place -- gates.py and log.py each own
+    their own module-level directory constant.
+    """
+    module = _stage_module()
+
+    monkeypatch.setattr(module.gates, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module.log, "_LOG_DIR", tmp_path)
+
+    posted: list[str] = []
+
+    def _record(state, body, finding=None):
+        posted.append(body)
+        return f"local://captured/{len(posted)}"
+
+    # Patched on github_ops as a module attribute, because that is how graph.py's
+    # comment helpers reach it -- resolved at call time.
+    monkeypatch.setattr(module.github_ops, "post_comment", _record)
+
+    def args(**kw):
+        base = {
+            "run_id": "", "ticket_id": "", "ticket_text": "",
+            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1",
+        }
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    rc = module.STAGES["plan"](args(ticket_id="DEMO-1", ticket_text="Add a per-IP login rate limit."))
+    assert rc == module.EXIT_OK, f"plan stage exited {rc}"
+    run_id = next(p.stem.removesuffix(".state") for p in tmp_path.glob("*.state.json"))
+
+    for stage in STAGE_CHAIN[1:]:
+        if stage == reject_at:
+            # GitHub skips the gate job; the recorder runs in its place.
+            rc = module.STAGES[f"{stage}-rejected"](args(run_id=run_id))
+            assert rc == module.EXIT_REJECTED, f"{stage} recorder exited {rc}"
+            break
+        rc = module.STAGES[stage](args(run_id=run_id, poisoned=poisoned))
+        if rc != module.EXIT_OK:
+            break
+
+    state = module.RunState.model_validate_json(
+        (tmp_path / f"{run_id}.state.json").read_text()
+    )
+    return posted, state
+
+
+def test_the_cloud_path_posts_the_same_per_stage_comments_as_the_local_path(
+    monkeypatch, tmp_path
+):
+    """IMPORTANT 4: the cloud path used to post ONE comment where local posts eight.
+
+    Measured before the fix: `graph.py` defines `_plan_comment`, `_gate_comment`,
+    `_develop_comment`, `_review_comment`, `_security_comment` and `_sre_comment`,
+    and `scripts/run_stage.py` called NONE of them -- its only comment call was a
+    bare `github_ops.post_comment(state, state.security.explanation)`. So on the
+    demo's own surface the PR would show no gate approvals, no revision loop and
+    no SRE go/no-go: exactly the timeline the demo is built around, missing.
+
+    THE EXPECTED SET IS IMPORTED FROM THE LOCAL PATH'S OWN TEST rather than
+    restated here, which is the point of this test. Restating it would let the two
+    paths drift apart again while both files stayed green -- each asserting against
+    its own idea of what a run posts. Sharing one definition means a stage added to
+    the local path fails here until the cloud path posts it too.
+    """
+    from test_agent_comments import _PROMOTED_RUN_COMMENTS, _by_stage
+
+    assert _PROMOTED_RUN_COMMENTS, "the shared expectation is empty"
+
+    posted, state = _cloud_run(monkeypatch, tmp_path)
+    assert state.status == "promoted", (
+        f"this test is about a run that finishes; got status={state.status!r}"
+    )
+
+    grouped = _by_stage(posted)
+    missing = [stage for stage in _PROMOTED_RUN_COMMENTS if stage not in grouped]
+    assert not missing, (
+        f"the CLOUD path posted nothing for these stages: {missing}. The local "
+        f"path posts all of {sorted(_PROMOTED_RUN_COMMENTS)}, so the PR a judge "
+        f"reads would be missing exactly these."
+    )
+    assert "unlabelled" not in grouped, (
+        f"comments with no stage label: {[b[:80] for b in grouped.get('unlabelled', [])]}"
+    )
+
+    counts = {stage: len(bodies) for stage, bodies in grouped.items()}
+    assert counts == _PROMOTED_RUN_COMMENTS, (
+        f"cloud path posted {counts}, local path posts {_PROMOTED_RUN_COMMENTS}"
+    )
+
+    # A LABEL IS NOT OUTPUT. Every value below is read off the RunState the run
+    # produced, so none of these strings is one this test invented -- otherwise
+    # eight bare headers would satisfy the counts above.
+    assert state.plan.tasks[0] in grouped["plan"][0]
+    assert state.dev.summary in grouped["develop"][0]
+    assert state.review.verdict in grouped["review"][0]
+    assert state.security.explanation in grouped["security"][0]
+    assert state.sre.verdict.upper() in grouped["sre"][0]
+    assert state.decisions[0].decision.upper() in grouped["gate1"][0]
+
+    assert len(set(posted)) == len(posted), (
+        "some comments are byte-identical; posting one string repeatedly is the "
+        "cheapest way to satisfy a presence check"
+    )
+
+
+def test_a_rejected_gate_is_recorded_on_disk_and_the_run_stops():
+    """CRITICAL 2: `gates.py:16-20`'s own fixed bug, reintroduced by the cloud path.
+
+    That file says, verbatim:
+
+        Before it did, every finished run still read status="running" with its
+        last decision missing -- so a run the graph had REJECTED could be resumed
+        and approved, because nothing on disk said it was over.
+
+    `_stage_gate` hardcodes `decision="approved"`, and it cannot be otherwise:
+    GitHub SKIPS a job whose Environment a reviewer rejected, so no branch inside
+    that job ever executes on a refusal. Before the rejection recorders existed, a
+    refused run and an in-flight run were byte-identical on disk -- both
+    `status="running"`, both carrying no decision for the gate -- and the refusal
+    existed nowhere but a greyed-out job in the Actions UI. On the one surface
+    whose entire purpose is that human gates hold, that is the worst available
+    defect, because the run could then be resumed and approved.
+
+    Parametrised over all three gates in the loop below rather than testing gate2
+    alone: the recorder is per-gate wiring, and two of three working is the shape
+    that reads as done.
+    """
+    for gate in GATE_JOBS:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            pytest.MonkeyPatch.context() as mp,
+        ):
+            posted, state = _cloud_run(mp, Path(tmp), reject_at=gate)
+
+        assert state.status == "rejected", (
+            f"after {gate} was refused the state reads status={state.status!r}. "
+            f"'running' here is indistinguishable from a run still in flight, "
+            f"which is the gates.py bug quoted above."
+        )
+        refusals = [d for d in state.decisions if d.decision == "rejected"]
+        assert refusals, (
+            f"{gate} was refused and no rejected HumanDecision was written; "
+            f"state.decisions holds {[(d.gate, d.decision) for d in state.decisions]}"
+        )
+        assert refusals[-1].gate == gate, (
+            f"the refusal was recorded against {refusals[-1].gate!r}, not {gate!r}"
+        )
+
+        # The refusal reaches the surface a judge reads, not only the disk.
+        from test_agent_comments import _by_stage
+        grouped = _by_stage(posted)
+        assert gate in grouped, (
+            f"{gate} was refused and posted no comment; the PR would show the run "
+            f"simply stopping, with no record of who refused it or why"
+        )
+        assert "REJECTED" in grouped[gate][-1], (
+            f"the {gate} comment does not say it was rejected: {grouped[gate][-1][:200]!r}"
+        )
+
+        # And the run stopped: no stage after the refused gate recorded anything.
+        later = STAGE_CHAIN[STAGE_CHAIN.index(gate) + 1:]
+        for stage in later:
+            assert stage not in grouped, (
+                f"{gate} was refused but {stage} still posted, so the run carried "
+                f"on past the refusal"
+            )
+
+
+def test_a_missing_state_file_is_refused_rather_than_starting_a_fresh_run():
+    """CRITICAL 3: `_load`'s refusal was correct but pinned by nothing.
+
+    Measured: making `_load` fall back to a fresh `RunState` survived all 735
+    tests. That fallback is the artifact-handoff defect in its most expensive
+    form -- a stage whose upload published nothing, or whose download was removed,
+    would silently begin a NEW run and report success for work nobody planned,
+    discarding every approval already given.
+
+    Asserted as SystemExit specifically, and with the message checked, because an
+    exception type alone does not distinguish "refused deliberately" from "crashed
+    while reading a file".
+    """
+    module = _stage_module()
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        pytest.MonkeyPatch.context() as mp,
+    ):
+        mp.setattr(module.gates, "_STATE_DIR", Path(tmp))
+        with pytest.raises(SystemExit) as excinfo:
+            module._load("a-run-that-was-never-saved")
+
+    message = str(excinfo.value)
+    assert "no state file" in message, (
+        f"the refusal does not say what was missing: {message!r}"
+    )
+    assert "a-run-that-was-never-saved" in message, (
+        f"the refusal does not name the run it could not find: {message!r}"
+    )
+
+
+def test_every_gate_has_a_rejection_recorder_wired_to_it():
+    """The workflow half of CRITICAL 2, so the recorders cannot be silently dropped.
+
+    Reads the parsed jobs. A recorder that exists in `run_stage.py` but has no job
+    calling it records nothing, and the behavioural test above would still pass
+    because it invokes the stage function directly.
+    """
+    module = _stage_module()
+    mapping = module.REJECTION_STAGES
+    assert mapping, "run_stage.REJECTION_STAGES is empty"
+    assert set(mapping) == set(GATE_JOBS), (
+        f"rejection stages cover {sorted(mapping)}, expected {sorted(GATE_JOBS)}"
+    )
+
+    jobs = _jobs()
+    for gate, stage in sorted(mapping.items()):
+        job_name = f"{gate}-rejected"
+        assert job_name in jobs, (
+            f"gate {gate} has no {job_name} job, so a reviewer refusing it leaves "
+            f"no record anywhere -- see gates.py:16-20"
+        )
+        job = jobs[job_name]
+
+        needs = _needs(job)
+        assert gate in needs, (
+            f"job {job_name} needs {needs}, which does not include {gate}; it "
+            f"cannot know whether that gate was refused"
+        )
+
+        # It MUST carry an outcome-ignoring condition: a recorder that only runs on
+        # success is a recorder that never runs, since the gate it records is one
+        # GitHub skipped.
+        condition = str(job.get("if") or "")
+        assert "always()" in condition, (
+            f"job {job_name} has `if: {condition!r}`; without always() it is "
+            f"skipped alongside the gate it exists to record"
+        )
+        assert f"needs.{gate}.result" in condition, (
+            f"job {job_name} has `if: {condition!r}`, which does not test "
+            f"{gate}'s result -- so it would also fire on a successful approval "
+            f"and record a refusal that never happened"
+        )
+
+        # And it must actually call its stage.
+        bodies = [s.get("run") or "" for s in (job.get("steps") or [])]
+        assert any(f"run_stage.py {stage}" in b for b in bodies), (
+            f"job {job_name} never invokes `run_stage.py {stage}`"
+        )
+
+        # No credentials: recording a refusal reaches no runtime.
+        perms = job.get("permissions") or {}
+        assert perms.get("id-token") != "write", (
+            f"job {job_name} holds id-token: write; recording a refusal needs none"
+        )

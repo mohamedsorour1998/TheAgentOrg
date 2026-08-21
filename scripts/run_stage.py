@@ -70,7 +70,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from agentorg import gates, github_ops, log
+from agentorg import gates, github_ops, graph, log
 from agentorg.common import agent_client, config
 from agentorg.state import HumanDecision, LogEvent, RunState
 
@@ -167,12 +167,14 @@ def _stage_plan(args: argparse.Namespace) -> int:
 
     state.plan = agent_client.call_agent("planner", state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
+    # Posted to the ISSUE: there is no PR until `develop` runs `open_pr`.
+    graph._plan_comment(state, state.plan)
     _emit(state)
     return EXIT_OK
 
 
 def _stage_gate(args: argparse.Namespace, gate: str) -> int:
-    """A GATE. Records the decision the Environment already extracted.
+    """A GATE that was APPROVED. Records the decision the Environment extracted.
 
     THE APPROVAL HAPPENED BEFORE THIS RAN, and that is the whole design. GitHub
     held this job at an Environment with a required reviewer; the job did not
@@ -180,10 +182,18 @@ def _stage_gate(args: argparse.Namespace, gate: str) -> int:
     the decision, and this records it so `runs/<run_id>.jsonl` carries the same
     row an interactive `graph._cli_gate` run would have written.
 
-    `--auto-approve` therefore changes only the `by` attribution, never whether
-    the pause happens. An Environment is a repository setting and no workflow
-    content can argue with it, which is exactly why the gates live there rather
-    than in an `if:`.
+    THIS FUNCTION ONLY EVER RECORDS AN APPROVAL, and that is correct rather than
+    a missing branch -- but ONLY because `_stage_gate_rejected` below exists.
+    When a reviewer REJECTS an Environment, GitHub does not run this job and hand
+    it a verdict: it SKIPS the job entirely. Nothing inside here executes, so a
+    branch in this function could never write "rejected" no matter how it were
+    written. The rejection has to be recorded by a DIFFERENT job, one whose `if:`
+    fires precisely when this one did not.
+
+    `--auto-approve` changes only the `by` attribution, never whether the pause
+    happens. An Environment is a repository setting and no workflow content can
+    argue with it, which is exactly why the gates live there rather than in an
+    `if:`.
     """
     state = _load(args.run_id)
     auto = flag(args.auto_approve)
@@ -200,8 +210,67 @@ def _stage_gate(args: argparse.Namespace, gate: str) -> int:
     # gates.resume appends the decision, writes the state back and logs the row.
     # One writer, as gates.py:37 insists.
     state = gates.resume(args.run_id, decision)
+    graph._gate_comment(state, gate, decision)
     _emit(state)
     return EXIT_OK
+
+
+def _stage_gate_rejected(args: argparse.Namespace, gate: str) -> int:
+    """Record that a gate was REFUSED, from a job that runs when the gate did not.
+
+    ─────────────────────────────────────────────────────────────────────────
+    THIS EXISTS BECAUSE `gates.py:16-20` DOCUMENTS THIS EXACT BUG BEING FIXED
+    ONCE ALREADY, AND THE CLOUD PATH REINTRODUCED IT
+    ─────────────────────────────────────────────────────────────────────────
+
+    Quoting `agentorg/gates.py` verbatim:
+
+        That file is only trustworthy if it is also written at the END of a run,
+        which is why save() is public and run_pipeline calls it as it exits.
+        Before it did, every finished run still read status="running" with its
+        last decision missing -- so a run the graph had REJECTED could be resumed
+        and approved, because nothing on disk said it was over.
+
+    Without this function that is precisely the state the cloud path leaves
+    behind. `_stage_gate` hardcodes `decision="approved"`, and a rejected gate
+    SKIPS that job, so a refused run and an in-flight run are byte-identical on
+    disk: both read `status="running"`, both carry no decision for the gate, and
+    the refusal exists nowhere except the greyed-out job in the Actions UI. On the
+    one surface whose entire purpose is that human gates hold, that is the worst
+    available outcome -- and the whole point of the gates is undermined by it,
+    because the run can then be resumed and approved.
+
+    WHY A SEPARATE JOB AND NOT A BRANCH. GitHub SKIPS a job whose Environment was
+    rejected; it does not run it with a verdict. So the recorder's `if:` has to
+    fire on the states the gate job does NOT reach -- failure or cancellation --
+    which is what makes this the one place in this workflow where an
+    outcome-ignoring condition is correct. It records, it never advances the run,
+    and it holds no credentials.
+
+    THE RUN STOPS HERE REGARDLESS. `needs` already guarantees that: the stage
+    after a gate needs the gate job, which was skipped, so it is skipped too.
+    This function does not enforce the stop -- it records that it happened, which
+    is the thing that was missing.
+    """
+    state = _load(args.run_id)
+    decision = HumanDecision(
+        gate=gate,
+        decision="rejected",
+        by=args.approver or "github-environment-reviewer",
+        reason=(
+            f"{gate} was refused, or its job did not complete. GitHub skips a job "
+            f"whose Environment a reviewer rejected, so this was recorded by the "
+            f"rejection recorder rather than by the gate job itself."
+        ),
+    )
+    # `gates.resume` sets status="rejected" for a rejected decision (gates.py:86)
+    # and writes it back. That write is the entire point: it is what makes a
+    # refused run distinguishable from a running one on disk.
+    state = gates.resume(args.run_id, decision)
+    graph._gate_comment(state, gate, decision)
+    _emit(state)
+    print(f"{gate} rejected; run stopped and recorded as status={state.status}")
+    return EXIT_REJECTED
 
 
 def _stage_develop(args: argparse.Namespace) -> int:
@@ -224,11 +293,24 @@ def _stage_develop(args: argparse.Namespace) -> int:
     state = _load(args.run_id)
     poisoned = flag(args.poisoned)
 
+    # QUEUED, NOT POSTED, for graph.py's reason at :360-377: the PR does not exist
+    # until `open_pr` below, and `github_ops._destination` reads `dev.branch` --
+    # which the DEVELOPER fills with its own branch name before `open_pr`
+    # overwrites it. Posting from inside the loop would degrade every one of these
+    # to a `comment://` ref, delivered nowhere, on exactly the stages this is
+    # meant to make visible.
+    #
+    # Each pass's OWN results are captured rather than re-read at flush time.
+    # `state.dev` holds the LAST pass's result by then (and then `open_pr`'s
+    # version of it), so re-reading would render the same diff into all three
+    # attempt comments -- append in shape, replace in substance, green either way.
+    loop_results = []
     while True:
         state.dev = agent_client.call_agent("developer", state, poisoned=poisoned)
         _log(state, "developer", "develop", "proposed", summary=state.dev.summary)
 
         state.review = agent_client.call_agent("reviewer", state)
+        loop_results.append((state.dev, state.review, state.revision_count + 1))
         if state.review.verdict == "approve":
             _log(state, "reviewer", "review", "reviewed", verdict="approve",
                  summary="reviewer approved the diff")
@@ -245,6 +327,12 @@ def _stage_develop(args: argparse.Namespace) -> int:
     state.dev = github_ops.open_pr(state)
     _log(state, "system", "develop", "opened", summary=f"PR {state.dev.pr_url}")
 
+    # Now there is a PR, so the queue is flushed onto it -- in the order the
+    # passes happened, developer then reviewer, one pair per attempt.
+    for dev, review, attempt in loop_results:
+        graph._develop_comment(state, dev, attempt)
+        graph._review_comment(state, review, attempt)
+
     state.security = agent_client.call_agent("security", state)
     # scan_provenance answers "did the scanners run, or is this a fixture?" --
     # which the count in `summary` cannot, because the fixture fallback produces
@@ -255,9 +343,18 @@ def _stage_develop(args: argparse.Namespace) -> int:
          summary=f"{len(state.security.blocking)} blocking",
          scan_provenance=state.security.scan_provenance)
 
+    # ONE comment for BOTH outcomes, posted before the block branch rather than
+    # inside it. A security stage that only spoke when it blocked would make the
+    # CLEAN run's most important claim -- that the scanners ran and cleared the
+    # change -- invisible on the surface the judges read, which is the same
+    # silence as a check that did not run. It also carries `scan_provenance`,
+    # because "blocked" proves two different things depending on whether real
+    # scanners answered or a fixture stood in, and the count cannot tell them
+    # apart.
+    ref = graph._security_comment(state, state.security)
+
     if state.security.verdict == "block":
         state.status = "blocked"
-        ref = github_ops.post_comment(state, state.security.explanation)
         _log(state, "system", "security", "blocked",
              summary=f"pipeline halted by block rule; block reason {ref}",
              artifact_ref=ref, scan_provenance=state.security.scan_provenance)
@@ -289,6 +386,10 @@ def _stage_sre(args: argparse.Namespace) -> int:
     state = _load(args.run_id)
     state.sre = agent_client.call_agent("sre", state)
     _log(state, "sre", "sre", "reviewed", verdict=state.sre.verdict)
+    # Both verdicts, for the same reason the security comment covers both: a `go`
+    # that never appears on the PR is indistinguishable from an SRE stage that
+    # was skipped.
+    graph._sre_comment(state, state.sre)
     if state.sre.verdict == "no_go":
         state.status = "failed"
         _emit(state)
@@ -318,6 +419,26 @@ STAGES = {
     "sre": _stage_sre,
     "gate3": lambda args: _stage_gate(args, "gate3"),
     "promote": _stage_promote,
+    # The rejection recorders. One per gate, invoked by a recorder JOB whose `if:`
+    # fires when the gate job did not run -- see _stage_gate_rejected for why a
+    # branch inside the gate job cannot do this.
+    "gate1-rejected": lambda args: _stage_gate_rejected(args, "gate1"),
+    "gate2-rejected": lambda args: _stage_gate_rejected(args, "gate2"),
+    "gate3-rejected": lambda args: _stage_gate_rejected(args, "gate3"),
+}
+
+# The stages that ADVANCE a run, in order: one job each, chained by `needs`. The
+# rejection recorders are deliberately not here -- they are terminal, they record
+# rather than advance, and a recorder appearing in this chain would mean the
+# pipeline continued past a refusal.
+STAGE_CHAIN = ["plan", "gate1", "develop", "gate2", "sre", "gate3", "promote"]
+
+# Gate name -> the stage that records its refusal. One definition, so a test can
+# assert the workflow carries a recorder for every gate without restating the map.
+REJECTION_STAGES = {
+    "gate1": "gate1-rejected",
+    "gate2": "gate2-rejected",
+    "gate3": "gate3-rejected",
 }
 
 
