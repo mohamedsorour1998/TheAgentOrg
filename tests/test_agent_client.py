@@ -41,6 +41,7 @@ import io
 import json
 
 import pytest
+from botocore.exceptions import ClientError, ReadTimeoutError
 from pydantic import ValidationError
 
 from agentorg import github_ops
@@ -66,6 +67,14 @@ def _state(**kwargs):
 # --------------------------------------------------------------------------
 # The offline guard. Both clients, whole file.
 # --------------------------------------------------------------------------
+
+# Captured at import, before the autouse guard below replaces them. The two tests
+# that exercise the REAL constructors need the genuine functions; every other test
+# in this file must not be able to reach them. Same pattern, and the same reason,
+# as _REAL_AGENTCORE_CLIENT in tests/test_deploy_note.py.
+_REAL_CONTROL_CLIENT = agent_client._agentcore_control_client
+_REAL_DATA_CLIENT = agent_client._agentcore_data_client
+
 
 @pytest.fixture(autouse=True)
 def _no_live_agentcore(monkeypatch):
@@ -120,11 +129,19 @@ class _StubClient:
     on the control-plane lookup AND the data-plane invoke from the same place.
     """
 
-    def __init__(self, *, envelope=None, pages=None, status=200, raise_on_invoke=None):
+    def __init__(self, *, envelope=None, pages=None, status=200,
+                 raise_on_invoke=None, raw_body=None):
         self.envelope = envelope
         self.pages = pages if pages is not None else [_page(*_all_five())]
         self.status = status
+        # A botocore exception to raise INSTEAD of answering, so the classifier
+        # can be tested without a network. Used by the timeout/denial tests.
         self.raise_on_invoke = raise_on_invoke
+        # EXACT BYTES to return, bypassing json.dumps entirely. Without this the
+        # stub can only ever produce well-formed JSON, so the zero-byte and
+        # not-JSON refusals were unreachable and two of them went untested --
+        # a stub that cannot express a malformed answer cannot test one.
+        self.raw_body = raw_body
         self.invocations = []
         self.paginators_asked_for = []
 
@@ -138,7 +155,7 @@ class _StubClient:
         self.invocations.append(kwargs)
         if self.raise_on_invoke is not None:
             raise self.raise_on_invoke
-        body = json.dumps(self.envelope).encode("utf-8")
+        body = self.raw_body if self.raw_body is not None else json.dumps(self.envelope).encode("utf-8")
         # botocore hands back a file-like object for the streaming `response`
         # blob, not bytes. MEASURED against botocore 1.43.75's own parser for
         # InvokeAgentRuntime: type BytesIO under a test harness, StreamingBody
@@ -317,6 +334,7 @@ def test_the_unknown_role_error_names_the_valid_ones():
     with pytest.raises(ValueError) as exc:
         agent_client.call_agent("securty", _state())
     message = str(exc.value)
+    assert server.AGENTS, "server.AGENTS is empty; this test would pin nothing"
     for role in server.AGENTS:
         assert role in message, f"the error does not name the valid role {role!r}: {message}"
 
@@ -501,16 +519,95 @@ def test_a_body_that_is_not_the_envelope_is_refused(monkeypatch):
         assert client.invocations, "nothing was invoked; the test proved nothing"
 
 
-def test_an_empty_body_is_refused(monkeypatch):
-    """A zero-byte 200 is the emptiest possible non-answer.
+def test_a_json_null_body_is_refused(monkeypatch):
+    """`null` is valid JSON and is not an envelope.
 
-    It parses to `{}`, which has no `agent` key -- so the wrong-runtime check is
-    what catches it first. Asserted so that a change to either check cannot let a
-    blank response through.
+    THIS TEST USED TO CLAIM IT COVERED THE ZERO-BYTE CASE. It does not, and the
+    docstring saying "it parses to {}" was measurably wrong: `envelope=None` makes
+    the stub send `json.dumps(None)` == b"null", four bytes, which parses to
+    `None` and takes the NON-DICT branch. The genuine zero-byte path was reached
+    by nothing -- see test_a_zero_byte_body_is_refused below, which is the one
+    that covers it. Both are kept, because they are different bodies taking
+    different branches.
     """
     client = _wire(monkeypatch, _StubClient(envelope=None))
-    # json.dumps(None) is "null", which parses to None -- not a dict.
-    with pytest.raises(RuntimeError):
+
+    with pytest.raises(RuntimeError, match="NoneType"):
+        agent_client.call_agent("planner", _state())
+    assert client.invocations, "nothing was invoked; the test proved nothing"
+
+
+def test_a_zero_byte_body_is_refused(monkeypatch):
+    """RED-STEPPED: a zero-byte 200 must not become a validated result.
+
+    THE HOLE THIS CLOSES. `parsed = json.loads(raw) if raw else {}` turned an
+    empty body into an empty OBJECT, which is a different claim: `{}` means "the
+    runtime answered with an empty envelope", `b""` means "nothing came back at
+    all". A reviewer's mutation fabricated a plausible envelope on the `not raw`
+    branch and got a fully-validated PlanResult back from a zero-byte response
+    with every other test in this file green -- the exact reassuring non-answer
+    this module exists to eliminate.
+
+    The message must also name the right condition. Before the fix, `{}` fell
+    through to the agent-echo check and reported "asked the 'planner' runtime and
+    None answered ... check AGENT_ROLE on it", sending a reader to runtime
+    configuration because the response was blank. That is rule 4.
+    """
+    client = _wire(monkeypatch, _StubClient(raw_body=b""))
+
+    with pytest.raises(RuntimeError, match="ZERO-BYTE") as exc:
+        agent_client.call_agent("planner", _state())
+
+    message = str(exc.value)
+    assert "AGENT_ROLE" not in message, (
+        "a blank response still blames runtime configuration; the two conditions "
+        f"are not distinguishable: {message}"
+    )
+    assert client.invocations, "nothing was invoked; the test proved nothing"
+
+
+def test_a_body_that_is_not_json_names_the_real_condition(monkeypatch):
+    """RED-STEPPED: an HTML error page is a gateway failure, not an agent failure.
+
+    A `504 Gateway Timeout` page from a proxy in front of the runtime is the
+    realistic version of this on a projector. The refusal existed but no test
+    could reach it -- the stub always emitted `json.dumps(...)` -- so replacing
+    the raise with `parsed = {}` left this file 33/33 green.
+
+    Asserts the message DISTINGUISHES the condition rather than merely that it
+    raised: a reader who is told "not JSON" and shown the opening bytes goes to
+    the load balancer, while one told "check AGENT_ROLE" goes to the wrong place
+    entirely.
+    """
+    html = b"<html><head><title>504 Gateway Timeout</title></head><body>nginx</body></html>"
+    client = _wire(monkeypatch, _StubClient(raw_body=html))
+
+    with pytest.raises(RuntimeError) as exc:
+        agent_client.call_agent("planner", _state())
+
+    message = str(exc.value)
+    assert "not JSON" in message, f"the failure does not name the condition: {message}"
+    assert "504" in message, (
+        f"the body's own error text was dropped, leaving nothing to act on: {message}"
+    )
+    assert "HTML" in message or "proxy" in message or "load balancer" in message, (
+        f"nothing tells the reader this came from in front of the runtime: {message}"
+    )
+    assert "AGENT_ROLE" not in message, (
+        f"a gateway error is being reported as a runtime misconfiguration: {message}"
+    )
+    assert client.invocations, "nothing was invoked; the test proved nothing"
+
+
+def test_a_non_json_body_is_refused_on_a_500_too(monkeypatch):
+    """The same page behind a 5xx status. Both orders must refuse.
+
+    The parse happens before the status branch, so this pins that a non-JSON 500
+    does not fall into the `.get()` path and raise AttributeError instead.
+    """
+    client = _wire(monkeypatch, _StubClient(status=504, raw_body=b"<html>504</html>"))
+
+    with pytest.raises(RuntimeError, match="not JSON"):
         agent_client.call_agent("planner", _state())
     assert client.invocations
 
@@ -557,9 +654,10 @@ def test_the_arn_is_resolved_from_the_control_plane(monkeypatch):
 def test_the_arn_is_matched_by_exact_name_not_substring(monkeypatch):
     """`theagentorg_review` must not satisfy a call for `reviewer`.
 
-    github_ops:524 already records this ruling for deploy_note ("a runtime
+    github_ops:525-526 already records this ruling for deploy_note ("a runtime
     called theagentorg_planner_v2 must not be able to satisfy
-    theagentorg_planner"). The same accident here would silently invoke a
+    theagentorg_planner"). Cited by line number because this repo grades comment
+    accuracy: 524 is the f-string above it, and was at BASE too. The same accident here would silently invoke a
     different agent and validate its answer against the wrong model -- or, if
     the shapes happened to overlap, accept it.
     """
@@ -806,3 +904,197 @@ def test_the_local_pipeline_still_blocks_the_poisoned_ticket(monkeypatch):
 
     assert state.status == "blocked", f"the poisoned ticket ended {state.status!r}"
     assert state.security is not None and state.security.verdict == "block"
+
+
+# --------------------------------------------------------------------------
+# The real client constructors: bounded, region-driven, and NOT retrying
+# --------------------------------------------------------------------------
+
+def test_the_control_client_is_bounded_and_uses_the_configured_region(monkeypatch):
+    """RED-STEPPED: botocore's defaults are 60s with retries ON.
+
+    Follows tests/test_deploy_note.py:491, which establishes this repo's
+    convention for the same assertion about the same control plane. Constructing
+    a client makes no network call, so this stays offline; the autouse guard has
+    replaced the module attribute, hence the constructor captured at import.
+
+    Removing the bounded Config from both clients left this file 33/33 green
+    before this test existed. An unbounded ARN lookup stalls a judged demo for a
+    minute before it can print anything honest.
+    """
+    monkeypatch.setattr(config, "AWS_REGION", "eu-west-2")
+
+    client = _REAL_CONTROL_CLIENT()
+
+    assert client.meta.region_name == "eu-west-2"
+    assert client.meta.service_model.service_name == "bedrock-agentcore-control", (
+        "the ARN lookup must go to the CONTROL plane; the data plane has no "
+        "list_agent_runtimes"
+    )
+    assert client.meta.config.connect_timeout == 3
+    assert client.meta.config.read_timeout == 5
+    # botocore reports max_attempts=0 as total_max_attempts=1, i.e. one try.
+    assert client.meta.config.retries["total_max_attempts"] == 1
+
+
+def test_the_data_client_is_bounded_and_does_not_retry(monkeypatch):
+    """RED-STEPPED: a retried invoke double-posts and double-bills.
+
+    THE RETRY ASSERTION IS THE LOAD-BEARING ONE HERE, and it is not the same
+    claim as the control client's. An agent invocation is NOT idempotent: the
+    security stage writes a PR comment and every agent burns model tokens, so a
+    silent botocore retry of a call that actually succeeded does both twice. That
+    is the harm the module's own comment names, and nothing pinned it.
+
+    The read timeout is deliberately LONG, not short -- the opposite of the
+    control client. A real Bedrock agent call inside a container takes minutes,
+    and a ceiling that trips on an honest invocation is a self-inflicted failure.
+    Asserted as a floor rather than an exact value so raising it stays a one-line
+    change, while dropping it to the control plane's 5s fails here.
+    """
+    monkeypatch.setattr(config, "AWS_REGION", "eu-west-2")
+
+    client = _REAL_DATA_CLIENT()
+
+    assert client.meta.region_name == "eu-west-2"
+    assert client.meta.service_model.service_name == "bedrock-agentcore", (
+        "invoke_agent_runtime is on the DATA plane; the control plane lacks it"
+    )
+    assert client.meta.config.retries["total_max_attempts"] == 1, (
+        "the data client must NOT retry: an agent invocation is not idempotent, "
+        "so a retry double-posts the PR comment and double-burns model tokens"
+    )
+    assert client.meta.config.connect_timeout == 10
+    assert client.meta.config.read_timeout >= 120, (
+        f"read_timeout is {client.meta.config.read_timeout}s; a real agent call "
+        f"takes minutes and a ceiling that trips on an honest invocation is a "
+        f"self-inflicted block"
+    )
+    assert client.meta.config.read_timeout < 3600, (
+        "an effectively unbounded read timeout is how a demo hangs with no verdict"
+    )
+
+
+# --------------------------------------------------------------------------
+# botocore failures are CLASSIFIED, not swallowed and not left raw
+# --------------------------------------------------------------------------
+
+def test_a_timeout_is_reported_as_a_timeout(monkeypatch):
+    """"Timed out" and "denied" need opposite responses, so they must read apart.
+
+    Rule 4: a message that cannot distinguish two conditions is the defect this
+    project exists to prevent. A timeout may mean the agent is still running and
+    retrying is reasonable; a denial will never clear. Raised, never swallowed --
+    a remote failure must not quietly become a local run.
+    """
+    client = _wire(monkeypatch, _StubClient(
+        raise_on_invoke=ReadTimeoutError(endpoint_url="https://bedrock-agentcore.us-east-1.amazonaws.com"),
+    ))
+
+    with pytest.raises(RuntimeError) as exc:
+        agent_client.call_agent("planner", _state())
+
+    message = str(exc.value)
+    assert "TIMED OUT" in message, f"the timeout is not named as one: {message}"
+    assert "planner" in message, f"the message does not say which agent: {message}"
+    assert str(agent_client.INVOKE_READ_TIMEOUT) in message, (
+        f"the ceiling that was hit is not named, so nobody can raise it: {message}"
+    )
+    assert "DENIED" not in message and "NOT FOUND" not in message, (
+        f"a timeout is being conflated with a permission or deploy problem: {message}"
+    )
+    assert client.invocations, "the invoke was never attempted"
+
+
+def test_a_denial_is_reported_as_a_denial_not_a_timeout(monkeypatch):
+    """AccessDenied must not read as something waiting could fix.
+
+    This is the shape the deploy retry loop got wrong: an unknown error treated
+    as the one condition the loop knew how to wait out, polling five minutes
+    against a broken value.
+    """
+    denied = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "not authorized to invoke"}},
+        "InvokeAgentRuntime",
+    )
+    _wire(monkeypatch, _StubClient(raise_on_invoke=denied))
+
+    with pytest.raises(RuntimeError) as exc:
+        agent_client.call_agent("security", _state())
+
+    message = str(exc.value)
+    assert "DENIED" in message, f"the denial is not named as one: {message}"
+    assert "IAM" in message, f"nothing points at the actual fix: {message}"
+    assert "TIMED OUT" not in message, (
+        f"a denial is being reported as a timeout, so a caller may wait on it "
+        f"forever: {message}"
+    )
+    assert "not authorized to invoke" in message, (
+        f"AWS's own explanation was dropped: {message}"
+    )
+
+
+def test_a_missing_qualifier_style_404_names_the_qualifier(monkeypatch):
+    """ResourceNotFoundException from the DATA plane has one usual cause.
+
+    The ARN resolved from the control plane, so the runtime exists; the data
+    plane refusing it is the measured signature of a missing
+    qualifier="DEFAULT". Saying so is the difference between a one-line fix and
+    an afternoon.
+    """
+    not_found = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "runtime not found"}},
+        "InvokeAgentRuntime",
+    )
+    _wire(monkeypatch, _StubClient(raise_on_invoke=not_found))
+
+    with pytest.raises(RuntimeError) as exc:
+        agent_client.call_agent("planner", _state())
+
+    message = str(exc.value)
+    assert "NOT FOUND" in message
+    assert "DEFAULT" in message, (
+        f"the measured usual cause is not mentioned: {message}"
+    )
+
+
+def test_an_unrecognised_error_is_named_as_unclassified(monkeypatch):
+    """A classifier that GUESSES is worse than one that admits it did not know.
+
+    The guess is what makes a caller wait out a condition that will never clear.
+    So an error matching none of the known shapes must say so rather than being
+    folded into the nearest branch.
+    """
+    _wire(monkeypatch, _StubClient(raise_on_invoke=ValueError("something nobody predicted")))
+
+    with pytest.raises(RuntimeError) as exc:
+        agent_client.call_agent("sre", _state())
+
+    message = str(exc.value)
+    assert "UNCLASSIFIED" in message, f"an unknown error was silently classified: {message}"
+    assert "something nobody predicted" in message, f"the cause was dropped: {message}"
+    assert "TIMED OUT" not in message and "DENIED" not in message
+
+
+def test_a_botocore_failure_is_never_swallowed_into_a_local_run(monkeypatch):
+    """The one thing classification must NOT become is a fallback.
+
+    A remote call that failed must not quietly run the agent in this process and
+    report success -- that would be a run claiming to have used the cloud path
+    while using the local one. The planner's local `run` is replaced with a
+    raiser, so a fallback would fail loudly here instead of passing.
+    """
+    def _must_not_run(_state, **_kwargs):
+        pytest.fail(
+            "a failed REMOTE call fell back to the in-process agent; the run "
+            "would report success for work the cloud path never did",
+            pytrace=False,
+        )
+
+    monkeypatch.setattr(planner, "run", _must_not_run)
+    _wire(monkeypatch, _StubClient(
+        raise_on_invoke=ReadTimeoutError(endpoint_url="https://x.amazonaws.com"),
+    ))
+
+    with pytest.raises(RuntimeError, match="TIMED OUT"):
+        agent_client.call_agent("planner", _state())

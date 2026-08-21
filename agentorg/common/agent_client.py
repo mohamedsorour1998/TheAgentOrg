@@ -42,7 +42,7 @@ defect class this project exists to prevent:
   * A result from the wrong runtime. server.py echoes `agent` in the envelope
     for exactly this; a mismatch means the ARN resolved to something else.
   * A runtime name matched by SUBSTRING. Refused -- exact set membership only.
-    github_ops:524 records the same ruling for deploy_note: "a runtime called
+    github_ops:525-526 records the same ruling for deploy_note: "a runtime called
     theagentorg_planner_v2 must not be able to satisfy theagentorg_planner".
 
 TWO CLIENTS, NOT ONE. `invoke_agent_runtime` is on the DATA plane
@@ -198,8 +198,9 @@ def _resolve_arn(role: str) -> str:
     not a promise of the whole set. A runtime that exists on page two would
     otherwise render as absent.
 
-    EXACT name match. `theagentorg_review` must not satisfy a call for
-    `reviewer`, and `theagentorg_planner_v2` must not satisfy `planner`.
+    EXACT name match, per the ruling at github_ops:525-526.
+    `theagentorg_review` must not satisfy a call for `reviewer`, and
+    `theagentorg_planner_v2` must not satisfy `planner`.
     """
     wanted = _runtime_name(role)
     client = _agentcore_control_client()
@@ -258,20 +259,110 @@ def _remote_state(role: str, state: RunState, kwargs: dict) -> RunState:
     return RunState.model_validate(fields)
 
 
+def _classify_invoke_failure(role: str, arn: str, exc: Exception) -> str:
+    """Say WHICH failure this was, in words that name the next action.
+
+    Every caller of this raises; nothing here recovers. It exists because
+    `call_agent` deliberately has no fallback -- a failed remote call must not
+    quietly become a local one -- so the exception message is the entire diagnosis
+    a demo operator gets, and "botocore.errorfactory.AccessDeniedException" is not
+    one.
+
+    Three conditions are separated, because each has a different fix and they are
+    otherwise indistinguishable in the raw exception:
+
+      * TIMED OUT -- the runtime accepted the call and did not answer inside
+        INVOKE_READ_TIMEOUT. The agent may still be running. NOT a denial, and
+        not a missing runtime.
+      * DENIED / NOT FOUND -- an IAM or deploy problem, answered immediately.
+        Waiting cannot fix it, which is exactly what a caller must not do.
+      * anything else -- named as unclassified rather than forced into one of the
+        two above. A classifier that guesses is worse than one that admits it did
+        not recognise the error, because the guess is what makes a caller wait out
+        a condition that will never clear.
+
+    ClientError is NOT a subclass of BotoCoreError -- verified against botocore
+    1.43.75, whose mro puts ClientError directly under Exception -- so a single
+    `except BotoCoreError` would let every AccessDenied through unclassified.
+    """
+    from botocore.exceptions import ClientError, ConnectTimeoutError, ReadTimeoutError
+
+    where = f"{role!r} runtime ({arn})"
+
+    if isinstance(exc, (ReadTimeoutError, ConnectTimeoutError)):
+        kind = "read" if isinstance(exc, ReadTimeoutError) else "connect"
+        limit = INVOKE_READ_TIMEOUT if isinstance(exc, ReadTimeoutError) else INVOKE_CONNECT_TIMEOUT
+        return (
+            f"the {where} TIMED OUT after the {kind} ceiling of {limit}s. The agent "
+            f"may still be running in the container -- this is a timeout, NOT a "
+            f"permission problem and NOT a missing runtime, so retrying the same "
+            f"call is reasonable where raising the ceiling is not. "
+            f"({type(exc).__name__}: {exc})"
+        )
+
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code", "")
+        message = exc.response.get("Error", {}).get("Message", str(exc))
+        if code in ("AccessDeniedException", "UnrecognizedClientException"):
+            return (
+                f"the {where} DENIED the call ({code}): {message}. This is an IAM "
+                f"problem and it will not clear on its own -- check that the "
+                f"caller may invoke this runtime. Do not wait on it."
+            )
+        if code == "ResourceNotFoundException":
+            return (
+                f"the {where} was NOT FOUND ({code}): {message}. The ARN resolved "
+                f"from the control plane but the data plane will not serve it -- "
+                f"the usual cause is a missing qualifier={DEFAULT_QUALIFIER!r}, "
+                f"and the next is an endpoint that has not promoted the current "
+                f"version yet."
+            )
+        if code in ("ThrottlingException", "ServiceQuotaExceededException"):
+            return (
+                f"the {where} THROTTLED the call ({code}): {message}. A capacity "
+                f"limit, not a fault in the payload; this one does clear on its own."
+            )
+        return (
+            f"the {where} refused the call ({code or 'no error code'}): {message}"
+        )
+
+    # Deliberately not folded into either branch above. See the docstring.
+    return (
+        f"the call to the {where} failed with an UNCLASSIFIED error, so it is not "
+        f"known whether waiting would help: {type(exc).__name__}: {exc}"
+    )
+
+
 def _invoke(role: str, state: RunState) -> dict:
     """POST the state to `role`'s runtime and hand back the parsed envelope."""
     arn = _resolve_arn(role)
 
-    response = _agentcore_data_client().invoke_agent_runtime(
-        agentRuntimeArn=arn,
-        # REQUIRED. Without it this fails ResourceNotFoundException even against
-        # a READY runtime with a READY endpoint. Measured, not inferred.
-        qualifier=DEFAULT_QUALIFIER,
-        # RAW JSON BYTES. boto3 takes bytes here; the CLI takes base64. Same API,
-        # different interface -- do not copy the CLI's encoding into boto3 code.
-        payload=state.model_dump_json().encode("utf-8"),
-        contentType="application/json",
-    )
+    try:
+        response = _agentcore_data_client().invoke_agent_runtime(
+            agentRuntimeArn=arn,
+            # REQUIRED. Without it this fails ResourceNotFoundException even
+            # against a READY runtime with a READY endpoint. Measured, not
+            # inferred.
+            qualifier=DEFAULT_QUALIFIER,
+            # RAW JSON BYTES. boto3 takes bytes here; the CLI takes base64. Same
+            # API, different interface -- do not copy the CLI's encoding into
+            # boto3 code.
+            payload=state.model_dump_json().encode("utf-8"),
+            contentType="application/json",
+        )
+    except Exception as exc:
+        # CLASSIFIED, NOT SWALLOWED. Nothing is absorbed here: every branch
+        # re-raises. What the classification buys is that "the call timed out"
+        # and "the call was denied" stop looking alike -- they are the same rule-4
+        # distinction the deploy retry loop got wrong, where an unknown error was
+        # treated as the one condition the loop knew how to wait out and it polled
+        # for five minutes against a broken value.
+        #
+        # A raw botocore exception on the projector is a stack trace naming
+        # neither the role nor the runtime, and the two failures need opposite
+        # responses: a timeout means wait or raise INVOKE_READ_TIMEOUT, a denial
+        # means fix the IAM role, and an absent runtime means deploy it.
+        raise RuntimeError(_classify_invoke_failure(role, arn, exc)) from exc
 
     # botocore models `response` as a STREAMING blob, so it arrives as a
     # file-like object rather than bytes -- StreamingBody over a socket, BytesIO
@@ -284,12 +375,47 @@ def _invoke(role: str, state: RunState) -> dict:
     # evidence of failure. The checks below do not depend on it being present.
     status = response.get("statusCode") or 200
 
-    try:
-        parsed = json.loads(raw.decode("utf-8")) if raw else {}
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    if not raw:
+        # A ZERO-BYTE BODY IS NOT AN EMPTY OBJECT. Parsing `b""` as `{}` -- which
+        # is what `json.loads(...) if raw else {}` did here -- makes a blank
+        # response indistinguishable from a runtime that answered `{}`, and it
+        # sends the reader to the wrong place: `{}` has no `agent` key, so the
+        # echo check downstream reported "asked the 'planner' runtime and None
+        # answered ... check AGENT_ROLE on it". That is rule 4 -- a message that
+        # cannot tell "nothing came back" from "the wrong agent came back", and
+        # it points at runtime configuration for what is an empty response.
+        #
+        # Refused here, by name, because this is the emptiest possible form of
+        # the reassuring non-answer this module exists to eliminate.
         raise RuntimeError(
-            f"the {role!r} runtime returned a body that is not JSON "
-            f"(status {status}): {exc}"
+            f"the {role!r} runtime answered {status} with a ZERO-BYTE body. "
+            f"Nothing came back to validate -- this is not an empty result, it is "
+            f"no result. Check the runtime's own logs: agents/server.py always "
+            f"writes a {{'agent', 'result'}} envelope, so an empty body means the "
+            f"container died mid-response or something other than it answered."
+        )
+
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # NAMES THE REAL CONDITION. The realistic cause is not a broken agent but
+        # something in front of it -- an HTML `504 Gateway Timeout` page, an ALB
+        # error, an auth redirect. Reporting only "not JSON" would be true and
+        # useless; the body's opening bytes are what tell a reader at a glance
+        # that they are looking at a gateway error rather than a runtime bug, so
+        # a bounded prefix is quoted. Bounded because this string can land on the
+        # projector, where a wall of HTML reads as a crash.
+        opening = raw[:120].decode("utf-8", errors="replace").strip()
+        looks_like_html = opening[:1] == "<"
+        hint = (
+            " The body opens with '<', so this is very likely an HTML error page "
+            "from a proxy or load balancer IN FRONT OF the runtime, not a reply "
+            "from agents/server.py."
+            if looks_like_html else ""
+        )
+        raise RuntimeError(
+            f"the {role!r} runtime answered {status} with a body that is not JSON "
+            f"({exc}).{hint} First {len(opening)} bytes: {opening!r}"
         ) from exc
 
     # SHAPE BEFORE STATUS, because the status branch below reads `error` and
