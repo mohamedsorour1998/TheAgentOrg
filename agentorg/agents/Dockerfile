@@ -36,6 +36,49 @@
 # ['386','amd64','arm','arm64','ppc64le','riscv64','s390x'].
 FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.12-slim
 
+# THE THREE SCANNERS, IN THE IMAGE. Without them this container takes the ABSENT
+# path: every wrapper raises FileNotFoundError, agents/security.py catches it, and
+# the verdict comes from fixtures/security_result_block.json rather than from
+# compute_security_verdict. The gate would then block because a JSON file was
+# read, which is exactly the claim the demo must not make. Measured before this
+# layer existed: the deployed security runtime returned a fixture verdict.
+#
+# Versions are CI's pins (.github/workflows/ci.yml:124-126), not the authoring
+# machine's, so the image matches what the suite is gated against.
+#
+# THE VERSION-CHECK TAIL IS THE GUARANTEE AND MUST NOT BE REMOVED. A binary that
+# downloads but cannot execute -- wrong architecture, truncated tarball -- would
+# otherwise ship, and a BROKEN scanner is a different fault from an absent one:
+# it blocks every run, including the clean one. Failing the build here is cheap;
+# discovering it on a projector is not.
+#
+# git is installed alongside them deliberately: github_ops.open_pr shells out to
+# real `git` on the offline path (github_ops.py:64-67), and a container without it
+# dies there instead, which reads as an unrelated failure.
+#
+# semgrep lives in /opt, not /tmp, because /tmp is not guaranteed to survive
+# between build and run; a symlink into a wiped directory presents as a BROKEN
+# scanner and would block every run.
+ARG GITLEAKS_VERSION=8.21.2
+ARG TRIVY_VERSION=0.74.0
+ARG SEMGREP_VERSION=1.172.0
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates git \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -sSfL -o /tmp/gitleaks.tar.gz \
+      "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz" \
+ && tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks \
+ && mv /tmp/gitleaks /usr/local/bin/gitleaks \
+ && curl -sSfL -o /tmp/trivy.tar.gz \
+      "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz" \
+ && tar -xzf /tmp/trivy.tar.gz -C /tmp trivy \
+ && mv /tmp/trivy /usr/local/bin/trivy \
+ && python -m venv /opt/semgrep-venv \
+ && /opt/semgrep-venv/bin/pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" \
+ && ln -s /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep \
+ && rm -f /tmp/gitleaks.tar.gz /tmp/trivy.tar.gz \
+ && gitleaks version && trivy --version && semgrep --version
+
 # Fail fast on a missing directory, and keep every later path relative to here.
 WORKDIR /app
 
