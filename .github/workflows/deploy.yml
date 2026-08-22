@@ -353,6 +353,21 @@ jobs:
           payload='{"run_id":"ci-smoke","ticket_id":"CI-1","ticket_text":"Add a health check endpoint."}'
           encoded="$(printf '%s' "$payload" | base64 | tr -d '\n')"
 
+          # THE FIXTURE'S `notes` LITERAL, AND WHY THE CHECK BELOW IS BUILT ON IT.
+          #
+          # Read from the file with a command, never copied on trust:
+          #   python -c "import json;print(json.load(open('fixtures/plan_result.json'))['notes'])"
+          #   Redis connection details must come from the environment.
+          #
+          # A real model reply will not reproduce a fixed 56-character sentence,
+          # so its ABSENCE is what distinguishes the model from the fixture. Kept
+          # inline rather than read from the file at runtime on purpose: this step
+          # must fail if the fixture is regenerated with different prose, because
+          # the discriminator would then be stale, and a check comparing the
+          # response against whatever the fixture currently says could never
+          # detect the fixture being served.
+          fixture_note='Redis connection details must come from the environment.'
+
           for attempt in $(seq 1 20); do
             if err="$(aws bedrock-agentcore invoke-agent-runtime \
                   --agent-runtime-arn "$arn" \
@@ -362,13 +377,36 @@ jobs:
                   /tmp/invoke-out.json 2>&1)"; then
               echo "--- response"
               cat /tmp/invoke-out.json
-              # Asserts on CONTENT, not exit status. A runtime returning 200 with
-              # an empty body exits 0, and "the call succeeded" is exactly the
-              # reassuring non-answer this project keeps having to distinguish
-              # from a real completion.
-              if grep -q '"tasks"' /tmp/invoke-out.json; then
-                echo "::notice::planner returned a real plan on attempt ${attempt}"
+              # ASSERTS THE MODEL ANSWERED, not merely that a plan came back.
+              #
+              # This previously grepped for '"tasks"' alone -- and
+              # fixtures/plan_result.json BEGINS with "tasks", on line 2, measured
+              # 2026-08-22. So the check passed identically whether Bedrock
+              # answered or the planner's fixture stood in, in the very step whose
+              # own comment above claims to assert on content to avoid "the
+              # reassuring non-answer".
+              #
+              # That is how a week of fixture-only cloud runs shipped green:
+              # bedrock:InvokeModel was implicitDeny on the inference profile the
+              # code names, llm.text() caught it, every agent fell back, and this
+              # was the one check that could have said so.
+              #
+              # `grep -qF`, fixed-string, because the note contains a `.` which is
+              # a regex metacharacter -- a basic-regex match would accept any
+              # character in that position and weaken the discriminator.
+              if grep -q '"tasks"' /tmp/invoke-out.json \
+                 && ! grep -qF "$fixture_note" /tmp/invoke-out.json; then
+                echo "::notice::planner returned a real MODEL plan on attempt ${attempt}"
                 exit 0
+              fi
+              if grep -qF "$fixture_note" /tmp/invoke-out.json; then
+                echo "::error::the planner answered with its FIXTURE, not the model."
+                echo "::error::The response carries fixtures/plan_result.json's notes"
+                echo "::error::literal, which a real completion would not reproduce."
+                echo "::error::Check bedrock:InvokeModel on the inference-profile ARN"
+                echo "::error::for theagentorg-shared-agentcore-runtime-role --"
+                echo "::error::simulate-principal-policy, not the apply's exit code."
+                exit 1
               fi
               echo "::error::planner answered without tasks; not a real completion"
               exit 1
