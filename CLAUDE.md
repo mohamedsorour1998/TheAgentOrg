@@ -527,21 +527,42 @@ exactly why `scan_provenance` exists.
 | `developer` | `run(state, poisoned=None)` | plan, `review.must_fix`, `dev.diff` | `dev_result_{clean,poisoned}.json` |
 | `reviewer` | `run(state)` | `dev.diff`, `plan.tasks` | `review_result.json` |
 | `security` | `run(state, use_real_scanners=True)` | `dev` | `security_result_{block,pass}.json` |
-| `sre` | `run(state)` | **nothing** | `sre_result.json` — the **only** path |
+| `sre` | `run(state)` | real CI, plan, `dev`, `review`, `security`, repo | `sre_result.json` — **advice only** |
+
+Every one reads the target repository through `repo_snapshot.render(...)` — one shallow
+`git clone`, 120s TTL, shared by all five. The reviewer passes `diff=` to get the
+file **as the change would leave it**; the developer does not, because it is the one
+writing the diff.
 
 No agent wraps `llm.structured` in `try/except`: it already absorbs unavailable,
 raised, chatty and unparseable, returning `None`. Wrapping again would also
 swallow caller bugs and quietly serve fixture data while the run looked live.
 
-**`sre.py` is still a stub.** It ignores its state, never imports `llm`, and always
-returns `fixtures/sre_result.json` — `verdict: go`, `ci_status: passing` —
-regardless of real CI state. Its `SYSTEM_PROMPT` is **dead code**, read by nothing.
-Do not describe the SRE stage as model-backed or as "falling back". Consequently
-`sre.verdict == "no_go"` is unreachable on the default path, and `graph.py`'s
-no_go branch is defensive structure rather than exercised behaviour.
+**`sre.py` is no longer a stub, and its verdict is NOT the model's.** Since
+2026-08-22 it measures CI first — `github_ops.ci_status(state)`, a real API read —
+and derives `verdict` in code: `"no_go" if ci == "failing" else "go"`. The model
+contributes `slo_checks`, `estimated_cost_note` and `notes` **only**, validated
+against **`SREAdvice`**, a narrow model that does not even declare `verdict` or
+`ci_status`. Its advisory checks are APPENDED after the measured CI row, never merged
+by name, so a model check called `CI` cannot displace the real one.
+
+Two consequences worth holding onto:
+
+- **`sre.verdict == "no_go"` is now reachable** — it needs CI reporting `failing`.
+  `graph.py`'s no_go branch is exercised behaviour rather than defensive structure.
+- **`unknown` yields `go`**, deliberately: a target repo with no CI still proceeds and
+  the honest `unknown` reaches the PR comment. Verified live — the clean run's SRE
+  comment reads `**GO** — CI unknown` with a `FAIL CI` row above the model's advice.
+  Whether `unknown` should block a MERGE is `merge_pr`'s decision, made there.
+
+**Asking the model for `SREResult` was a real defect** — the schema required two
+fields the prompt forbids, so every obedient reply was rejected and the fixture served
+silently. See the verified-runs section for the measurement.
 
 `fixtures/review_result.json` has `verdict: "approve"`, so the revision loop
-normally executes **exactly once**.
+normally executes **exactly once**. On a **poisoned** diff a live reviewer does not
+approve: the 2026-08-22 poisoned run ran all four passes (`review ×4` on PR #44) and
+security blocked it.
 
 ### Two agent-level guards worth knowing
 
@@ -910,7 +931,7 @@ an audit trail.
 
 ## The test suite
 
-**39 test files** as of 2026-08-22 (`ls tests/test_*.py | wc -l`), plus five
+**41 test files** as of 2026-08-22 (`ls tests/test_*.py | wc -l`), plus five
 non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
 `--collect-only`; the table lists the largest and the ones whose subject matters,
@@ -936,6 +957,9 @@ not every file.
 | `test_llm_helper.py` | JSON extraction, disabled path, KeyboardInterrupt | 20 |
 | `test_deploy_note.py` | reports the real deploy or admits it cannot | 19 |
 | `test_agent_comments.py` | one labelled comment per stage; issue-vs-PR routing | 19 |
+| `test_repo_snapshot.py` | the shared repo view: clone, TTL, the after-diff view | 23 |
+| `test_sre_agent.py` | CI decides, the model advises — and the schema it is asked for | 20 |
+| `test_issue_lifecycle.py` | the issue links its PR, learns the ending, and closes | 13 |
 | `test_dora_batch.py` | the headline claim under test | 14 |
 | `test_agentcore_iam.py` | the inference-profile grant + the deploy smoke test's discriminator | 11 |
 | `test_dora_harness.py` | the harness's raw numbers | 10 |
@@ -958,7 +982,7 @@ Support modules: `conftest.py` (the guards), `provenance.py` (the discriminator)
 `dora_runner.py`, `dora_batch.py`, `dora_table.py`. **`tests/README.md` is stale** —
 it assigns `test_functional_flow.py`, which does not exist.
 
-### The five autouse guards in `tests/conftest.py`
+### The six autouse guards in `tests/conftest.py`
 
 Every one forces the offline path, then puts a loud raiser on the seam underneath.
 **Do not weaken them.**
@@ -982,6 +1006,15 @@ Every one forces the offline path, then puts a loud raiser on the seam underneat
    file-scoped version *predicted its own gap* in a docstring and named the
    condition that would end it; a second lane then did exactly that, and three
    tests failed in the full suite while passing alone.
+6. **The repository clone** — `repo_snapshot.snapshot` → `dict`, cleared on both
+   sides. **GUARD 2's HISTORY REPEATING ON A NEW SEAM.** `repo_snapshot` shallow-clones
+   the target repo so every agent can see it, and three tests set a non-empty
+   `GITHUB_REPO` and then drove `run_pipeline` — so `pytest -q` made real outbound
+   clones to github.com. Stubbed at `snapshot`, not at `subprocess`: patching
+   subprocess would leave `_read_tree` walking a directory that does not exist and
+   would test our git invocation rather than what the agents do with the result, which
+   is where every measured defect was. A test marked `real_snapshot` opts out (those
+   stub `subprocess.run` in their own bodies, so they never reach the network either).
 
 **Why `pytest.fail` and not a plain exception.** `Failed` derives from
 **BaseException**, not Exception. `llm.text()` catches `Exception` and
@@ -1017,7 +1050,7 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
-### The pattern found seven times across four layers
+### The pattern found EIGHT times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -1067,6 +1100,17 @@ The instances, briefly:
   guard that the stripping still works. Reading either test would never have
   revealed the gap — which is the whole pattern.
 
+- **Sixteen SRE tests that never ran pydantic.** Every one stubs `llm.structured` to
+  return a ready-made `SREResult`, which is the correct isolation for "what does the
+  agent do with advice" — and it meant no test validated a real reply against the
+  schema the agent asks for. The agent asked for `SREResult` while its prompt told the
+  model not to fill two of that model's required fields, so **every obedient reply was
+  rejected and the fixture was served, on every call**, with all 16 green. Caught by
+  reading `_source=fixture` on the deployed run, not by the suite. The fix's tests run
+  the real validation over the real prompt and assert on the CLASS the agent passes,
+  not on source text — a comment naming `SREAdvice` would satisfy a grep while the
+  call still passed `SREResult`.
+
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
 **test**: `return EXIT_BLOCKED → EXIT_OK` (with which the poisoned run reaches
@@ -1080,18 +1124,31 @@ whole project exists to prevent.** Same for "denied" versus "not ready yet".
 
 ## Verified runs — what the cloud path has actually done
 
-### The demo pair, as it will be run — verified at runtime version 13
+### The demo pair — verified at runtime version 16, all five agents on the model
 
-Two scenarios, each from a fresh issue, both re-run after the prompt fix below.
+The current pair. Both scenarios re-run after the SRE schema fix below, which is the
+first run where **every stage of both halves reported `_source=model`**.
 
 | | Clean | Poisoned |
 |---|---|---|
-| Issue | #28 | #33 |
-| Issue comments | `plan`, `gate1` | `plan`, `gate1` |
-| PR | **#29 — MERGED** | **#34 — open, blocked** |
+| Issue | #41 — **CLOSED / COMPLETED** | #43 — **CLOSED / NOT_PLANNED** |
+| Issue comments | `plan`, `gate1`, `outcome` | `plan`, `gate1`, `outcome` |
+| PR | **#42 — MERGED** | **#44 — open, blocked** |
+| PR body | `Closes #41` | `Closes #43` |
 | PR comments | develop · review · security · gate2 · sre · gate3 | develop · review ×4 · security |
 | Security | `PASS`, `provenance: scanners` | `BLOCK`, `provenance: scanners`, `app/auth.py:3` and `:4` |
-| Jobs | all seven green | `develop` exit 3, everything after skipped |
+| Provenance | `_source=model` at plan, develop, sre, promote | `_source=model` at plan, develop |
+| Jobs | all seven green | `develop` **exit 3**, everything after skipped |
+| Recorders | all three skipped | all three skipped |
+
+The clean run was **auto-triggered by opening the issue** — run `32580985840`,
+`TRIGGER: issue`, no command typed. The poisoned run was hand-dispatched
+(`32581285927`) because `poisoned` is hardcoded `"false"` in the ingress transformer.
+
+**The issue is now a complete record on its own.** `Closes #<n>` in the PR body
+populates GitHub's Development sidebar — verified through the GraphQL timeline, which
+reports a `CrossReferencedEvent` for the PR and a `ClosedEvent` with the reason. An
+issue previously learned only how a run BEGAN and stayed open forever.
 
 **Dispatching the poisoned run races the auto-trigger.** Creating an issue fires a
 CLEAN run within seconds, and `poisoned` is hardcoded `"false"` in the ingress
@@ -1100,8 +1157,48 @@ labels are reliably empty. So the poisoned run must be hand-dispatched, and if t
 auto-run wins the concurrency slot first it posts its own plan to the same issue.
 **That is what produced three plan comments on one issue during rehearsal** — three
 separate runs against ticket 21, twelve minutes apart, each correctly posting once.
-Not a loop. Either dispatch poisoned immediately after creating the issue, or accept
-the extra plan comment.
+Not a loop. On 2026-08-22 the poisoned dispatch and the auto-run both started on issue
+#43 five seconds apart; `gh run cancel` on the auto one left the issue with a single
+clean record. **Cancel the auto-run rather than racing it** — that is the reliable
+move, and it takes one command.
+
+### THE SRE'S ADVICE WAS REJECTED BY THE SCHEMA IT WAS ASKED FOR
+
+Found by reading `_source=fixture` on a `develop` and `sre` job whose measured output
+was plainly real. `sre.run` validated the model's reply against **`SREResult`**, whose
+`verdict` and `ci_status` are required Literals with no default — while
+`SYSTEM_PROMPT` tells the model, correctly, that those two fields are **not its to
+set**. A model that OBEYED the prompt therefore produced a reply pydantic rejected.
+MEASURED against the deployed runtime, 3 of 3 calls:
+
+```
+verdict=go ci=unknown source=fixture
+REJECTED: 2 validation errors for SREResult
+verdict     Field required
+ci_status   Field required
+```
+
+The advice was good — it named the new Redis dependency and the missing test for the
+rate-limiting logic — and every word was discarded. `SREAdvice` now holds exactly the
+three fields the prompt asks for, so **the model literally cannot express the two it
+must not set**, which is stronger than dropping them afterwards. Not fixed by
+defaulting `SREResult`'s fields: that model is the frozen contract every stage writes,
+and a default there reads as a decision somewhere else.
+
+**The 16 existing SRE tests all passed throughout**, because every one stubs
+`llm.structured` to return a ready-made object — the right isolation for "what does
+the agent do with advice", and exactly why no test ran pydantic over the real
+prompt's contract. This is the seventh instance of the pattern below: a test double
+that cannot express the failing case.
+
+**Two probes that looked like bugs and were not.** A local probe of the reviewer
+returned `source=fixture` with `prompt chars: 1977`; the same input returns `model`
+with `18338` once `DEMO_REPO` is set. `config.GITHUB_REPO` reads env var **`DEMO_REPO`**
+— the one name mismatch in `config.py` — so a probe exporting `GITHUB_REPO` gets an
+empty snapshot and the agent reasons blind. And **the AgentCore runtime log groups
+record only `GET /ping`**, never `/invocations`, so they cannot tell you whether an
+agent was invoked. Read the agent's OUTPUT against its fixture instead: the reviewer's
+fixture is always `app/auth.py:12` "Counter expiry looks right."
 
 ### THE DEVELOPER WAS WRITING GO FOR A FLASK APP
 
@@ -1281,7 +1378,8 @@ half fails silently.
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 12** — re-read 2026-08-22 with `list-agent-runtimes`. All five carry the
+**version 16** — re-read 2026-08-22 with `list-agent-runtimes`, and confirmed by
+`preflight.py` check 2 on the same run that verified the demo pair. All five carry the
 **same** version: a split would mean a partial deploy, where some agents run new code
 and some old and no stage's output says
 which, so `scripts/preflight.py` check 2 fails on a version mismatch as well as on
@@ -1549,7 +1647,8 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/gates.py` | Human gates: save / pause / resume / load, and `StateRef` |
 | `agentorg/log.py` | The append-only decision log; `runs/<run_id>.jsonl` |
 | `agentorg/timeline.py` | The renderer — text and HTML |
-| `agentorg/github_ops.py` | The GitHub seam, plus `deploy_note()` |
+| `agentorg/github_ops.py` | The GitHub seam, `deploy_note()`, `merge_pr()`, `report_outcome()` |
+| `agentorg/repo_snapshot.py` | The shared repo view every agent reads: clone, TTL, after-diff |
 | `agentorg/gates_cli.py` | `list` and `resume` — the only route to `--decision overridden` |
 | `agentorg/approve_server.py` | A local approval screen; no auth, loopback only |
 | `agentorg/fixtures_loader.py` | Resolves `fixtures/` from the **repo root** |
@@ -1569,8 +1668,9 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `fixtures/` | Seven files — a validated sample of every result shape |
 | `tickets/` | `clean.md` and `poisoned.md` — the same feature request |
 | `target_repo/` | The demo's subject app: a Flask login handler. The **deployed** copy is `mohamedsorour1998/auth-service`, which had **no CI at all** until 2026-08-22 — head commit `{"state":"pending","total_count":0}`. A `ci.yml` running `python -m pytest tests -q` on every push and PR is open as **PR #18** there. GitHub reports `pending` when NOTHING has run, so zero checks must read as `unknown`, never `passing` |
-| `tests/conftest.py` | The five autouse guards |
+| `tests/conftest.py` | The six autouse guards |
 | `tests/provenance.py` | Which scanner mode a test is in, and the discriminator |
+| `tests/test_issue_lifecycle.py` | The issue links its PR, learns the ending, closes |
 | `docs/plan/` | Per-person plans; `reem/demo_script.md` is the runbook |
 | `runs/` | Run logs + paused state. Gitignored, ~10k files — **never `ls` in here** |
 
