@@ -300,25 +300,18 @@ def test_the_trigger_is_quoted_in_the_shell_so_a_hostile_value_cannot_split():
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "CROSS-LANE ORDERING, stated rather than hidden. This lane owns "
-        "run-pipeline.yml and adds `--trigger`; scripts/run_stage.py belongs to "
-        "another lane and its argparse addition lands separately. MEASURED with "
-        "the workflow half in place and the stage half not: `run_stage: error: "
-        "unrecognized arguments: --trigger issue`. This xfail is the record of "
-        "the dependency -- it flips to XPASS the moment the flag is added, which "
-        "is the signal that the chain is complete, and pytest reports XPASS "
-        "distinctly from a pass so nobody has to remember to come back."
-    ),
-    strict=False,
-)
 def test_run_stage_accepts_the_trigger_flag():
-    """The other half of the chain, owned by another lane.
+    """The other half of the chain, landed by another lane.
 
-    Asserted here anyway: the workflow passing a flag the script rejects is a
-    crash in the FIRST job of the demo pipeline, and a lane boundary is not a
-    reason for nothing to check it.
+    This was a non-strict xfail while the two halves were in flight: this lane
+    owns run-pipeline.yml and added `--trigger`; scripts/run_stage.py belongs to
+    another lane. MEASURED with only the workflow half in place:
+    `run_stage: error: unrecognized arguments: --trigger issue`, which would have
+    crashed the FIRST job of the demo pipeline.
+
+    The flag has since landed, so this is now a plain assertion. A lane boundary
+    was never a reason for nothing to check it -- the workflow passing an argument
+    the script rejects is a crash, not a style disagreement.
     """
     import subprocess
     import sys
@@ -335,6 +328,35 @@ def test_run_stage_accepts_the_trigger_flag():
         f".github/workflows/run-pipeline.yml passes it. The plan job -- the FIRST "
         f"job of the pipeline -- would die with `unrecognized arguments`. "
         f"argparse help:\n{result.stdout}"
+    )
+
+
+def test_the_stage_records_the_trigger_onto_the_run_state():
+    """Accepting the flag and dropping it would pass the test above and prove nothing.
+
+    The end of the chain: workflow input -> shell env -> argparse -> RunState. Every
+    link is asserted somewhere in this file, and this is the last one -- without it,
+    `--trigger` could be accepted and discarded while `RunState.trigger` held its
+    default, which is this project's signature failure shape applied to its own
+    provenance field.
+    """
+    import subprocess
+    import sys
+
+    help_text = subprocess.run(
+        [sys.executable, "scripts/run_stage.py", "plan", "--help"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    ).stdout
+    assert "--trigger" in help_text, "the flag is not accepted; see the test above"
+
+    source = (REPO_ROOT / "scripts" / "run_stage.py").read_text()
+    code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+    assert re.search(r"trigger\s*=\s*args\.trigger", code), (
+        "scripts/run_stage.py accepts --trigger but never assigns it to the "
+        "RunState. The flag would be parsed and discarded, the run would record "
+        "the default, and every job would still be green. Comments are stripped "
+        "before this search, so the module's prose about the trigger cannot "
+        "satisfy it."
     )
 
 
