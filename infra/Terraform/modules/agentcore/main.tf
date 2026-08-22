@@ -161,7 +161,44 @@ resource "aws_iam_role_policy" "runtime" {
           "bedrock:ConverseStream",
         ]
         Resource = [
-          "arn:aws:bedrock:${data.aws_region.current.region}::foundation-model/*",
+          # THE FOUNDATION-MODEL GRANT IS CROSS-REGION, AND THAT IS THE WHOLE
+          # POINT OF A CROSS-REGION INFERENCE PROFILE.
+          #
+          # A `us.` profile ROUTES to foundation models in several regions, and
+          # Bedrock requires the caller to hold permission on whichever one it
+          # picks. Measured with `get-inference-profile`, the profile in
+          # `config.BEDROCK_MODEL` fans out to three:
+          #
+          #   arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0
+          #   arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-2-lite-v1:0
+          #   arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-2-lite-v1:0
+          #
+          # Scoped to one region, two of the three were denied -- simulated
+          # 2026-08-22 with the Converse grant already in place:
+          #
+          #   foundation-model in us-east-1   allowed
+          #   foundation-model in us-east-2   implicitDeny
+          #   foundation-model in us-west-2   implicitDeny
+          #
+          # So the call succeeded or failed depending on which region the profile
+          # happened to choose, and a failure was indistinguishable from every
+          # other denial in this sequence: the agent served its fixture and the job
+          # went green.
+          #
+          # THE WILDCARD IS DELIBERATE AND IS NOT LAZINESS. Enumerating the three
+          # regions would break silently the day AWS adds a fourth to the profile
+          # -- the same failure, rediscovered, with the same fixture fallback
+          # hiding it. What bounds this grant is the ACTION list above (four
+          # read-only inference calls, no management actions) and the model
+          # wildcard being foundation models only. The account is still scoped on
+          # the inference-profile line below, which is the resource that must be
+          # ours.
+          #
+          # THIS WAS THE THIRD OF THREE INDEPENDENT DEFECTS on one statement: the
+          # ARN shape, the action name, then the region. Each fix made the next one
+          # visible, because until then the call failed at the earlier check. Read
+          # the container log, not the simulation, to know which one you are on.
+          "arn:aws:bedrock:*::foundation-model/*",
           "arn:aws:bedrock:${data.aws_region.current.region}:${var.account_id}:inference-profile/*",
         ]
       },

@@ -483,3 +483,47 @@ def test_both_converse_forms_are_granted_not_just_the_streaming_one():
         f"too: an SDK that stopped streaming would fall straight back to fixtures "
         f"with nothing turning red. Statement body:\n{body}"
     )
+
+
+def test_the_foundation_model_grant_spans_every_region_the_profile_routes_to():
+    """A cross-region profile routes across regions. The grant must follow it.
+
+    MEASURED 2026-08-22 with `get-inference-profile`, the profile named by
+    `config.BEDROCK_MODEL` fans out to THREE foundation models:
+
+        arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0
+        arn:aws:bedrock:us-east-2::foundation-model/amazon.nova-2-lite-v1:0
+        arn:aws:bedrock:us-west-2::foundation-model/amazon.nova-2-lite-v1:0
+
+    Scoped to one region, with the Converse actions already granted:
+
+        foundation-model in us-east-1   allowed
+        foundation-model in us-east-2   implicitDeny
+        foundation-model in us-west-2   implicitDeny
+
+    So the call succeeded or failed on which region the profile happened to pick,
+    and the failure was indistinguishable from every other denial in this
+    sequence: the agent served its fixture and the job went green.
+
+    THE ACCOUNT SCOPE IS ASSERTED SEPARATELY, on the inference-profile ARN, by
+    `test_the_inference_profile_grant_is_scoped_to_this_account_and_region`. That
+    is the resource that must be ours; a foundation model is AWS's and carries no
+    account field at all.
+    """
+    body = _bedrock_invoke_statement()
+    region_scoped = re.findall(
+        r'"arn:aws:bedrock:(?!\*)[a-z0-9-]+::foundation-model/', body
+    )
+    assert not region_scoped, (
+        f"the foundation-model grant is pinned to a single region "
+        f"({region_scoped}). A `us.` inference profile routes to models in "
+        f"several regions and Bedrock checks permission on whichever it picks, so "
+        f"a single-region grant denies the call whenever the profile chooses "
+        f"another one -- and the agent then serves its fixture with the job green. "
+        f"Statement body:\n{body}"
+    )
+    assert '"arn:aws:bedrock:*::foundation-model/' in body, (
+        f"no cross-region foundation-model ARN found. Enumerating today's three "
+        f"regions would break silently the day AWS adds a fourth to the profile, "
+        f"which is the same defect rediscovered. Statement body:\n{body}"
+    )
