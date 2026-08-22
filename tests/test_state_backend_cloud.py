@@ -1,6 +1,8 @@
-"""The cloud path must be able to load a run on either state backend.
+"""The cloud path's state seam: reading a run, and being VISIBLE while it waits.
 
-PROVED, before the fix:
+Two defects in one seam, so one file.
+
+B4 -- READING. PROVED, before the fix:
 
     $ STATE_BACKEND=dynamodb .venv-main/bin/python -c \
         "from agentorg import gates; gates._state_path('x')"
@@ -18,19 +20,43 @@ exist, deliberately the same exception. `_load` turns it into the named
 `SystemExit` about a broken artifact handoff. It must NOT be softened into a
 fresh `RunState` -- that would start a new run and report success for work it
 invented, which is the same defect as a check that did not run.
+
+B5 -- BEING FOUND. `graph.py` calls `gates.pause` twice, from `_auto_gate` and
+`_cli_gate`, both BEFORE returning a decision. `scripts/run_stage.py` never
+called it at all, so NO cloud run appeared on `approve_server` -- the seam a
+planned frontend reads.
+
+`approve_server._awaiting` lists a run iff it has an open pause marker for a gate
+with no decision recorded yet: `paused - decided`. The marker is the summary
+sentence `gates.pause` writes, and this file IMPORTS that constant rather than
+restating it.
+
+WHY THE PAUSE BELONGS TO THE STAGE BEFORE THE GATE. In the cloud the gate job
+does not start until somebody has already clicked, so a `gates.pause` inside
+`_stage_gate` would write the marker and the decision in the same job:
+`paused - decided` would be empty and the run would STILL never be listed. The
+window the marker describes is the one where GitHub is holding the job at the
+Environment, and the only code that runs before that window opens is the
+preceding stage.
 """
 
+import argparse
 import importlib.util
 from pathlib import Path
 
 import pytest
 
-from agentorg import gates
+from agentorg import approve_server, gates, log
 from agentorg.common import config
 from agentorg.state import RunState
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STAGE_SCRIPT = REPO_ROOT / "scripts" / "run_stage.py"
+
+TICKET = "Add a per-IP login rate limit."
+
+# IMPORTED, never restated -- see this file's header.
+_MARKER = approve_server._PAUSE_MARKER
 
 
 def _stage_module():
@@ -39,6 +65,18 @@ def _stage_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _args(**kw):
+    base = {"run_id": "", "ticket_id": "", "ticket_text": "",
+            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1"}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def _no_comments(module, monkeypatch):
+    monkeypatch.setattr(module.github_ops, "post_comment",
+                        lambda state, body, finding=None: "local://x")
 
 
 def test_load_reads_through_gates_load_and_never_touches_the_path_helper(monkeypatch):
@@ -168,4 +206,221 @@ def test_the_docstring_no_longer_claims_this_is_broken():
     assert "It is fixed now" in doc or "is fixed now" in doc, (
         "the docstring records the old limitation without stating that it has "
         "been fixed, so a reader cannot tell which claim is current"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch, tmp_path):
+    """All THREE directory seams `_awaiting` reads, redirected at tmp_path.
+
+    `gates._STATE_DIR`, `log._LOG_DIR` and `approve_server._RUNS` each resolve to
+    <repo>/runs independently -- patching fewer than three leaves the listing
+    reading the real directory, which holds ~10k files from every previous test
+    run and would make any assertion about "which runs are awaiting" meaningless.
+    """
+    monkeypatch.setattr(gates, "_STATE_DIR", tmp_path)
+    monkeypatch.setattr(log, "_LOG_DIR", tmp_path)
+    monkeypatch.setattr(approve_server, "_RUNS", tmp_path)
+
+
+def _no_comments(module, monkeypatch):
+    monkeypatch.setattr(module.github_ops, "post_comment",
+                        lambda state, body, finding=None: "local://x")
+
+
+def test_the_marker_constant_is_what_gates_pause_actually_writes():
+    """The anti-vacuity check for every assertion below.
+
+    If `_PAUSE_MARKER` no longer appeared in what `gates.pause` writes, every
+    test in this file would look for a sentence nobody writes, match nothing, and
+    pass. That is this repo's recorded failure shape: a matcher that can match
+    nothing must assert that it matched.
+    """
+    state = RunState(ticket_id="MARK-1", ticket_text=TICKET)
+    gates.pause(state, "gate1")
+    summaries = [e.summary for e in log.read(state.run_id)]
+    assert any(_MARKER in summary for summary in summaries), (
+        f"approve_server._PAUSE_MARKER ({_MARKER!r}) does not appear in what "
+        f"gates.pause writes: {summaries}. Every assertion in this file would "
+        f"then match nothing and pass."
+    )
+
+
+def test_the_cloud_plan_stage_leaves_a_run_the_approval_screen_can_FIND(monkeypatch):
+    """The defect: no cloud run was ever visible to the approval screen.
+
+    Asserted through `approve_server._awaiting()` rather than by grepping the log
+    for the marker, because the marker alone is not the property that matters --
+    `_awaiting` also requires the run to be non-terminal and the gate to have no
+    decision yet, and a marker written in the wrong place satisfies the grep
+    while still never listing the run.
+    """
+    module = _stage_module()
+    _no_comments(module, monkeypatch)
+
+    rc = module.STAGES["plan"](_args(ticket_id="PAUSE-1", ticket_text=TICKET))
+    assert rc == module.EXIT_OK
+
+    awaiting, unreadable = approve_server._awaiting()
+    assert not unreadable, f"{unreadable} run(s) were unreadable"
+    assert awaiting, (
+        "after the cloud `plan` stage, approve_server._awaiting() is EMPTY -- so "
+        "the run is invisible to the approval screen, which is the seam a "
+        "frontend reads. gates.pause was never called on this path."
+    )
+    assert len(awaiting) == 1, f"expected exactly one awaiting run, got {awaiting}"
+    [(_run_id, open_gates)] = awaiting.items()
+    assert open_gates == ["gate1"], (
+        f"the run is listed as awaiting {open_gates}, not gate1 -- the gate it "
+        f"is actually held at"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stage_before", "expected_gate"),
+    [("plan", "gate1"), ("develop", "gate2"), ("sre", "gate3")],
+)
+def test_every_gate_gets_a_pause_marker_from_the_stage_before_it(
+        monkeypatch, stage_before, expected_gate):
+    """All three gates, not just the first.
+
+    Parametrised over the whole chain because one gate working proves nothing
+    about the others -- and `_GATE_AFTER` is derived from `STAGE_CHAIN`, so this
+    is also what pins that derivation to the gates it is supposed to cover.
+    """
+    module = _stage_module()
+    _no_comments(module, monkeypatch)
+    assert module._GATE_AFTER[stage_before] == expected_gate, (
+        f"_GATE_AFTER[{stage_before!r}] is "
+        f"{module._GATE_AFTER[stage_before]!r}, not {expected_gate!r}"
+    )
+
+    module.STAGES["plan"](_args(ticket_id="PAUSE-1", ticket_text=TICKET))
+    run_id = next(p.stem.removesuffix(".state")
+                  for p in Path(gates._STATE_DIR).glob("*.state.json"))
+
+    # Walk to the stage under test, approving each gate on the way. `plan` has
+    # already run, so its case needs no further stages -- without this guard the
+    # loop walked the whole chain to `promote` and the run was no longer waiting
+    # at anything.
+    if stage_before != "plan":
+        for stage in module.STAGE_CHAIN[1:]:
+            rc = module.STAGES[stage](_args(run_id=run_id))
+            assert rc == module.EXIT_OK, f"{stage} exited {rc}"
+            if stage == stage_before:
+                break
+
+    awaiting, _ = approve_server._awaiting()
+    assert run_id in awaiting, (
+        f"after the `{stage_before}` stage the run is not listed as awaiting "
+        f"anything, so {expected_gate} is invisible to the approval screen"
+    )
+    assert awaiting[run_id] == [expected_gate], (
+        f"the run is listed as awaiting {awaiting[run_id]}, not "
+        f"[{expected_gate!r}]"
+    )
+
+
+def test_an_APPROVED_gate_stops_being_listed(monkeypatch):
+    """`paused - decided`, from the other side.
+
+    A marker that is never cleared would leave every run on the screen forever,
+    asking humans to decide things already decided. The decision is what removes
+    it, and `_stage_gate` records that through `gates.resume`.
+    """
+    module = _stage_module()
+    _no_comments(module, monkeypatch)
+
+    module.STAGES["plan"](_args(ticket_id="PAUSE-1", ticket_text=TICKET))
+    run_id = next(p.stem.removesuffix(".state")
+                  for p in Path(gates._STATE_DIR).glob("*.state.json"))
+    assert run_id in approve_server._awaiting()[0], "gate1 was never listed"
+
+    module.STAGES["gate1"](_args(run_id=run_id))
+
+    awaiting, _ = approve_server._awaiting()
+    assert awaiting.get(run_id, []) == [], (
+        f"after gate1 was approved the run is still listed as awaiting "
+        f"{awaiting.get(run_id)}, so the screen asks for a decision that has "
+        f"already been made"
+    )
+
+
+def test_the_pause_does_not_write_the_state_TWICE(monkeypatch):
+    """`gates.pause` calls `save` itself, so `_emit` must not do both.
+
+    Harmless on the local backend -- the second write is byte-identical -- but on
+    dynamodb it is a second PutItem, and either way it misrepresents how many
+    writers this state has. `gates.py:37` is explicit that one writer is the
+    design.
+    """
+    module = _stage_module()
+    _no_comments(module, monkeypatch)
+
+    saves: list[str] = []
+    real_save = gates.save
+
+    def _counting_save(state):
+        saves.append(state.run_id)
+        return real_save(state)
+
+    monkeypatch.setattr(module.gates, "save", _counting_save)
+
+    module.STAGES["plan"](_args(ticket_id="PAUSE-1", ticket_text=TICKET))
+
+    assert len(saves) == 1, (
+        f"the plan stage wrote the state {len(saves)} times. gates.pause already "
+        f"calls save, so `_emit` must route through pause INSTEAD of calling "
+        f"save as well."
+    )
+
+
+def test_a_terminal_cloud_run_is_not_listed_as_awaiting(monkeypatch):
+    """A blocked run must not appear on the approval screen.
+
+    The poisoned demo's run ends at `develop` with `status=blocked`, and the two
+    exits before the pause in that stage do not write a marker. A run offering a
+    gate2 decision on a change the block rule stopped is the gate being asked to
+    undo the one thing this pipeline exists to demonstrate.
+    """
+    module = _stage_module()
+    _no_comments(module, monkeypatch)
+
+    module.STAGES["plan"](_args(ticket_id="PAUSE-1", ticket_text=TICKET))
+    run_id = next(p.stem.removesuffix(".state")
+                  for p in Path(gates._STATE_DIR).glob("*.state.json"))
+    module.STAGES["gate1"](_args(run_id=run_id))
+    rc = module.STAGES["develop"](_args(run_id=run_id, poisoned="true"))
+    assert rc == module.EXIT_BLOCKED, (
+        f"the poisoned run exited {rc}, not EXIT_BLOCKED; this test needs the "
+        f"blocked exit and is otherwise pinning nothing"
+    )
+
+    awaiting, _ = approve_server._awaiting()
+    assert run_id not in awaiting, (
+        f"a BLOCKED run is listed as awaiting {awaiting.get(run_id)}. The "
+        f"approval screen is offering a human the chance to approve a change the "
+        f"deterministic block rule stopped."
+    )
+
+
+def test_the_local_path_still_writes_the_marker():
+    """graph.py's two `gates.pause` calls, so the cloud fix cannot regress them.
+
+    Both paths must be visible to the same screen, and the local one was already
+    correct -- this is the control that says so, and would catch a "unification"
+    that moved the pause and broke the working half.
+    """
+    from agentorg import graph
+
+    final = graph.run_pipeline("CLEAN-1", TICKET)
+    paused = {e.stage for e in log.read(final.run_id)
+              if e.action == "opened" and _MARKER in e.summary}
+    assert paused == {"gate1", "gate2", "gate3"}, (
+        f"graph.py wrote pause markers for {sorted(paused)}, not all three gates"
+    )
+    decided = {d.gate for d in final.decisions}
+    assert paused == decided, (
+        f"markers {sorted(paused)} and decisions {sorted(decided)} disagree, so "
+        f"a completed local run would be listed as still awaiting something"
     )

@@ -261,15 +261,21 @@ def _load(run_id: str) -> RunState:
         ) from absent
 
 
-def _emit(state: RunState) -> None:
+def _emit(state: RunState, *, pausing_for: str = "") -> None:
     """Save the state and print the two lines a human reads off the job log.
 
     `ref`, not `path`: gates.save returns a `StateRef`, which is only Path-SHAPED
     to the extent of `read_text()`. The old name worked solely because it is
     consumed by an f-string and StateRef defines __str__ -- a reader who trusted
     it would reach for `.parent` or `.exists()` and get an AttributeError.
+
+    `pausing_for` names the gate this stage is about to hand the run to, and
+    routes the write through `gates.pause` INSTEAD of `gates.save` rather than in
+    addition to it. `gates.pause` calls `save` itself, so calling both would
+    write the state twice -- harmless on the local backend, a second PutItem on
+    the other, and misleading either way about how many writers there are.
     """
-    ref = gates.save(state)
+    ref = gates.pause(state, pausing_for) if pausing_for else gates.save(state)
     print(f"run_id={state.run_id}")
     print(f"status={state.status}")
     print(f"state={ref}")
@@ -285,7 +291,9 @@ def _stage_plan(args: argparse.Namespace) -> int:
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
     # Posted to the ISSUE: there is no PR until `develop` runs `open_pr`.
     graph._plan_comment(state, state.plan)
-    _emit(state)
+    # The run now waits at gate1, so the pause marker goes down here -- see
+    # `_GATE_AFTER` for why the gate stage itself cannot write it.
+    _emit(state, pausing_for=_GATE_AFTER["plan"])
     return EXIT_OK
 
 
@@ -602,7 +610,12 @@ def _stage_develop(args: argparse.Namespace) -> int:
         _emit(state)
         return EXIT_REJECTED
 
-    _emit(state)
+    # Only the SUCCESSFUL exit pauses. The two exits above ended the run, and a
+    # pause marker on an ended run would put it on the approval screen asking a
+    # human to decide something already decided -- `_awaiting` filters terminal
+    # statuses, but relying on that would make this stage's correctness depend on
+    # a filter in another module.
+    _emit(state, pausing_for=_GATE_AFTER["develop"])
     return EXIT_OK
 
 
@@ -636,7 +649,9 @@ def _stage_sre(args: argparse.Namespace) -> int:
                      f"(CI {state.sre.ci_status})")
         _emit(state)
         return EXIT_REJECTED
-    _emit(state)
+    # The run now waits at gate3 -- the last gate, and the one whose approval
+    # authorises the promotion.
+    _emit(state, pausing_for=_GATE_AFTER["sre"])
     return EXIT_OK
 
 
@@ -737,6 +752,28 @@ REJECTION_STAGES = {
     "gate1": "gate1-rejected",
     "gate2": "gate2-rejected",
     "gate3": "gate3-rejected",
+}
+
+# For each advancing stage, the gate the run waits at NEXT -- derived from
+# STAGE_CHAIN rather than written out, so a stage inserted into the chain cannot
+# leave a gate with no pause marker.
+#
+# WHY THE PAUSE IS WRITTEN BY THE STAGE BEFORE THE GATE, and not by the gate
+# stage itself. `approve_server._awaiting` lists a run as awaiting a decision iff
+# it has an open pause marker for a gate with NO decision recorded yet
+# (`paused - decided`). In the cloud the gate job does not start until somebody
+# has already clicked, so a `gates.pause` inside `_stage_gate` would write the
+# marker and the decision in the same job -- `paused - decided` would be empty
+# and the run would never appear on the screen. The window this marker has to
+# describe is the one where GitHub is holding the job at the Environment, and the
+# only code that runs before that window opens is the preceding stage.
+#
+# `graph.py` writes it from inside `ask` for the same reason: `_auto_gate` and
+# `_cli_gate` both call `gates.pause` BEFORE returning a decision.
+_GATE_AFTER = {
+    stage: STAGE_CHAIN[index + 1]
+    for index, stage in enumerate(STAGE_CHAIN[:-1])
+    if STAGE_CHAIN[index + 1] in REJECTION_STAGES
 }
 
 
