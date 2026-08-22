@@ -24,6 +24,15 @@ are four ways it does not, and they are checked in this order:
 "rejected" is reserved for the human ones. An agent's refusal is a "failed" run,
 because nobody was asked.
 
+EVERY ONE OF THOSE FOUR WRITES A LOG ROW NAMING ITS ENDING, and that is a
+requirement rather than a courtesy. `timeline._outcome` reads its banner off the
+action of the LAST log row and never off `RunState.status` -- no row carries
+that field -- so an exit that only sets `status` renders as
+`… INCOMPLETE — run stopped at <stage> without an ending`. The two `failed`
+endings each write `action="failed"`, not `"blocked"`: the scanners CLEARED
+those changes, and `⛔ BLOCKED` over one of them is this pipeline's central claim
+asserted about a change nothing blocked.
+
 The order is load-bearing: the deterministic block is evaluated on every run
 that produced a diff and wins over every other stop, because "the poisoned
 ticket blocks" is a claim about code, not about what a model thought of the
@@ -569,7 +578,12 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     # stopped here for never having been approved.
     if state.review.verdict != "approve":
         state.status = "failed"
-        _log(state, "system", "review", "blocked", verdict=state.review.verdict,
+        # action="failed", NOT "blocked". The scanners CLEARED this diff -- the
+        # ordering above guarantees it -- so a `blocked` row renders
+        # `⛔ BLOCKED — the change was stopped` on the timeline, which is this
+        # pipeline's central claim asserted about a change nothing blocked.
+        # `timeline._outcome` reads this action and never `state.status`.
+        _log(state, "system", "review", "failed", verdict=state.review.verdict,
              summary=f"scanners passed, but the reviewer never approved after "
                      f"{state.revision_count} revisions; not promoting")
         return state
@@ -588,6 +602,17 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     _sre_comment(state, state.sre)
     if state.sre.verdict == "no_go":
         state.status = "failed"
+        # THE ENDING IS WRITTEN DOWN. Before this row existed this branch set
+        # `state.status = "failed"` and returned, logging nothing -- and no log
+        # row carries `RunState.status`, so `timeline._outcome` had nothing to
+        # read and rendered `… INCOMPLETE — run stopped at sre without an
+        # ending`. INCOMPLETE says the run stopped without deciding; a no_go is a
+        # DECISION by a stage that ran to completion. `verdict` carries the SRE's
+        # own word because the revision-cap exit above writes `failed` too, and
+        # the two render the same banner by design.
+        _log(state, "sre", "sre", "failed", verdict=state.sre.verdict,
+             summary=f"SRE returned {state.sre.verdict}; not promoting "
+                     f"(CI {state.sre.ci_status})")
         return state
 
     # 8. GATE 3 + PROMOTE ---------------------------------------------------

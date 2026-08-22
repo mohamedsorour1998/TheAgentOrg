@@ -117,14 +117,21 @@ _TERMINAL_STATUSES = frozenset(
 # recorder that appends any non-ending row last silently downgrades a BLOCKED
 # banner to INCOMPLETE. Measured; see `_stage_gate_rejected`.
 #
-# `failed` maps to "blocked" rather than to an action of its own because the
-# LogEvent vocabulary (state.py:204-207) has no "failed", and `graph.py:473`
-# already logs exactly that pairing for the revision-cap ending. Following the
-# existing convention rather than inventing a second one, since the FROZEN
-# contract may gain optional FIELDS but this is a Literal's members.
+# EVERY STATUS MAPS TO THE ACTION OF ITS OWN NAME. `failed` used to map to
+# "blocked", because the LogEvent vocabulary had no "failed" -- it does now
+# (state.py, commit b32ea5c), and so do `timeline._MARK` and `_OUTCOME`.
+#
+# MEASURED CONSEQUENCE of the old mapping, which is why this is a defect and not
+# a tidying: a revision-cap run rendered `⛔ BLOCKED — the change was stopped`
+# while its own security verdict was `pass` with 0 blocking findings. The
+# ordering in `_stage_develop` guarantees the scanners ran and CLEARED that diff
+# before the cap exit is reached, so the banner asserted the pipeline's central
+# claim -- the deterministic rule stopped this change -- about a change nothing
+# blocked. And `timeline._MARK` gives `failed` a `✗` rather than `⛔` for the same
+# reason: at projector distance the glyph is read before the word.
 _OUTCOME_ACTIONS = {
     "blocked": "blocked",
-    "failed": "blocked",
+    "failed": "failed",
     "rejected": "rejected",
     "promoted": "promoted",
 }
@@ -570,7 +577,14 @@ def _stage_develop(args: argparse.Namespace) -> int:
         # nobody approved it. "failed" rather than "rejected" because no human
         # was asked.
         state.status = "failed"
-        _log(state, "system", "review", "blocked", verdict=state.review.verdict,
+        # action="failed", NOT "blocked". The scanners CLEARED this diff -- the
+        # ordering above guarantees the security stage ran first and its verdict
+        # is `pass` with 0 blocking -- so a `blocked` row renders
+        # `⛔ BLOCKED — the change was stopped`, which is the pipeline's central
+        # claim asserted about a change nothing blocked. `timeline._outcome`
+        # reads this action and never `state.status`, so the row is the only
+        # thing that decides what a judge sees.
+        _log(state, "system", "review", "failed", verdict=state.review.verdict,
              summary=f"scanners passed, but the reviewer never approved after "
                      f"{state.revision_count} revisions; not promoting")
         _emit(state)
@@ -591,6 +605,23 @@ def _stage_sre(args: argparse.Namespace) -> int:
     graph._sre_comment(state, state.sre)
     if state.sre.verdict == "no_go":
         state.status = "failed"
+        # THE ENDING IS WRITTEN DOWN. Before this row existed the no_go exit set
+        # `state.status = "failed"` and returned, logging nothing -- and NO ROW
+        # CARRIES `RunState.status`, so `timeline._outcome` had nothing to read
+        # and rendered `… INCOMPLETE — run stopped at sre without an ending`.
+        #
+        # That is a different claim from the true one. INCOMPLETE says the run
+        # stopped without deciding: a crash, an abandoned gate. A no_go is a
+        # DECISION, made by a stage that ran to completion. Conflating "did not
+        # finish" with "finished and refused" is this project's signature defect
+        # on the run's most visible field.
+        #
+        # `verdict` carries the SRE's own word, because two endings write
+        # `failed` -- this one and the revision cap -- and they render the same
+        # banner by design, so the row has to say which happened.
+        _log(state, "sre", "sre", "failed", verdict=state.sre.verdict,
+             summary=f"SRE returned {state.sre.verdict}; not promoting "
+                     f"(CI {state.sre.ci_status})")
         _emit(state)
         return EXIT_REJECTED
     _emit(state)
