@@ -345,3 +345,81 @@ def test_binaries_and_vendor_directories_are_skipped(tmp_path):
 def test_the_rendering_is_deterministic(monkeypatch):
     """Two runs at one commit produce identical prompts, so an answer is debuggable."""
     assert repo_snapshot.render(["app/auth.py"]) == repo_snapshot.render(["app/auth.py"])
+
+
+# ── the after-view must apply DELETIONS, not just additions ───────────────────
+#
+# The first version of `apply_diff` appended `+` lines and ignored `-` lines, so a
+# removal-only diff produced an after-view byte-identical to the before-view -- under
+# a heading telling the reviewer it was what the change would leave behind. MEASURED:
+#
+#     before:  AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+#     diff:    -AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+#     after:   AWS_KEY = "AKIAIOSFODNN7EXAMPLE"   <- still there
+#
+# That is the poisoned run's exact revision shape, and it had no test at all.
+
+
+def test_a_removed_line_is_gone_from_the_after_view():
+    """THE test. The reviewer asked for the credential out; it must read as out."""
+    before = {"app/auth.py": 'import os\nAWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'}
+    diff = (
+        "--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1,2 +1,1 @@\n"
+        " import os\n"
+        '-AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+    )
+    after = repo_snapshot.apply_diff(before, diff)["app/auth.py"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in after, (
+        f"a line the diff REMOVES is still in the after-view. The reviewer would "
+        f"object again to a credential the developer had already taken out, and the "
+        f"revision cap would expire on a correct change. Got:\n{after!r}"
+    )
+    assert "import os" in after, "an untouched line was dropped"
+
+
+def test_a_replacement_shows_the_new_line_and_not_the_old():
+    before = {"app/auth.py": 'import os\nAWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'}
+    diff = (
+        "--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1,2 +1,2 @@\n"
+        " import os\n"
+        '-AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'
+        '+AWS_KEY = os.environ["AWS_KEY"]\n'
+    )
+    after = repo_snapshot.apply_diff(before, diff)["app/auth.py"]
+    assert "AKIAIOSFODNN7EXAMPLE" not in after, "the replaced line survived"
+    assert "os.environ" in after, "the replacement line is missing"
+
+
+def test_a_created_file_is_its_added_lines():
+    """Nothing to merge into, so the added lines are the whole file."""
+    after = repo_snapshot.apply_diff(
+        {},
+        "--- /dev/null\n+++ b/tests/test_rate.py\n@@ -0,0 +1 @@\n+def test_x():\n",
+    )
+    assert "tests/test_rate.py" in after
+    assert "def test_x():" in after["tests/test_rate.py"]
+
+
+def test_a_file_the_diff_never_mentions_is_untouched():
+    """The after-view must not rewrite files outside the change."""
+    before = {"README.md": "# auth-service\n", "app/auth.py": "import os\n"}
+    diff = "--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n import os\n+import redis\n"
+    after = repo_snapshot.apply_diff(before, diff)
+    assert after["README.md"] == "# auth-service\n"
+
+
+def test_an_unparseable_diff_leaves_the_files_alone():
+    """Better the before-view than nothing. `added_files` raises here."""
+    before = {"app/auth.py": "import os\n"}
+    assert repo_snapshot.apply_diff(before, "not a diff at all\n") == before
+
+
+def test_the_after_view_does_not_mutate_the_caller_s_files():
+    """A reviewer's after-view must not leak into the next agent's before-view."""
+    before = {"app/auth.py": 'AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n'}
+    original = dict(before)
+    repo_snapshot.apply_diff(
+        before,
+        '--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +0,0 @@\n-AWS_KEY = "AKIAIOSFODNN7EXAMPLE"\n',
+    )
+    assert before == original, "apply_diff mutated its input"

@@ -297,6 +297,21 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     print(f"state={ref}")
     print(f"_source={state.model_provenance or 'none'}")
 
+    # THE ENDING, REPORTED TO THE ISSUE AND THE ISSUE CLOSED — once, at the one
+    # place every terminal stage passes through.
+    #
+    # `_emit` is the single writer on this path, so a report here covers all of them:
+    # a block at `develop`, a revision cap, an SRE no_go, a human refusal recorded by
+    # a rejection recorder, and a promotion. Written per-stage instead, the poisoned
+    # ending -- the one the demo exists to show -- would be the likeliest to be
+    # forgotten, because it is the only one that exits early.
+    #
+    # GATED ON A TERMINAL STATUS. Every stage calls `_emit`, and most of them leave
+    # the run `running`; reporting there would post an outcome comment after each of
+    # seven jobs and close the issue before the work had finished.
+    if state.status in _TERMINAL_STATUSES:
+        github_ops.report_outcome(state)
+
 
 def _stage_plan(args: argparse.Namespace) -> int:
     """PLAN. The only stage that creates a RunState rather than loading one.

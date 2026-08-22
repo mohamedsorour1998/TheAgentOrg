@@ -108,6 +108,18 @@ _PROMOTED_RUN_COMMENTS = {
     "gate2": 1,
     "sre": 1,
     "gate3": 1,
+    # The run's ENDING, posted to the issue that asked for the work and closing it.
+    #
+    # Added because an issue previously learned only how a run BEGAN -- plan and
+    # gate1 -- while everything after landed on the pull request. The issue stayed
+    # open forever with no statement of whether the change shipped. On a poisoned run
+    # that is the worst case: the block is the whole point, and the issue that asked
+    # for the work never learned it had been refused.
+    #
+    # Exactly one, from `run_pipeline`'s `finally` locally and from `_emit` on the
+    # cloud path -- the single writer each path already has. Two would mean a stage
+    # reported an ending that was not the run's.
+    "outcome": 1,
 }
 
 # The five AGENTS, which is what the plan's Task 4 is named for. Asserted
@@ -142,12 +154,27 @@ def _by_stage(posted: list[str]) -> dict[str, list[str]]:
 
 
 def _capture(monkeypatch) -> list[str]:
-    """Record every body graph.py posts, in order, and hand back a delivered ref.
+    """Record every body a run posts, in order, and hand back a delivered ref.
 
     Patched as a module ATTRIBUTE on github_ops because that is how graph.py
     reaches it -- `github_ops.post_comment(...)`, resolved at call time. The
     signature matches the real one so a call shape graph.py cannot actually make
     would fail here rather than silently working.
+
+    TWO WRITERS, NOT ONE, and this list must see both. `report_outcome` reaches the
+    surface WITHOUT going through `post_comment`, on purpose: it always means the
+    issue, while `_destination` would send anything after `open_pr` to the pull
+    request. So a capture patched only at `post_comment` stops seeing the run's
+    ending -- measured, `test_every_agent_stage_posts_its_output` reported
+    `these stages posted nothing: ['outcome']` against a run that posted it fine.
+
+    `_note_locally` is the second patch rather than `report_outcome` itself, so the
+    real body is still assembled by the real code: stubbing `report_outcome` would
+    make every assertion about the outcome comment's CONTENT an assertion about this
+    file. It is `report_outcome`'s offline writer, and this suite is offline by
+    conftest guard 2, so that branch is the one taken. Nothing else can reach it here
+    -- `post_comment` is the only other caller and it is stubbed above -- so the two
+    patches cannot double-record one comment.
     """
     posted: list[str] = []
 
@@ -155,7 +182,12 @@ def _capture(monkeypatch) -> list[str]:
         posted.append(body)
         return f"local://captured/{len(posted)}"
 
+    def _record_note(state, body, destination, ref):
+        posted.append(body)
+        return f"local://captured/{len(posted)}"
+
     monkeypatch.setattr(github_ops, "post_comment", _record)
+    monkeypatch.setattr(github_ops, "_note_locally", _record_note)
     return posted
 
 
@@ -258,8 +290,13 @@ def test_the_plan_comment_is_posted_before_the_develop_comment(monkeypatch,
 
     order = [_stage_of(body) for body in posted]
     assert "" not in order, f"an unlabelled comment breaks this ordering: {order}"
+    # `outcome` is LAST, and that position is the whole point of it rather than an
+    # artefact of where the call happens to sit. It reports how the run ENDED, so a
+    # stage posting after it would leave a reader the run's ending followed by more
+    # work -- and `run_pipeline` posts it from a `finally`, which is what makes the
+    # position hold on the failure paths too, not only this promoted one.
     assert order == ["plan", "gate1", "develop", "review",
-                     "security", "gate2", "sre", "gate3"], order
+                     "security", "gate2", "sre", "gate3", "outcome"], order
 
 
 # =========================================================================
@@ -461,7 +498,26 @@ def test_the_offline_notes_record_which_target_each_comment_was_for(provenance):
 
     run_pipeline("T-1", TICKET_TEXT)
 
-    assert _notes_targets() == ["issue", "issue"] + ["pull request"] * 6
+    # `outcome` reads `issue`, NOT `pull request`, and that is the assertion this
+    # test earns its place with. Offline both surfaces are one file, so the header
+    # marker is the only witness to the split -- and `report_outcome` runs after
+    # `open_pr`, where `_destination` would say `pull request`. It goes to the issue
+    # deliberately (that is the surface a reader returns to), so a `pull request`
+    # here would mean the NOTES file describes a routing the online path does not do.
+    #
+    # The message is spelled out because pytest's own diff truncates both lists to
+    # `['issue', 'is...request', ...]` -- measured, on the very mutation this pins --
+    # which names neither the position that differs nor what it should have been.
+    expected = ["issue", "issue"] + ["pull request"] * 6 + ["issue"]
+    actual = _notes_targets()
+    assert actual == expected, (
+        f"the NOTES headers name the wrong destinations.\n"
+        f"  expected: {expected}\n"
+        f"  actual:   {actual}\n"
+        f"The last entry is `outcome`, which must read `issue`: it runs after "
+        f"`open_pr`, so routing it through `post_comment` would stamp it "
+        f"`pull request` while the online path posts it to the issue."
+    )
 
 
 # The real open_pr, captured at import BEFORE any test patches it. Read at call
@@ -562,7 +618,14 @@ def test_plan_and_gate1_land_on_the_issue_and_the_rest_on_the_pr(monkeypatch,
         by_target.setdefault(number, []).append(_stage_of(body))
 
     assert set(by_target) == {ISSUE_NUMBER, PR_NUMBER}, sorted(by_target)
-    assert by_target[ISSUE_NUMBER] == ["plan", "gate1"], by_target[ISSUE_NUMBER]
+    # `outcome` belongs on the ISSUE, with plan and gate1, and it is deliberately
+    # NOT routed through `_destination` like every stage comment is. The issue is the
+    # surface that stays open and that a reader returns to; an ending posted only to
+    # the pull request leaves the issue with no statement of what happened -- which is
+    # the gap `report_outcome` exists to close.
+    assert by_target[ISSUE_NUMBER] == ["plan", "gate1", "outcome"], (
+        by_target[ISSUE_NUMBER]
+    )
     assert by_target[PR_NUMBER] == ["develop", "review", "security",
                                     "gate2", "sre", "gate3"], by_target[PR_NUMBER]
 

@@ -1057,9 +1057,20 @@ def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None,
             return comment_ref
         return f"local://captured/{len(posted)}"
 
+    def _record_note(state, body, destination, ref):
+        """`report_outcome`'s offline writer, which does NOT go through post_comment.
+
+        Same reason as `_capture` in tests/test_agent_comments.py: the outcome comment
+        always means the ISSUE, so it bypasses `_destination` -- and a harness patched
+        only at `post_comment` stops seeing the run's ending while every stage comment
+        still records, which reads as "no outcome was posted".
+        """
+        return _record(state, body)
+
     # Patched on github_ops as a module attribute, because that is how graph.py's
     # comment helpers reach it -- resolved at call time.
     monkeypatch.setattr(module.github_ops, "post_comment", _record)
+    monkeypatch.setattr(module.github_ops, "_note_locally", _record_note)
 
     if never_approves:
         # The SHIPPED fixtures approve on the first pass -- measured:
@@ -1115,7 +1126,13 @@ def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None,
 # reviewer NEVER approves is a different shape and needs its OWN expectation:
 # the promoted dict declares `develop: 1, review: 1`, so it cannot describe a
 # capped run and must not be stretched to try. See the multi-pass test below.
-_CAPPED_RUN_STAGE_COMMENTS = {"plan", "gate1", "develop", "review", "security"}
+#
+# `outcome` is here for the same reason it is in the promoted dict: `_emit` posts the
+# run's ending on every terminal status, and a capped run is terminal (`failed`). An
+# ending posted only on the happy path would be missing from exactly the runs a reader
+# most needs it on -- the ones that did not ship.
+_CAPPED_RUN_STAGE_COMMENTS = {"plan", "gate1", "develop", "review", "security",
+                              "outcome"}
 
 
 def test_the_cloud_paths_revision_loop_renders_each_pass_not_the_last_one(

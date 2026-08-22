@@ -453,6 +453,21 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
     finally:
         state.model_provenance = llm.last_source() or ""
         gates.save(state)
+        # THE ENDING, REPORTED TO THE ISSUE THAT ASKED FOR IT, and closed.
+        #
+        # In the `finally` beside `gates.save` for the same reason that call is here:
+        # `_walk` has seven `return state` exits, and a report at each would be seven
+        # chances to forget one -- so the poisoned ending, the one that matters most,
+        # would be the likeliest to go unreported.
+        #
+        # AFTER `gates.save`, deliberately. The saved state is the run's record; the
+        # comment is a rendering of it. If the report somehow failed loudly the record
+        # would still be on disk.
+        #
+        # `report_outcome` never raises, so this cannot swallow an exception `_walk`
+        # was propagating -- a `finally` that raises replaces the original error, and
+        # losing a real traceback to a failed comment would be the worse trade.
+        github_ops.report_outcome(state)
 
 
 def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:

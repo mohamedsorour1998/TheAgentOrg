@@ -202,9 +202,25 @@ def open_pr(state: RunState) -> DevResult:
 
     # 3. Open the PR (reuse the open one if this branch already has it).
     try:
+        # THE BODY CARRIES A CLOSING KEYWORD, which is what makes GitHub link the
+        # pull request to the issue in the issue's own Development sidebar.
+        #
+        # Without it the two are related only by a number in a title, so an issue
+        # gives a reader no way to reach the work it produced -- and the issue is the
+        # surface this pipeline is judged on. `Closes #N` is GitHub's own mechanism:
+        # it populates the sidebar, and it closes the issue when the PR merges.
+        #
+        # Only when the ticket id IS an issue number. `_issue_number` refuses
+        # anything else, deliberately, because a loose parse would attach this PR to
+        # whichever issue happened to match -- see its own comment.
+        issue_number = _issue_number(state.ticket_id)
+        body = dev.summary
+        if issue_number is not None:
+            body = f"{dev.summary}\n\nCloses #{issue_number}"
+
         pr = repo.create_pull(
             title=message,
-            body=dev.summary,
+            body=body,
             head=branch,
             base="main",
         )
@@ -377,6 +393,48 @@ def _comment_on_issue(state: RunState, body: str, ref: str) -> str:
         return _undelivered(f"comment on issue #{number}", exc, body, ref)
 
 
+def _note_locally(state: RunState, body: str, destination: str, ref: str) -> str:
+    """Append one comment to the offline NOTES file. Cannot raise; see post_comment.
+
+    THE ONE WRITER of that file, and it takes `destination` as an argument rather
+    than deriving it, because its two callers disagree about the answer and both are
+    right: `post_comment` asks `_destination(state)`, while `report_outcome` always
+    means the ISSUE even though a PR exists by then.
+
+    Extracted for that disagreement alone. Left inline, `report_outcome` had to go
+    through `post_comment` to reach this file, which stamped its entry `pull request`
+    while the online path posted the same comment to the issue -- so the NOTES file,
+    whose header marker exists to make the issue/PR split observable offline, would
+    have been recording a destination the online path does not use. A marker that can
+    disagree with the behaviour it describes is worse than no marker.
+
+    Wrapped, and this is the branch that matters most: the demo command is
+    `OFFLINE=true`, so an unwritable NOTES path -- a read-only workspace, a stale
+    directory sitting where the file should be, a full disk -- is a traceback on the
+    path stage actually takes. Measured before this guard existed:
+    `OFFLINE=true python -m agentorg.graph --poisoned` exited 1 with IsADirectoryError,
+    on a run that had correctly blocked.
+    """
+    try:
+        # `or "."` because dirname("NOTES.md") is "", and makedirs("") raises.
+        os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
+        with open(config.OFFLINE_NOTES, "a") as fh:
+            fh.write(f"\n## {state.ticket_id} ({state.run_id}) → {destination}"
+                     f"\n{body}\n")
+    except Exception as exc:
+        # Inline and at DEBUG: this is the "demote, don't drop" half, and it is also
+        # what satisfies BLE001 -- the rule wants a logging call carrying exc_info in
+        # the handler itself, which a call to _undelivered would not provide.
+        logging.getLogger(__name__).debug("post_comment failure traceback",
+                                          exc_info=True)
+        return _undelivered("write the comment to the offline NOTES file",
+                            exc, body, ref)
+    # Only now -- a local:// ref means the bytes are on disk. Returning it from
+    # anywhere above would be the artifact claiming a delivery that did not happen,
+    # which is worse than the silence this replaced.
+    return f"local://{config.OFFLINE_NOTES}"
+
+
 def post_comment(state: RunState, body: str, finding: Finding | None = None) -> str:
     """Post a comment on this run's PR, or on its issue. Returns a comment ref.
 
@@ -445,38 +503,12 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
 
     if _use_local():
         # No network (or no credentials): append the body to a local NOTES file.
-        # `or "."` because dirname("NOTES.md") is "", and makedirs("") raises.
         #
-        # THE HEADER NAMES THE DESTINATION. Offline there is no issue and no PR,
-        # so both surfaces collapse onto this one file -- and without the word,
-        # the issue/PR split would be unobservable on the path the demo and the
-        # whole suite actually run, leaving it pinned by the online tests alone.
-        #
-        # Wrapped for the same reason the online branch is, and this is the
-        # branch that matters more: the demo command is `OFFLINE=true`, so an
-        # unwritable NOTES path -- a read-only workspace, a stale directory
-        # sitting where the file should be, a full disk -- is a traceback on
-        # the path stage actually takes. Measured before this guard existed:
-        # `OFFLINE=true python -m agentorg.graph --poisoned` exited 1 with
-        # IsADirectoryError, on a run that had correctly blocked.
-        try:
-            os.makedirs(os.path.dirname(config.OFFLINE_NOTES) or ".", exist_ok=True)
-            with open(config.OFFLINE_NOTES, "a") as fh:
-                fh.write(f"\n## {state.ticket_id} ({state.run_id}) → {destination}"
-                         f"\n{body}\n")
-        except Exception as exc:
-            # Inline and at DEBUG: this is the "demote, don't drop" half, and
-            # it is also what satisfies BLE001 -- the rule wants a logging call
-            # carrying exc_info in the handler itself, which a call to
-            # _undelivered would not provide.
-            logging.getLogger(__name__).debug("post_comment failure traceback",
-                                              exc_info=True)
-            return _undelivered("write the comment to the offline NOTES file",
-                                exc, body, ref)
-        # Only now -- a local:// ref means the bytes are on disk. Returning it
-        # from anywhere above would be the artifact claiming a delivery that
-        # did not happen, which is worse than the silence this replaced.
-        return f"local://{config.OFFLINE_NOTES}"
+        # THE HEADER NAMES THE DESTINATION. Offline there is no issue and no PR, so
+        # both surfaces collapse onto this one file -- and without the word, the
+        # issue/PR split would be unobservable on the path the demo and the whole
+        # suite actually run, leaving it pinned by the online tests alone.
+        return _note_locally(state, body, destination, ref)
 
     if destination == ON_ISSUE:
         return _comment_on_issue(state, body, ref)
@@ -746,6 +778,137 @@ def merge_pr(state: RunState) -> str:
         # the ref so the log row can say what went wrong.
         logging.getLogger(__name__).debug("merge failed", exc_info=True)
         return f"merge://failed/{type(exc).__name__}"
+
+
+# How a run's ending reads on the issue that started it. Keyed on RunState.status.
+#
+# READ WITH `.get` AND AN EXPLICIT UNKNOWN DEFAULT, not `[]`. A KeyError here would
+# be raised from a function whose whole contract is that it cannot raise -- the last
+# thing a run does, after the status is already decided -- so a status this table has
+# never seen would lose the run's ending in order to complain about not recognising
+# it. The default names the status verbatim instead, which is strictly more useful
+# than a traceback naming a dict lookup. Same reasoning as
+# `compute_security_verdict`'s threshold, and the opposite conclusion, because that
+# one is a knob validated at import while this one is a value already in hand.
+_OUTCOME_HEADLINE = {
+    "promoted": ("✅ ACCEPTED", ("the change was reviewed, scanned, approved at "
+                                "three gates and merged")),
+    "blocked": ("⛔ REJECTED", ("the deterministic security rule blocked this "
+                               "change; it was not merged")),
+    "rejected": ("✗ REJECTED", "a human declined this change at a gate"),
+    "failed": ("✗ NOT MERGED", ("the change did not earn approval, so it was not "
+                                "merged")),
+    "running": ("… INCOMPLETE", "this run did not reach an ending"),
+}
+
+# Which endings close the issue. A run that is still `running` closes nothing, and a
+# blocked run DOES close its issue: the pipeline reached a verdict and that verdict
+# was no, which is an answer rather than an abandonment. Leaving it open would imply
+# the work is still pending.
+_CLOSING_STATUSES = frozenset({"promoted", "blocked", "rejected", "failed"})
+
+
+def report_outcome(state: RunState) -> str:
+    """Post the run's ending to the issue and close it. NEVER raises.
+
+    WHY THIS EXISTS. The issue is where a reader starts, and until now a run told it
+    only how things BEGAN -- the plan and the gate1 decision. Everything after that
+    landed on the pull request, so an issue was left open forever with no statement of
+    what happened, whether the change shipped, or why it did not. On a poisoned run
+    that is the worst case: the block is the whole point, and the issue that asked for
+    the work never learned it had been refused.
+
+    Closed as `completed` for a promoted change and `not_planned` for every other
+    ending, which is GitHub's own distinction between "this got done" and "this will
+    not be done". A reader scanning a list of issues sees the difference without
+    opening one.
+
+    NEVER RAISES, the same contract as `post_comment` and `merge_pr`, and for the same
+    reason: this is the last thing a run does, after the status is already decided.
+    An exception here would lose the run's ending to report a failure to report it.
+    """
+    headline, detail = _OUTCOME_HEADLINE.get(
+        state.status, ("… UNKNOWN", f"run ended with status {state.status!r}")
+    )
+
+    # The literal, not graph.COMMENT_HEADER, because graph imports THIS module and
+    # the reverse import would be a cycle. Restated rather than moved, because moving
+    # it would touch seven renderers days before the demo; the drift risk is real and
+    # a test asserts the two agree.
+    lines = ["### Agent Org · outcome", "", f"**{headline}** — {detail}", ""]
+
+    if state.security is not None:
+        provenance = state.security.scan_provenance or "unknown"
+        lines.append(
+            f"- security: `{state.security.verdict}` "
+            f"({len(state.security.blocking)} blocking, provenance: {provenance})"
+        )
+        for finding in state.security.blocking:
+            lines.append(
+                f"    - `{finding.tool}` **{finding.rule}** at "
+                f"`{finding.file}:{finding.line}`"
+            )
+    if state.sre is not None:
+        lines.append(f"- sre: `{state.sre.verdict}` (CI: {state.sre.ci_status})")
+    if state.review is not None:
+        lines.append(
+            f"- review: `{state.review.verdict}` after "
+            f"{state.revision_count + 1} pass(es)"
+        )
+    if state.dev is not None and state.dev.pr_url:
+        lines.append(f"- pull request: {state.dev.pr_url}")
+    if state.decisions:
+        approved = [d.gate for d in state.decisions if d.decision != "rejected"]
+        lines.append(f"- human gates passed: {', '.join(approved) or '(none)'}")
+
+    lines.append("")
+    lines.append(f"_run `{state.run_id}` · source: {state.model_provenance or 'unknown'}_")
+
+    body = "\n".join(lines)
+    number = _issue_number(state.ticket_id)
+
+    # STRAIGHT TO THE ISSUE ON BOTH PATHS, not through `post_comment`.
+    #
+    # `post_comment` routes by `_destination`, which sends anything after `open_pr` to
+    # the PULL REQUEST -- correct for every stage comment, and wrong for exactly this
+    # one. The issue is the surface that stays open and that a reader returns to; an
+    # outcome posted only to the PR leaves the issue with no ending, which is the gap
+    # this function was added to close.
+    #
+    # So the offline branch calls `_note_locally` with ON_ISSUE explicitly rather than
+    # going through `post_comment` and inheriting `pull request`. Offline the two
+    # surfaces are one file, but its header names the destination, and a header saying
+    # `pull request` for a comment the online path puts on the issue would make the
+    # NOTES file disagree with the behaviour it exists to make observable.
+    ref = f"comment://{state.run_id}"
+    if _use_local():
+        ref = _note_locally(state, body, ON_ISSUE, ref)
+    elif number is None:
+        print(f"[report_outcome] ticket {state.ticket_id!r} is not an issue number; "
+              f"outcome to stdout instead:\n{body}")
+    else:
+        # `_comment_on_issue` is the same helper the plan and gate1 comments use, so
+        # this inherits their never-raises behaviour.
+        ref = _comment_on_issue(state, body, ref)
+
+    if _use_local() or number is None or state.status not in _CLOSING_STATUSES:
+        return ref
+
+    try:
+        issue = _repo().get_issue(number)
+        issue.edit(
+            state="closed",
+            state_reason="completed" if state.status == "promoted" else "not_planned",
+        )
+    except Exception:
+        # The comment above is the load-bearing half; an issue left open is untidy,
+        # not wrong. Logged with the traceback rather than raised, because the run has
+        # already finished and there is nothing left to abort.
+        logging.getLogger(__name__).debug(
+            "could not close issue #%s", number, exc_info=True
+        )
+
+    return ref
 
 
 # The five AgentCore runtimes this repo deploys, in the order the spec prints# them (docs/plan/mariam/week3.md:118-131). UNDERSCORED on purpose: these are

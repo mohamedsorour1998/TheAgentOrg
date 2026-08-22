@@ -229,13 +229,26 @@ def apply_diff(files: dict[str, str], diff: str | None) -> dict[str, str]:
     "missing import for the authenticate function" about an import three lines above
     the hunk.
 
-    Implemented by walking the hunks rather than shelling out to `git apply`, because
-    a model-written diff routinely has line numbers that do not line up -- `git apply`
-    refuses those outright, and refusing is the wrong answer here. An approximate
-    after-view is far more useful to a reviewer than none.
+    DELETIONS ARE APPLIED, and the first version of this did not apply them. That
+    version appended `+` lines and ignored `-` lines entirely, so a removal-only diff
+    produced an after-view byte-identical to the before-view -- under a heading
+    promising the reader it was what the change would leave behind. MEASURED:
 
-    A file the diff creates appears with only its added lines, which is correct: there
-    was nothing to merge them into.
+        before:  AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+        diff:    -AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
+        after:   AWS_KEY = "AKIAIOSFODNN7EXAMPLE"   <- still there
+
+    That is the poisoned run's exact revision shape: the reviewer correctly asks for
+    the credential to be removed, the developer complies, and the reviewer is then
+    shown a file that still contains it -- so it objects again to a problem already
+    fixed, and the revision cap expires on a change that was correct. The block
+    verdict is unaffected either way, because the scanners read the diff rather than
+    this view, so the cost is a `failed` run rather than a false pass.
+
+    Removed lines are matched by CONTENT, not by line number. A model-written diff's
+    `@@` offsets are unreliable -- `git apply` refuses such diffs outright, and
+    refusing is the wrong answer here -- but a `-` line quotes the text it removes
+    verbatim, so the content is trustworthy where the position is not.
     """
     if not diff:
         return files
@@ -243,27 +256,67 @@ def apply_diff(files: dict[str, str], diff: str | None) -> dict[str, str]:
     try:
         added = added_files(diff)
     except Exception:
-        # `added_files` raises on a diff it cannot parse at all. The reviewer is
-        # better served by the unpatched files than by nothing.
+        # `added_files` raises on a diff with no recognised header. The reviewer is
+        # better served by the unpatched files than by nothing at all.
         logging.getLogger(__name__).debug("apply_diff: unparseable", exc_info=True)
         return files
 
+    removed = _removed_lines(diff)
     out = dict(files)
-    for path, new_lines in added.items():
+
+    for path in set(added) | set(removed):
         if path not in out:
-            # A new file: its added lines ARE its contents.
-            out[path] = new_lines
+            # A new file: its added lines ARE its contents, and there is nothing to
+            # remove from.
+            out[path] = added.get(path, "")
             continue
-        # An edit. The added lines are appended with a marker rather than spliced at
-        # a line number, because the model's hunk offsets are not reliable enough to
-        # splice on -- and a WRONGLY placed line would mislead the reviewer more than
-        # an honestly-labelled appendix.
-        out[path] = (
-            f"{out[path]}\n"
-            f"# ---- lines this diff ADDS to {path} ----\n"
-            f"{new_lines}\n"
-        )
+
+        kept = [
+            line for line in out[path].splitlines()
+            if line.strip() not in removed.get(path, frozenset())
+        ]
+        new_lines = added.get(path, "")
+        if new_lines:
+            # Appended with a marker rather than spliced at a line number, for the
+            # reason above: the position is a guess, the content is not. Labelling it
+            # honestly beats placing it wrongly.
+            kept.append(f"# ---- lines this diff ADDS to {path} ----")
+            kept.extend(new_lines.splitlines())
+        out[path] = "\n".join(kept) + "\n"
+
     return out
+
+
+def _removed_lines(diff: str) -> dict[str, frozenset[str]]:
+    """`{path: stripped text of each line the diff removes}`.
+
+    Keyed on stripped content so a line's indentation changing between the clone and
+    the diff cannot hide a removal. The cost is that a duplicated line removes both
+    copies from the view -- acceptable, because the alternative is showing the
+    reviewer a credential the change deletes.
+
+    Mirrors `added_files`'s header handling rather than reusing it, because that
+    function returns bodies and this needs a membership test. `-` lines before the
+    first header belong to no file and are dropped, exactly as its `+` lines are.
+    """
+    out: dict[str, set[str]] = {}
+    current: str | None = None
+
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].split("\t", 1)[0].strip()
+            for prefix in ("a/", "b/", "i/", "w/", "c/", "o/", "old/", "new/"):
+                if path.startswith(prefix):
+                    path = path[len(prefix):]
+                    break
+            current = None if path in ("/dev/null", "") else path
+            continue
+        if line.startswith(("---", "+++")):
+            continue
+        if current is not None and line.startswith("-") and not line.startswith("---"):
+            out.setdefault(current, set()).add(line[1:].strip())
+
+    return {path: frozenset(lines) for path, lines in out.items()}
 
 
 def render(paths: list[str] | None = None, diff: str | None = None) -> str:

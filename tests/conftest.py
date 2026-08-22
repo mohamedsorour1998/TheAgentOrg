@@ -312,3 +312,45 @@ def _scanner_cache_is_per_test_suite_wide():
     reset_scanner_cache()
     yield
     reset_scanner_cache()
+
+
+# ── SEAM 6: the repository clone ──────────────────────────────────────────────
+#
+# THE SAME SHAPE AS SEAM 2, ON A NEW SEAM, AND IT WAS MEASURED BEFORE THIS EXISTED.
+# `agentorg/repo_snapshot.py` shallow-clones the target repository so every agent can
+# see it. Nothing stopped that reaching the network from a test:
+#
+#   ['git', 'clone', '--depth', '1', '--no-tags', '--single-branch',
+#    'https://github.com/someone/auth-service.git', '/var/folders/.../agentorg-snapshot-…']
+#
+# Three tests set GITHUB_REPO to a non-empty value and then drive `run_pipeline`, so
+# the suite made real outbound clones to github.com -- which is guard 2's history
+# repeating: four connections to api.github.com per run, before anyone noticed.
+#
+# Stubbed at `snapshot`, not at `subprocess`, deliberately. Patching subprocess would
+# leave `_read_tree` walking a directory that does not exist and test our git
+# invocation rather than what the agents do with the result -- and what the agents do
+# with it is where every measured defect was.
+#
+# Cleared on BOTH sides for seam 5's reason: the module memoises with a TTL, so an
+# entry inherited from an earlier test is indistinguishable from a fresh clone.
+#
+# A test that wants the real thing replaces this in its own body, as
+# tests/test_repo_snapshot.py does with a marker. Opting in through the marker rather
+# than by deleting this fixture keeps the default safe for the other 1,000-odd tests.
+@pytest.fixture(autouse=True)
+def _repository_snapshot_is_never_a_real_clone(request, monkeypatch):
+    """No test clones the target repository. See the note above.
+
+    A test marked `real_snapshot` opts out, because it is exercising `snapshot`
+    itself -- its cache, its TTL, its failure paths -- and those tests stub
+    `subprocess.run` in their own bodies, so they never reach the network either. A
+    stub here would make them assert against the stub instead of the code.
+    """
+    from agentorg import repo_snapshot
+
+    repo_snapshot.reset_cache()
+    if request.node.get_closest_marker("real_snapshot") is None:
+        monkeypatch.setattr(repo_snapshot, "snapshot", dict)
+    yield
+    repo_snapshot.reset_cache()
