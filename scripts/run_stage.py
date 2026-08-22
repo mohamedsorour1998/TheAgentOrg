@@ -213,40 +213,52 @@ def _log(state: RunState, actor, stage, action, verdict="", summary="",
 
 
 def _load(run_id: str) -> RunState:
-    """Reload the state a previous job uploaded.
+    """Reload the state a previous job uploaded, from whichever backend holds it.
 
-    Read through gates' own path helper, not by string-building a filename, so
-    the location stays a single definition.
+    Read through `gates.load`, which dispatches on `config.STATE_BACKEND` and
+    handles both -- not through `gates._state_path`, which refuses on `dynamodb`
+    BY DESIGN (gates.py:116-121) and whose own docstring names this module as the
+    caller that should use `gates.load`.
 
-    CORRECTED 2026-08-21: an earlier version of this docstring claimed Task 6
-    moves this to DynamoDB "by changing gates.py alone". That was never true, and
-    it is worth stating rather than deleting so the next reader knows the file
-    once asserted the opposite. MEASURED with STATE_BACKEND=dynamodb, this
-    function raises:
+    CORRECTED 2026-08-22, twice, and both corrections are stated rather than
+    deleted because each was load-bearing prose a reader would have taken on
+    trust. An earlier version claimed Task 6 moves this to DynamoDB "by changing
+    gates.py alone" -- never true. Its replacement then recorded, correctly, that
+    this function RAISED on the dynamodb backend, and called that KNOWN DEBT
+    deliberately unfixed:
 
         RuntimeError: there is no state FILE on the 'dynamodb' backend; the run's
-        state is an item in 'theagentorg-runs'. Read it with gates.load(run_id) ...
+        state is an item in 'theagentorg-runs'. Read it with gates.load(run_id)...
 
-    `gates._state_path` refuses on that backend BY DESIGN (gates.py:116-121), and
-    gates.py:78-79 names this module as the caller that should use `gates.load`.
-    KNOWN DEBT, deliberately not fixed before the Aug 25 demo: the fix is to read
-    through `gates.load(run_id)` and turn its FileNotFoundError into the
-    SystemExit below, but that path has no test and this is the one script the
-    whole cloud run depends on. run-pipeline.yml sets no STATE_BACKEND, so the
-    demo runs on the `local` default and never reaches the broken path.
+    MEASURED with `STATE_BACKEND=dynamodb`, that was every cloud stage after
+    `plan`. It is fixed now, and it was three lines rather than the rewrite that
+    docstring implied, because `gates.load` already did the dispatch.
+
+    THE REFUSAL FOR AN ABSENT RUN IS UNCHANGED, and it is the half worth being
+    careful about. `gates.load` raises FileNotFoundError on BOTH backends for a
+    run that does not exist -- deliberately the same exception -- and that is
+    turned into the named SystemExit below rather than into a fresh RunState. A
+    fresh RunState would start a new run and report success for work it invented,
+    silently discarding every approval already recorded, with the job green.
     """
-    path = gates._state_path(run_id)
-    if not path.is_file():
+    try:
+        return gates.load(run_id)
+    except FileNotFoundError as absent:
         # Named loudly. The likeliest cause is a broken artifact handoff --
         # an upload that published nothing, or a download that was removed from
         # the next job -- and "no state" must not be recoverable-looking, or a
         # stage would start a fresh run and report success for work it invented.
+        #
+        # The message keeps the words "no state file" for the local backend even
+        # though `gates.load` now also serves dynamodb, where there is no file:
+        # `gates.load`'s own exception text is interpolated and names whichever
+        # backend actually refused, so the two together are accurate on both.
+        # `tests/test_run_pipeline_workflow.py:1381` asserts on this phrase.
         raise SystemExit(
-            f"no state file at {path}: the previous stage's artifact did not "
-            f"arrive. This job cannot start a new run -- that would silently "
-            f"discard everything already approved."
-        )
-    return RunState.model_validate_json(path.read_text())
+            f"no state file or item for run {run_id!r} ({absent}): the previous "
+            f"stage's artifact did not arrive. This job cannot start a new run "
+            f"-- that would silently discard everything already approved."
+        ) from absent
 
 
 def _emit(state: RunState) -> None:
