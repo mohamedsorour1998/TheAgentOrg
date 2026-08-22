@@ -285,12 +285,38 @@ Lines 3 and 4 — the real scanners, not the fixture. `status=blocked` survived 
 the end of the run. The gates are real: a run pauses at `gate1` with the reviewer
 named and does not proceed until approved.
 
-### Wired but not yet observed firing
+### The automatic trigger, verified
 
-The automatic issue trigger is **wired** — the EventBridge rule has 1 target, the
-connection is `AUTHORIZED`, the API destination is `ACTIVE` — but **no run has
-been observed starting end to end from an opened issue**. Runs so far were
-dispatched by hand. Wired and unverified is the accurate description.
+Opening issue **#15** on `auth-service` started run `32542152671` with nobody
+typing a command. Each hop left its own evidence: the Lambda logged
+`accepted delivery e89b0238-9dc4-11f1-87a1-90dc3e86b309 (issues)`, EventBridge
+dispatched, and the run's plan job came up with `TICKET_ID: 15` and
+`TICKET_TEXT: Rate-limit the password reset endpoint`. That number is the proof the
+inputs came from the issue — nothing in this repository knows it. All seven jobs
+went green, the three gates each paused for a click, and PR **#17** carries `plan`
+and `gate1` on the issue plus six stage comments on the pull request.
+
+One thing that reads like a failure and is not: **an auto-started run still shows
+`event: workflow_dispatch`**, because EventBridge triggers the workflow through the
+same REST dispatch API that `gh workflow run` uses. No field distinguishes them.
+Read the plan job's `TICKET_ID` if you need to tell them apart.
+
+And the DLQ earned its keep on the first attempt, which is worth recording given
+the section above calls EventBridge barely justified. That dispatch failed while
+both GitHub and the Lambda reported success; the only record of why was the
+dead-letter message:
+
+```
+ApiDestination returned HTTP status 403
+{"message":"Resource not accessible by personal access token"}
+x-accepted-github-permissions: actions=write
+```
+
+The dispatch token had been narrowed to the target repo and so lost
+`actions:write` on this one. Without the DLQ, that is an opened issue that starts
+nothing, with a clean Lambda log and no error anywhere. **The token needs both
+repositories**: `auth-service` for contents/issues/pull-requests, `TheAgentOrg` for
+`actions:write`.
 
 `STATE_BACKEND=dynamodb` is known debt: `scripts/run_stage.py:_load` reaches
 `gates._state_path`, which refuses on that backend by design, so every cloud

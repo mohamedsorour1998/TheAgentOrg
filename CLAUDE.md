@@ -61,11 +61,56 @@ and the plan and gate1 comments go nowhere, silently, while every job stays gree
 The EventBridge template sends the real number, so the auto-triggered path is
 correct; a hand dispatch with a label is not.
 
-**Still unverified:** the automatic trigger has never been observed firing a run
-from an opened issue. It is fully wired — the rule has 1 target, the connection is
-`AUTHORIZED`, the API destination `ACTIVE` — but wired is not the same as observed,
-and this file should not say otherwise until a run appears without a
-`gh workflow run`.
+**Still unverified:** nothing on the cloud path. The automatic trigger was the last
+open item and it is now **VERIFIED** — see below.
+
+## The automatic trigger, verified 2026-08-22
+
+Opening issue **#15** on `auth-service` started run `32542152671` with no
+`gh workflow run` anywhere. The whole chain, each hop with its own evidence:
+
+```
+issue opened
+  -> Lambda:  accepted delivery e89b0238-9dc4-11f1-87a1-90dc3e86b309 (issues)
+  -> EventBridge rule -> API destination -> POST .../dispatches
+  -> run 32542152671, plan job env:
+       TICKET_ID: 15
+       TICKET_TEXT: Rate-limit the password reset endpoint
+       POISONED: false
+  -> all seven jobs green, three gates each paused for a click
+  -> PR #17, with `plan` and `gate1` on the ISSUE and six stage comments on the PR
+  -> security: PASS, provenance: scanners
+```
+
+`TICKET_ID: 15` is the proof the inputs came from the issue rather than from a
+hand dispatch: nothing in this repository knows that number.
+
+**`event:` STILL READS `workflow_dispatch` ON AN AUTO-STARTED RUN, and that is
+correct rather than a sign it did not work.** EventBridge triggers the workflow
+through the REST dispatch API, so GitHub records the same event type it records
+for `gh workflow run`. There is no field that distinguishes them. To tell an
+auto-started run from a hand-started one, read the plan job's `TICKET_ID` — or
+just note that nobody typed anything.
+
+**THE DLQ IS WHERE A FAILED DISPATCH GOES, AND IT EARNED ITS PLACE ONCE ALREADY.**
+The first attempt failed silently as far as GitHub and the Lambda were concerned --
+both reported success -- and the only record of why was the DLQ message:
+
+```
+ERROR_MESSAGE: ApiDestination returned HTTP status 403 with payload:
+{"message":"Resource not accessible by personal access token", ...}
+x-accepted-github-permissions: actions=write
+```
+
+The dispatch token had been narrowed to the target repo, so it lost `actions:write`
+on THIS repo. Without the DLQ that is an issue that starts nothing, with a healthy
+Lambda log and no error anywhere. The README says EventBridge barely earns its
+place; this is the one thing it bought that mattered.
+
+**The token needs BOTH repositories.** `auth-service` for contents + issues + pull
+requests (the PR and every comment), and `TheAgentOrg` for `actions:write` (the
+dispatch). Scoped to one, the other half fails: narrow it to TheAgentOrg and every
+comment 403s; narrow it to auth-service and no run ever starts.
 
 ---
 
