@@ -52,13 +52,26 @@ THE FAN-OUT MEMOISES, AND WHAT IT REFUSES TO REMEMBER IS THE POINT
         and in particular the exception is NOT stored to be re-raised: a
         replayed raise is a memoised fault wearing a different hat, and it would
         keep reporting "semgrep is not installed" after semgrep was installed.
-        There is NO try/except in this module at all -- verified by AST walk,
-        zero `Try` nodes -- so the raise propagates untouched and the store line
-        below it is simply never reached. agents/security.py catches it and falls
-        back to the fixture verdict, unchanged. An earlier version of this
-        paragraph said "the `try` below has no `except`", which sent a reader
-        hunting for a construct that was never here; the absence of the handler
-        is the stronger property, so it is now what this says.
+        agents/security.py catches the raise and falls back to the fixture
+        verdict, unchanged.
+
+        THE FAN-OUT NOW CATCHES `FileNotFoundError` PER WRAPPER, and that is a
+        2026-08-22 change to what this paragraph used to claim. It said there was
+        NO try/except in this module at all -- verified by AST walk, zero `Try`
+        nodes -- and treated that as the property worth stating. It was, until
+        the absence of any handler turned out to mean the FIRST absent scanner
+        ended the loop: semgrep is first, so its raise discarded gitleaks' and
+        trivy's findings AND their blocking faults. See the comment in
+        `run_all_scanners`. The raise still reaches agents/security.py untouched
+        whenever nothing else produced a finding, which is the case those 117
+        calls are; what changed is that the other two wrappers now run first.
+
+      * A PARTIAL FAN-OUT, which is a THIRD thing and is new with that change.
+        An absence leaves no finding behind, so a result of "semgrep absent, the
+        other two clean" passes `_is_fault_free` -- there is no rule string to
+        recognise. The store is therefore gated on `not absences` as well. Before
+        the isolation this case could not arise, because a partial result was
+        never returned at all.
 
     CONSEQUENCE WORTH KNOWING BEFORE YOU MEASURE THIS: because 117 calls raise
     and the remaining 4 return only faults, a CORRECT cache leaves the shipped
@@ -294,11 +307,64 @@ def run_all_scanners(dev: DevResult | None) -> list[Finding]:
         return _copy(cached)
 
     findings: list[Finding] = []
-    # No `except` here on purpose. An absent scanner raises, and that raise must
-    # reach agents/security.py untouched AND leave no trace here -- see the
-    # module docstring on why a stored exception is a memoised fault.
+    # PER-SCANNER ISOLATION, and the two things it deliberately does NOT change.
+    #
+    # THE DEFECT. This loop had no isolation, so the FIRST wrapper to raise ended
+    # it -- and semgrep is first. MEASURED: with semgrep absent and the other two
+    # returning critical findings, `wrappers actually invoked: ['semgrep']`, and
+    # gitleaks' and trivy's findings were discarded along with any blocking FAULT
+    # they would have reported. Worse than lost coverage: an absent semgrep in
+    # front of a BROKEN gitleaks meant gitleaks' blocking `gitleaks-scanner-error`
+    # was never produced, agents/security.py answered the raise with the fixture
+    # verdict, and the fixture verdict for a clean diff is `pass`. A broken
+    # scanner reported clean. This is not an edge case: the docstring above
+    # records 117 of 121 fan-out calls raising here, because CI installs no
+    # binaries.
+    #
+    # WHAT IS UNCHANGED, and both halves matter more than the isolation itself:
+    #
+    #   * WITH SCANNERS_REQUIRED FALSE an absent scanner still yields no finding
+    #     for that tool. `unrunnable_findings` raises for that case, so catching
+    #     the raise per-wrapper is exactly "no finding from this one".
+    #   * WITH IT TRUE an absent scanner still yields a blocking
+    #     `*-scanner-error`, because then `unrunnable_findings` RETURNS that
+    #     finding rather than raising and nothing below is involved at all.
+    #
+    # THE RE-RAISE IS WHAT KEEPS THIS FAIL-CLOSED, and dropping it would be the
+    # worst fail-open in this file. If every scanner is absent -- CI's `test` job,
+    # by design -- swallowing all three would return `[]`, and
+    # `compute_security_verdict([])` returns `("pass", [])`. Every poisoned run in
+    # CI would go green. So an absence is isolated from the OTHER WRAPPERS, not
+    # from the caller: if nothing that ran produced a finding, the collected
+    # absences are re-raised and agents/security.py falls back to the FIXTURE
+    # verdict, which still blocks a diff carrying an AWS key. That is the
+    # pre-existing behaviour, preserved.
+    #
+    # `except FileNotFoundError` is NARROW on purpose, and it is the one place in
+    # this lane where narrow is right. It is the exact type
+    # `unrunnable_findings` raises to mean "absent", i.e. a signal this module
+    # defines, not an open-ended failure surface. A broad clause here would also
+    # swallow a genuine bug inside a wrapper and turn it into "that scanner found
+    # nothing", which is the fail-open shape everything above exists to prevent.
+    # Note ruff blesses either, so this cannot be left to lint: BLE001 is
+    # satisfied by narrowing with no logging at all.
+    absences: list[FileNotFoundError] = []
     for scan in (_semgrep, _gitleaks, _trivy):
-        findings.extend(scan(dev))
+        try:
+            findings.extend(scan(dev))
+        except FileNotFoundError as exc:
+            absences.append(exc)
+
+    if absences and not findings:
+        # Nothing that ran had anything to say, so this result is
+        # indistinguishable from a clean full scan and must not impersonate one.
+        # Raising the first is enough for control flow -- agents/security.py reads
+        # the type, not the text -- but every absent tool is named in the message,
+        # because "semgrep is not installed" alone sent a reader looking at one
+        # binary when three were missing.
+        raise FileNotFoundError(
+            "; ".join(str(exc) for exc in absences)
+        ) from absences[0]
 
     # Sorted HERE, once, across all three tools -- not per-wrapper. Per-wrapper
     # sorting would leave each tool's block internally ordered and the BLOCKS in
@@ -319,6 +385,15 @@ def run_all_scanners(dev: DevResult | None) -> list[Finding]:
     # verdict is unaffected either way, since severity alone decides it.
     findings.sort(key=_sort_key)
 
-    if _is_fault_free(findings):
+    # `not absences` is the OTHER half of the store gate, and `_is_fault_free`
+    # cannot cover it. An absence produces NO finding, so a partial result --
+    # semgrep absent, the other two clean -- is fault-FREE by that test: it
+    # inspects `rule` strings and a wrapper that never ran left none to inspect.
+    # Store it and the demo's next repeat of that diff is answered from a scan
+    # that skipped a scanner, on a machine where the binary is now installed.
+    # That is the same defect the module docstring closes for faults, one level
+    # over, and it only became reachable when the isolation above made a partial
+    # result something this function can return at all.
+    if _is_fault_free(findings) and not absences:
         _CACHE[key] = _copy(findings)
     return findings

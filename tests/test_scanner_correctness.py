@@ -396,3 +396,267 @@ def test_the_two_wrappers_answer_the_same_malformed_shape_the_same_way(
         f"{trivy_verdict!r}, semgrep {semgrep_verdict!r}. That disagreement IS "
         f"the defect -- one spelling of the guard fails open."
     )
+
+
+# ==========================================================================
+# A3 -- semgrep is FIRST in the fan-out and its raise ended the loop, so the
+# other two wrappers' findings and their blocking faults were discarded.
+# ==========================================================================
+
+
+def test_one_absent_scanner_does_not_discard_the_others(monkeypatch):
+    """MEASURED: semgrep runs first and its FileNotFoundError ended the fan-out,
+    so gitleaks' and trivy's findings -- and their blocking faults -- were thrown
+    away. `wrappers actually invoked: ['semgrep']`.
+
+    `agentorg/security/__init__.py` records 117 of 121 fan-out calls taking this
+    path, because semgrep is first and CI installs no binaries. This is the
+    ordinary path, not an edge case.
+    """
+    from agentorg import security as sec
+    from agentorg.state import Finding
+
+    called: list[str] = []
+
+    def _absent(dev):
+        called.append("semgrep")
+        raise FileNotFoundError("semgrep is not installed")
+
+    def _finds(name):
+        def _scan(dev):
+            called.append(name)
+            return [Finding(tool=name, severity="critical", rule=f"{name}-r",
+                            file="app/auth.py", line=1, description="d")]
+        return _scan
+
+    monkeypatch.setattr(sec, "_semgrep", _absent)
+    monkeypatch.setattr(sec, "_gitleaks", _finds("gitleaks"))
+    monkeypatch.setattr(sec, "_trivy", _finds("trivy"))
+    sec.reset_scanner_cache()
+
+    dev = DevResult(branch="b", diff="--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n+x\n",
+                    summary="s", files_changed=["app/auth.py"])
+    try:
+        findings = sec.run_all_scanners(dev)
+    except FileNotFoundError:
+        pytest.fail(
+            f"the fan-out aborted on the first absent scanner. Wrappers invoked: "
+            f"{called}. gitleaks and trivy never ran, so their findings and any "
+            f"blocking faults were discarded -- and this is CI's normal path, not "
+            f"an edge case."
+        )
+    assert "gitleaks" in called and "trivy" in called, f"invoked only {called}"
+    tools = {f.tool for f in findings}
+    assert {"gitleaks", "trivy"} <= tools, f"findings came only from {tools}"
+
+
+def test_a_blocking_FAULT_survives_an_absence_in_an_earlier_wrapper(monkeypatch):
+    """The fail-open half of A3, and the reason it is not merely lost coverage.
+
+    semgrep ABSENT (the dev affordance, which raises) plus gitleaks BROKEN (a
+    fault, which must block). Before the fix semgrep's raise came first, so
+    gitleaks' blocking `gitleaks-scanner-error` was never produced;
+    agents/security.py answered the raise with the FIXTURE verdict, and the
+    fixture verdict for a clean diff is `pass`. A broken scanner reported clean.
+
+    Distinct from the test above, which uses ordinary findings: this one is about
+    a fault, and a fault is the thing the whole `_run.py` module exists to turn
+    into a block. It is also the case a cache must never store.
+    """
+    from agentorg import security as sec
+    from agentorg.security._run import error_finding
+
+    def _absent(dev):
+        raise FileNotFoundError("semgrep is not installed")
+
+    monkeypatch.setattr(sec, "_semgrep", _absent)
+    monkeypatch.setattr(
+        sec, "_gitleaks", lambda dev: [error_finding("gitleaks", "exit code 2")]
+    )
+    monkeypatch.setattr(sec, "_trivy", lambda dev: [])
+    sec.reset_scanner_cache()
+
+    findings = sec.run_all_scanners(_dev())
+
+    assert [f.rule for f in findings] == ["gitleaks-scanner-error"], (
+        f"a broken gitleaks behind an absent semgrep produced "
+        f"{[(f.rule, f.severity) for f in findings]}. Its fault must survive the "
+        f"earlier absence, or a broken scanner is answered by the fixture verdict "
+        f"-- which for a clean diff is `pass`."
+    )
+    verdict, _blocking = compute_security_verdict(findings, threshold="high")
+    assert verdict == "block", (
+        f"the surviving fault must BLOCK; got {verdict!r}. Surviving the loop is "
+        f"not enough if it does not reach the verdict."
+    )
+
+
+def test_a_PARTIAL_fan_out_is_never_memoised(monkeypatch):
+    """The cache interaction, which is load-bearing and which `_is_fault_free`
+    alone does NOT cover.
+
+    An absence produces NO finding, so a partial result carrying one absence and
+    clean findings from the other two is fault-FREE by `_is_fault_free`'s test --
+    it inspects `rule` strings and there is no rule to inspect for a wrapper that
+    never ran. So the store must be gated on the absence as well, or the demo's
+    next repeat of that diff is answered from a scan that skipped a scanner, on a
+    machine where the binary is now installed. That is the same defect the module
+    docstring closes for faults, one level over.
+
+    The retry is asserted by COUNTING wrapper invocations, not by comparing
+    results: an implementation that stored the partial answer and returned it
+    would produce an identical findings list, so equality proves nothing here.
+    """
+    from agentorg import security as sec
+
+    calls: list[str] = []
+
+    def _absent(dev):
+        calls.append("semgrep")
+        raise FileNotFoundError("semgrep is not installed")
+
+    def _clean(name):
+        def _scan(dev):
+            calls.append(name)
+            return [sec.Finding(tool=name, severity="low", rule=f"{name}-noop",
+                                file="app/noop.py", line=1,
+                                description="a clean scan that found something")]
+        return _scan
+
+    monkeypatch.setattr(sec, "_semgrep", _absent)
+    monkeypatch.setattr(sec, "_gitleaks", _clean("gitleaks"))
+    monkeypatch.setattr(sec, "_trivy", _clean("trivy"))
+    sec.reset_scanner_cache()
+
+    first = sec.run_all_scanners(_dev())
+    assert calls == ["semgrep", "gitleaks", "trivy"], (
+        f"the first call must fan out to all three despite the absence; got {calls!r}"
+    )
+    assert {f.rule for f in first} == {"gitleaks-noop", "trivy-noop"}, (
+        f"expected the two present scanners' findings, got "
+        f"{[(f.tool, f.rule) for f in first]}. An empty result here would make "
+        f"the cache assertion below vacuous."
+    )
+
+    sec.run_all_scanners(_dev())
+
+    assert calls == ["semgrep", "gitleaks", "trivy"] * 2, (
+        f"the second call did not re-enter the fan-out: {calls!r}. A result "
+        f"assembled from a partial fan-out was MEMOISED, so a later call on a "
+        f"machine where semgrep is installed is answered by the scan that "
+        f"skipped it. `_is_fault_free` cannot catch this -- an absence leaves no "
+        f"finding, so it inspects nothing."
+    )
+
+
+def test_every_scanner_absent_still_RAISES_so_the_fixture_answers(monkeypatch):
+    """The path 117 of 121 shipped fan-out calls take, and it must not change.
+
+    This is the one that makes the isolation safe rather than a new fail-open. If
+    the loop swallowed every absence and returned what it had, a machine with NO
+    scanners installed -- CI's `test` job, by design -- would hand back `[]`, and
+    `compute_security_verdict([])` returns `("pass", [])`. Every poisoned run in
+    CI would go green. The raise is what routes this to
+    agents/security.py's FIXTURE verdict, which still blocks a diff carrying an
+    AWS key.
+
+    So an absence is isolated from the OTHER wrappers, not from the caller.
+    """
+    from agentorg import security as sec
+
+    def _absent(tool):
+        def _scan(dev):
+            raise FileNotFoundError(f"{tool} is not installed")
+        return _scan
+
+    for name in ("_semgrep", "_gitleaks", "_trivy"):
+        monkeypatch.setattr(sec, name, _absent(name.removeprefix("_")))
+    sec.reset_scanner_cache()
+
+    with pytest.raises(FileNotFoundError) as caught:
+        sec.run_all_scanners(_dev())
+
+    message = str(caught.value)
+    for tool in ("semgrep", "gitleaks", "trivy"):
+        assert tool in message, (
+            f"the raise must name every scanner that was absent so an operator "
+            f"can see it was not just the first one. {tool!r} missing from "
+            f"{message!r}"
+        )
+
+
+def test_an_absence_with_nothing_to_show_RAISES_rather_than_reporting_pass(
+    monkeypatch,
+):
+    """A partial fan-out whose present scanners found NOTHING is indistinguishable
+    from a clean full scan, so it must not be reported as one.
+
+    semgrep absent; gitleaks and trivy present, healthy, and quiet. Returning
+    `[]` here would be `("pass", [])` from a fan-out that skipped a scanner --
+    and `[]` is precisely the shape `_run.unrunnable_findings` refuses to
+    produce, for exactly this reason. Raising routes it to the fixture verdict,
+    which is what happens today.
+
+    This is the assertion that keeps the A3 isolation strictly fail-CLOSED: an
+    absence is invisible only when the wrappers that DID run produced something
+    to judge.
+    """
+    from agentorg import security as sec
+
+    def _absent(dev):
+        raise FileNotFoundError("semgrep is not installed")
+
+    monkeypatch.setattr(sec, "_semgrep", _absent)
+    monkeypatch.setattr(sec, "_gitleaks", lambda dev: [])
+    monkeypatch.setattr(sec, "_trivy", lambda dev: [])
+    sec.reset_scanner_cache()
+
+    with pytest.raises(FileNotFoundError):
+        sec.run_all_scanners(_dev())
+
+
+def test_SCANNERS_REQUIRED_still_turns_an_absence_into_a_blocking_fault(
+    monkeypatch, tmp_path
+):
+    """The knob's semantics are unchanged by the isolation -- asserted, not assumed.
+
+    With SCANNERS_REQUIRED set, `_run.unrunnable_findings` returns a blocking
+    `*-scanner-error` instead of raising, so the isolation never sees an
+    exception and every tool is named. Three faults, `blocking=3`, on a CLEAN
+    diff -- which is what CLAUDE.md records for a runtime carrying the knob but
+    not the binaries.
+
+    Driven through the real wrappers with an EMPTY directory as PATH rather than
+    stubs, so it exercises `unrunnable_findings` itself: a stubbed wrapper would
+    let the knob be honoured nowhere and this test would still pass. PATH is
+    REPLACED, and it must point at a directory that is genuinely empty -- an
+    earlier draft of this test used the CWD, which passes only because no scanner
+    binary happens to sit in the repo root, and would silently start running real
+    scanners on a machine where one did.
+    """
+    from agentorg import security as sec
+    from agentorg.common import config
+
+    empty = tmp_path / "no-binaries-here"
+    empty.mkdir()
+    assert list(empty.iterdir()) == [], "the PATH directory must be empty"
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setattr(config, "SCANNERS_REQUIRED", True)
+    sec.reset_scanner_cache()
+
+    findings = sec.run_all_scanners(_dev())
+
+    assert {f.rule for f in findings} == {
+        "semgrep-scanner-error",
+        "gitleaks-scanner-error",
+        "trivy-scanner-error",
+    }, (
+        f"SCANNERS_REQUIRED must name every absent tool, not just the first. Got "
+        f"{[(f.tool, f.rule) for f in findings]}. If this names only semgrep, the "
+        f"absent branch is raising under the knob again -- which reintroduces the "
+        f"abort in the configuration the security runtime actually runs."
+    )
+    verdict, blocking = compute_security_verdict(findings, threshold="high")
+    assert verdict == "block" and len(blocking) == 3, (
+        f"expected block with blocking=3, got {verdict!r} with {len(blocking)}"
+    )
