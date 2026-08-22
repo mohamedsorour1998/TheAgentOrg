@@ -406,3 +406,80 @@ def test_the_fixed_string_grep_is_F_because_the_note_contains_a_regex_metachar()
         )
 
 
+
+
+def _bedrock_invoke_statement() -> str:
+    """The BedrockInvoke statement body, or a loud failure.
+
+    Shared by the action tests below so a rename of the Sid fails once, visibly,
+    rather than making several assertions match nothing each.
+    """
+    match = re.search(
+        r'Sid\s*=\s*"BedrockInvoke"(?P<body>.*?)\n\s*\},', _code(), re.DOTALL
+    )
+    assert match, (
+        "no `Sid = \"BedrockInvoke\"` statement in the agentcore module -- either "
+        "renamed, in which case these tests pin nothing, or gone, in which case "
+        "every agent is back on its fixture."
+    )
+    return match.group("body")
+
+
+# ── the action name, which is a SEPARATE mistake from the ARN shape ────────────
+#
+# MEASURED 2026-08-22, after the inference-profile grant above had already made
+# `bedrock:InvokeModel` read `allowed`: the runtimes STILL served fixtures, and the
+# container log named the operation nobody had granted --
+#
+#   botocore.errorfactory.AccessDeniedException: An error occurred
+#   (AccessDeniedException) when calling the ConverseStream operation:
+#   User: .../theagentorg-shared-agentcore-runtime-role/BedrockA...
+#   └ Model id: us.amazon.nova-2-lite-v1:0
+#
+# Simulated against the same profile ARN, all four actions at once:
+#
+#   bedrock:InvokeModel                      allowed
+#   bedrock:InvokeModelWithResponseStream    allowed
+#   bedrock:Converse                         implicitDeny
+#   bedrock:ConverseStream                   implicitDeny
+#
+# TWO INDEPENDENT THINGS WERE WRONG -- the ARN shape and the action name -- and
+# fixing the first is what made the second visible, because until then every call
+# failed at the earlier check. That is the shape worth remembering: a fix that
+# turns one silent failure into a different silent failure looks like no progress
+# at all unless something reads the log.
+
+
+def test_the_grant_names_the_action_strands_actually_calls():
+    """`strands.Agent` streams through Converse, not InvokeModel.
+
+    Converse is a separate IAM action, not an alias for InvokeModel and not
+    implied by it. Granting only the Invoke pair grants two actions this codebase
+    never calls, while denying the one it does -- and the denial surfaces as every
+    agent quietly serving its fixture with every job green.
+    """
+    body = _bedrock_invoke_statement()
+    for action in ("bedrock:Converse", "bedrock:ConverseStream"):
+        assert action in body, (
+            f"the BedrockInvoke statement does not grant {action!r}. `strands.Agent`"
+            f" calls the Converse API, so without this every model call is "
+            f"AccessDeniedException, llm.text() catches it, and all four "
+            f"model-calling agents fall back to their fixtures -- silently, with "
+            f"every job green. MEASURED: this exact denial survived the "
+            f"inference-profile fix. Statement body:\n{body}"
+        )
+
+
+def test_both_converse_forms_are_granted_not_just_the_streaming_one():
+    """Which form the SDK picks is its choice, not ours.
+
+    `ConverseStream` is what strands uses today. An SDK upgrade that switched to
+    the non-streaming `Converse` would reintroduce the identical silent fixture
+    fallback, so both are granted rather than the one currently observed.
+    """
+    body = _bedrock_invoke_statement()
+    assert "bedrock:Converse\"" in body or "bedrock:Converse'" in body, (
+        f"only the streaming form is granted. `bedrock:Converse` must be there "
+        f"too: an SDK that stopped streaming would fall straight back to fixtures "
+        f"with nothing turning red. Statement body:\n{body}"
+    )

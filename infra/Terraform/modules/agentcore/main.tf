@@ -124,7 +124,42 @@ resource "aws_iam_role_policy" "runtime" {
         # that the policy was written, not that it permits the call.
         Sid    = "BedrockInvoke"
         Effect = "Allow"
-        Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:InvokeModelWithResponseStream",
+          # CONVERSE IS WHAT STRANDS ACTUALLY CALLS, and it is a SEPARATE IAM
+          # action from InvokeModel -- not an alias, not covered by it.
+          #
+          # MEASURED 2026-08-22, after the ARN-shape fix above had already made
+          # InvokeModel `allowed`. The runtimes still served fixtures, and the
+          # container log named the operation:
+          #
+          #   botocore.errorfactory.AccessDeniedException: An error occurred
+          #   (AccessDeniedException) when calling the ConverseStream operation:
+          #   User: .../theagentorg-shared-agentcore-runtime-role/BedrockA...
+          #   └ Model id: us.amazon.nova-2-lite-v1:0
+          #
+          # Simulated on the same profile ARN, all four at once:
+          #
+          #   bedrock:InvokeModel                      allowed
+          #   bedrock:InvokeModelWithResponseStream    allowed
+          #   bedrock:Converse                         implicitDeny
+          #   bedrock:ConverseStream                    implicitDeny
+          #
+          # `strands.Agent` streams through the Converse API, so granting only the
+          # Invoke pair is granting the actions nothing in this codebase uses. TWO
+          # independent things were wrong -- the ARN shape and the action name --
+          # and fixing the first is what made the second visible, because until
+          # then everything failed at the earlier check.
+          #
+          # Both Converse forms are granted: `Converse` for a non-streaming call
+          # and `ConverseStream` for the streaming one. Which of the two the SDK
+          # picks is its choice, not ours, and a grant that covers only the form it
+          # happens to use today would break on an SDK upgrade with the same silent
+          # fixture fallback this whole sequence exists to end.
+          "bedrock:Converse",
+          "bedrock:ConverseStream",
+        ]
         Resource = [
           "arn:aws:bedrock:${data.aws_region.current.region}::foundation-model/*",
           "arn:aws:bedrock:${data.aws_region.current.region}:${var.account_id}:inference-profile/*",
