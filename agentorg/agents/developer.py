@@ -34,7 +34,16 @@ as a unified git diff. Respond with ONE JSON object and nothing else. Shape:
   "files_changed": ["<path>", ...]
 }
 Implement EXACTLY what the ticket asks, including any literal code the ticket
-provides. Read secrets from environment variables — never invent credentials."""
+provides. Read secrets from environment variables — never invent credentials.
+
+THE TARGET IS A PYTHON 3.12 FLASK APPLICATION. Write Python. `app/auth.py` holds
+a `login()` view reading `request.form`, an `authenticate(username, password)`
+helper, and a `create_app()` factory; `tests/test_auth.py` uses pytest with a
+`client` fixture built on `create_app()`. Use `redis` for anything needing shared
+state, and `os.environ` for configuration.
+
+Diff headers must use git's default prefixes — `--- a/path` and `+++ b/path`.
+Keep the change to the files the plan names."""
 
 _AWS_KEY = re.compile(r"AKIA[0-9A-Z]{16}")
 

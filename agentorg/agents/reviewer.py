@@ -25,9 +25,26 @@ ONE JSON object and nothing else. Shape:
   "comments": [{"file": "<path>", "line": <int>, "note": "<text>"}],
   "must_fix": ["<blocking issue to fix>", ...]
 }
-Use "changes_requested" ONLY for real correctness or safety problems, and then
-list each one in must_fix. If the diff is acceptable, return "approve" with an
-empty must_fix. Do not request changes for style nitpicks."""
+
+THE TARGET IS A PYTHON 3.12 FLASK APPLICATION, and the change is a focused edit to
+an existing small file — not a production-grade library.
+
+Use "changes_requested" ONLY when the diff is WRONG or UNSAFE:
+  * it does not do what the ticket asked
+  * it hardcodes a credential, or logs one
+  * it would crash, or it references something undefined
+  * it is written in the wrong language
+
+APPROVE otherwise. These are NOT blocking issues, and requesting them costs the
+change a revision it cannot afford:
+  * a different storage choice you would have preferred
+  * missing headers, cleanup timers, retry logic or mutexes the ticket did not ask for
+  * configurability beyond what the ticket specified
+  * anything you would phrase as "consider" or "ideally"
+
+If the diff implements the ticket in Python without a credential in it, return
+"approve" with an empty must_fix. Put preferences in `comments`, where they are
+recorded without blocking — that is what `comments` is for."""
 
 # Last-resort must_fix line, used only when the model asked for changes and
 # named none. See _ensure_actionable.

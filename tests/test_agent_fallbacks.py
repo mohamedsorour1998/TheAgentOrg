@@ -827,3 +827,64 @@ def test_a_poisoned_run_blocks_even_when_the_model_removes_the_key(monkeypatch):
         "the reviewer approved the cleaned-up diff; the block came from the "
         "scanners, not from the reviewer refusing"
     )
+
+
+# ── the prompts must name the target's language ───────────────────────────────
+#
+# MEASURED 2026-08-22 on the deployed pipeline: the developer agent wrote GO for a
+# Python Flask application -- `sync.RWMutex`, `NewRateLimiter` -- and the reviewer
+# spent all four revisions objecting to it, so the run ended `failed` with the
+# scanners reporting PASS.
+#
+# Neither prompt said what the target was. `_prompt` names target FILES but never
+# their contents, and `target_repo/` is excluded from the container image
+# (.dockerignore:48), so the agent genuinely could not look. It guessed.
+
+
+def test_the_developer_prompt_names_the_targets_language():
+    """Otherwise the agent guesses, and a wrong guess costs every revision."""
+    from agentorg.agents import developer
+    prompt = developer.SYSTEM_PROMPT.lower()
+    assert "python" in prompt, (
+        "the developer's system prompt does not say the target is Python. It names "
+        "target files but never their contents, and target_repo/ is excluded from "
+        "the image, so the agent cannot look -- measured writing Go for a Flask app."
+    )
+    assert "flask" in prompt, (
+        "the prompt does not name the framework; 'Python' alone still leaves the "
+        "agent inventing a web layer that does not match app/auth.py"
+    )
+
+
+def test_the_developer_prompt_names_gits_default_diff_prefixes():
+    """A non-default prefix materialises zero files for the scanners.
+
+    `common/diff.py` now accepts every legal spelling, so this is belt and braces
+    rather than the only defence -- but asking for the shape the whole toolchain
+    expects costs one line.
+    """
+    from agentorg.agents import developer
+    assert "a/" in developer.SYSTEM_PROMPT and "b/" in developer.SYSTEM_PROMPT, (
+        "the prompt does not ask for git's default `--- a/` `+++ b/` prefixes"
+    )
+
+
+def test_the_reviewer_prompt_distinguishes_wrong_from_merely_different():
+    """A reviewer that blocks on preferences spends a budget it cannot refill.
+
+    MEASURED: four rounds of `changes_requested` whose must_fix items were a
+    different storage choice, a missing Retry-After header, absent cleanup timers
+    and unrequested configurability. Each is defensible and none is a defect, and
+    together they exhausted MAX_REVISION_LOOPS on a diff the scanners had cleared.
+    """
+    from agentorg.agents import reviewer
+    prompt = reviewer.SYSTEM_PROMPT.lower()
+    assert "wrong or unsafe" in prompt or ("wrong" in prompt and "unsafe" in prompt), (
+        "the reviewer's prompt does not state the blocking standard as WRONG or "
+        "UNSAFE, so preferences read as blocking issues"
+    )
+    assert "comments" in prompt and "without blocking" in prompt, (
+        "the prompt does not tell the reviewer where to put a preference that is "
+        "not blocking -- `comments` exists for exactly that, and without saying so "
+        "every observation lands in must_fix"
+    )
