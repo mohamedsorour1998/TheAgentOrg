@@ -44,9 +44,50 @@ is the one signal this function acts on. `github_ops.ci_status` likewise never
 raises, and its docstring is where that guarantee is recorded.
 """
 
+from pydantic import BaseModel, Field
+
 from .. import fixtures_loader, github_ops, repo_snapshot
 from ..common import llm
 from ..state import RunState, SLOCheck, SREResult
+
+
+class SREAdvice(BaseModel):
+    """THE THREE FIELDS THE MODEL IS ACTUALLY ASKED FOR, and only those.
+
+    THIS EXISTS BECAUSE VALIDATING AGAINST `SREResult` COULD NOT SUCCEED. That model
+    requires `verdict` and `ci_status` -- both strict Literals with no default -- and
+    SYSTEM_PROMPT tells the model, correctly, that those two are not its to set. So a
+    model that OBEYED the prompt produced a reply pydantic rejected for
+    `Field required`, `llm.structured` collapsed the failure to None, and the fixture
+    stood in. MEASURED on the deployed runtime, 3 calls out of 3:
+
+        verdict=go ci=unknown source=fixture
+        REJECTED: 2 validation errors for SREResult
+        verdict     Field required
+        ci_status   Field required
+
+    The advice itself was good -- it named the new Redis dependency and the missing
+    test for the rate-limiting logic -- and every word of it was discarded. The one
+    observable difference was `_source=fixture` beside a stage whose measured half was
+    plainly real, which is this project's signature defect wearing a new hat: a check
+    that cannot distinguish "the model did not answer" from "the model answered and we
+    threw it away".
+
+    Narrowing the schema rather than loosening `SREResult` or softening the prompt:
+
+      * defaults on `SREResult.verdict`/`ci_status` would make an absent verdict a
+        valid one, and that model is the FROZEN contract every stage writes -- a
+        default there would be read as a decision somewhere else in the pipeline
+      * asking the model for both fields and then overwriting them invites it to
+        reason about a verdict it does not control, and a `no_go` in a reply we
+        discard is a fact nobody sees
+      * this way the model literally cannot express the two fields it must not set,
+        which is a stronger guarantee than dropping them after the fact
+    """
+
+    slo_checks: list[SLOCheck] = Field(default_factory=list)
+    estimated_cost_note: str = ""
+    notes: str = ""
 
 SYSTEM_PROMPT = """You are the SRE reviewing a proposed change before deployment.
 
@@ -113,13 +154,19 @@ def run(state: RunState) -> SREResult:
     # returns exactly "passing", "failing" or "unknown".
     ci = github_ops.ci_status(state)
 
-    advice = llm.structured(SREResult, SYSTEM_PROMPT, _prompt(state))
+    # `SREAdvice`, NOT `SREResult` -- see that class for the measurement. Asking for
+    # the wide model here required two fields the prompt forbids, so every obedient
+    # reply was rejected and the fixture served instead, on every call.
+    advice = llm.structured(SREAdvice, SYSTEM_PROMPT, _prompt(state))
     if advice is None:
         # Stamped here for the reason planner.py's docstring gives: this suite
         # substitutes llm.structured, so llm's own recording never runs on the
         # path every offline run takes, and a run whose other four agents reached
         # the model would be labelled a model run with one fifth of it a fixture.
         llm.record_fixture_fallback()
+        # The fixture is an SREResult; only its three advisory fields are read, so
+        # its `verdict: go` / `ci_status: passing` cannot reach the return value
+        # below any more than the model's could.
         advice = fixtures_loader.sre()
 
     # `passed` tracks the measurement and nothing else. NOT `ci != "failing"`:

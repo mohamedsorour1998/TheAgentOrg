@@ -12,6 +12,9 @@ says go" would have meant "always merge".
 """
 
 import inspect
+import json
+
+import pytest
 
 from agentorg import github_ops
 from agentorg.agents import sre
@@ -370,3 +373,111 @@ def test_ci_status_is_called_with_the_run_state(monkeypatch):
         f"github_ops.ci_status was called {len(seen)} time(s), and not with this "
         f"run's state. The verdict rests on that measurement."
     )
+
+
+# ── THE SCHEMA THE MODEL IS ASKED FOR MUST BE ONE IT CAN SATISFY ──────────────
+#
+# Every test above stubs `llm.structured` to hand back a ready-made object, so none
+# of them runs pydantic at all. That is the right isolation for asking "what does the
+# agent do with advice", and it is precisely why this defect survived them: the agent
+# asked for `SREResult`, whose `verdict` and `ci_status` are required Literals with no
+# default, while SYSTEM_PROMPT tells the model those two fields are not its to set.
+#
+# A model that OBEYED the prompt therefore produced a reply pydantic rejected.
+# MEASURED against the deployed runtime, 3 of 3 calls:
+#
+#     verdict=go ci=unknown source=fixture
+#     REJECTED: 2 validation errors for SREResult
+#     verdict     Field required
+#     ci_status   Field required
+#
+# The advice was good and every word was thrown away. These tests run the REAL
+# validation over the REAL prompt, which is the only way to catch a schema and a
+# prompt that contradict each other.
+
+def test_the_advice_schema_validates_a_reply_that_obeys_the_prompt():
+    """THE test. A reply with only the three requested fields must validate.
+
+    The JSON is a VERBATIM capture of what the deployed nova-2-lite returned for the
+    clean demo ticket, trimmed only in the detail strings. Hand-written, it would be a
+    test of what I imagine a model says; captured, it is a test of what one did.
+    """
+    reply = json.dumps({
+        "slo_checks": [
+            {"name": "redis_dependency", "passed": True,
+             "detail": "Adds Redis dependency for rate limiting"},
+            {"name": "ci_test_coverage", "passed": False,
+             "detail": "No test added for rate limiting logic"},
+        ],
+        "estimated_cost_note": "Negligible; only adds Redis.",
+        "notes": "To roll back, revert app/auth.py.",
+    })
+
+    advice = sre.SREAdvice.model_validate_json(reply)
+
+    assert [c.name for c in advice.slo_checks] == ["redis_dependency",
+                                                   "ci_test_coverage"]
+    assert advice.estimated_cost_note.startswith("Negligible")
+    assert advice.notes
+
+
+def test_the_advice_schema_cannot_express_the_two_fields_the_prompt_forbids():
+    """The stronger guarantee: not "we drop them", but "it cannot say them".
+
+    Dropping the fields after validation would work too, but then a model reasoning
+    its way to `no_go` would produce a verdict nobody ever sees -- and the prompt
+    would be telling it not to do something the schema invited.
+    """
+    fields = set(sre.SREAdvice.model_fields)
+
+    assert "verdict" not in fields, (
+        "the advice schema lets the model set `verdict`, which gates a merge"
+    )
+    assert "ci_status" not in fields, (
+        "the advice schema lets the model set `ci_status`, which is measured"
+    )
+    assert fields == {"slo_checks", "estimated_cost_note", "notes"}, sorted(fields)
+
+
+def test_the_agent_asks_the_model_for_the_narrow_schema_not_the_wide_one():
+    """`SREResult` here is the bug: two required fields the prompt forbids.
+
+    Asserted on the class the agent actually passes rather than on source text,
+    because a comment naming `SREAdvice` would satisfy a source-grep while the call
+    still passed `SREResult` -- the failure mode this repository has hit twice.
+    """
+    seen = {}
+
+    def _capture(model_cls, system_prompt, user_prompt):
+        seen["cls"] = model_cls
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(github_ops, "ci_status", lambda state: "passing")
+        monkeypatch.setattr(llm, "structured", _capture)
+        sre.run(_state())
+    finally:
+        monkeypatch.undo()
+
+    assert seen.get("cls") is sre.SREAdvice, (
+        f"the agent asked the model for {seen.get('cls')}, not SREAdvice. If that is "
+        f"SREResult, every obedient reply is rejected for a missing `verdict` and "
+        f"`ci_status` and the fixture is served instead -- silently, on every call."
+    )
+
+
+def test_the_prompt_forbids_exactly_the_fields_the_advice_schema_omits():
+    """The prompt and the schema must agree, and this is what keeps them agreeing.
+
+    Read off `SREResult` vs `SREAdvice` rather than a restated pair of names: a field
+    added to the contract and mentioned in the prompt but missing from the advice
+    schema is the same defect again, one field over.
+    """
+    withheld = set(SREResult.model_fields) - set(sre.SREAdvice.model_fields)
+    assert withheld == {"verdict", "ci_status"}, sorted(withheld)
+
+    for field in withheld:
+        assert field in sre.SYSTEM_PROMPT, (
+            f"the prompt does not tell the model that `{field}` is not its to set, "
+            f"so it will spend tokens on a field the schema silently discards"
+        )
