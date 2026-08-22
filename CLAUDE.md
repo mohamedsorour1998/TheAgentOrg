@@ -13,6 +13,62 @@ Account `339712964409`, region `us-east-1`.
 
 ---
 
+## What the cloud path has actually done, measured 2026-08-22
+
+Both demo halves completed end to end on the deployed system. This section exists
+because "deployed" and "verified" were separate facts for most of a week, and
+several claims in this file were written while only the first was true.
+
+**The poisoned half** — run `32540401814`. `plan → gate1` (paused, approved by
+click) `→ develop`, which blocked. It produced **PR #11** on
+`mohamedsorour1998/auth-service` carrying three agent comments, the security one
+reading verbatim:
+
+```
+### Agent Org · security
+**BLOCK** — 2 blocking finding(s) of 3 total
+_provenance: scanners_
+- `gitleaks` **aws-access-key-id** (critical) at `app/auth.py:3`
+- `gitleaks` **aws-secret-access-key** (critical) at `app/auth.py:4`
+```
+
+Lines **3 and 4** with `provenance: scanners` — the discriminator this file's next
+section is about, from the deployed container rather than a fixture.
+
+**The clean half** — run `32540911270`, **all seven jobs green**: `plan → gate1 →
+develop → gate2 → sre → gate3 → promote`, three gates each paused for a click, all
+three rejection recorders correctly `skipped`. **PR #12**, six stage comments, and
+security read `**PASS** — 0 blocking finding(s) of 0 total`, `_provenance:
+scanners_`. Real scanners cleared a clean diff, which is the half a fixture
+fallback could not honestly produce.
+
+**The gates hold.** Each gate job sat in `waiting` with
+`approvers: ["mohamedsorour1998"]` and did not proceed until approved. Before
+2026-08-22 `gate1` was the only Environment and had `protection_rules: []`, so it
+did not pause — it ran. An Environment without a required reviewer is not a gate.
+
+**`ticket_id` MUST BE THE BARE ISSUE NUMBER** for the pre-PR comments to land.
+`github_ops._ISSUE_REF` is `\A#?([0-9]+)\Z` and anything else is refused by
+design (`github_ops.py:418` — a loose parse would write on issue #1 of the target
+repo). Dispatching `ticket_id=CLEAN-VERIFY` logs
+
+```
+[post_comment] ticket 'CLEAN-VERIFY' is not an issue number, so there is no
+issue to comment on
+```
+
+and the plan and gate1 comments go nowhere, silently, while every job stays green.
+The EventBridge template sends the real number, so the auto-triggered path is
+correct; a hand dispatch with a label is not.
+
+**Still unverified:** the automatic trigger has never been observed firing a run
+from an opened issue. It is fully wired — the rule has 1 target, the connection is
+`AUTHORIZED`, the API destination `ACTIVE` — but wired is not the same as observed,
+and this file should not say otherwise until a run appears without a
+`gh workflow run`.
+
+---
+
 ## The one verification idea that matters most
 
 The deployed security container genuinely runs scanners, and there is exactly
@@ -289,7 +345,7 @@ Zero static AWS keys anywhere. Every AWS step assumes
 ## Before you commit
 
 ```bash
-.venv-main/bin/python -m pytest -q                            # 795 passed, 3 skipped
+.venv-main/bin/python -m pytest -q                            # 816 passed, 3 skipped
 .venv-main/bin/python -m ruff check agentorg scripts tests    # exit 0
 actionlint .github/workflows/*.yml                            # exit 0
 cd infra/Terraform && terraform fmt -check -recursive         # exit 0

@@ -2,250 +2,349 @@
 
 *by **RosettaTeam** — Sorour · Mariam · Habiba · Reem · Aya*
 
-A multi-agent CI/CD pipeline. A ticket flows through five role agents —
-**planner → developer → reviewer → security → SRE** — with three human approval
-gates. Agents run on **AWS Bedrock AgentCore** with **Strands**; infrastructure
-is **Terraform**; the orchestration is **GitHub Actions**.
+A CI/CD pipeline whose reviewers are AI agents and whose gatekeeper is not.
 
-## The claim, stated precisely
+Five role agents — **planner → developer → reviewer → security → SRE** — take a
+ticket from a sentence of English to an open pull request on a real repository.
+Three human approvals sit in the middle of that walk. At the end, one function
+decides whether the change is allowed to ship, and that function is ordinary
+Python with no model in it.
 
-**A poisoned ticket is blocked on every run, and the block comes from
-`compute_security_verdict()` — pure Python in `agentorg/state.py`, never a
-model.**
+The agents run on **AWS Bedrock AgentCore**; the orchestration is **GitHub
+Actions**; every AWS resource is **Terraform**. Account `339712964409`,
+`us-east-1`.
 
-The AI writes the code and explains the risk. Deterministic code decides whether
-it ships. That division is the strongest thing about the design: an LLM's
-explanation is prose on a pull request, and an LLM's opinion of a diff is
-advisory, but the verdict is a threshold comparison over a list of findings and
-it returns the same answer every time.
+---
 
-The security agent fills `SecurityResult.explanation` with the model's words. It
-does **not** set `SecurityResult.verdict`.
+## The claim, stated so it can be falsified
+
+**A ticket carrying a hardcoded AWS credential is blocked, and the block comes
+from `compute_security_verdict()` in `agentorg/state.py` — never from a model.**
+
+The whole function is five lines: sort findings by severity, keep the ones at or
+above a threshold, block if any survive. It is called in exactly **one** place on
+the pipeline path — `agentorg/agents/security.py:187`, inside the security agent —
+so it is evaluated once, behind the agent seam, whether that agent runs in this
+Python process or in its container. Neither `graph.py` nor `scripts/run_stage.py`
+calls it; both read `state.security.verdict` afterwards.
+
+That division is the point of the project. An LLM writes the code, and an LLM
+explains the risk in prose on the pull request. An LLM's *opinion* of a diff is
+advisory. The verdict is a threshold comparison over a list, and it returns the
+same answer every time. The security agent fills
+`SecurityResult.explanation` with the model's words; it does not set
+`SecurityResult.verdict`.
 
 ### Two tickets, one feature
 
 `tickets/clean.md` and `tickets/poisoned.md` are the **same feature request** —
-*add a per-IP login rate limit*. They differ in exactly one way: the poisoned
-ticket's reference implementation hardcodes AWS credentials, so the developer
-agent's diff carries them.
+add a per-IP login rate limit to `app/auth.py`. They differ in one way: the
+poisoned ticket's reference implementation hardcodes credentials, so the
+developer agent's diff carries them.
 
 ```
 tickets/poisoned.md:17:+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
 ```
 
-(`AKIAIOSFODNN7EXAMPLE` is AWS's own published documentation placeholder —
-nothing sensitive.)
+(`AKIAIOSFODNN7EXAMPLE` is AWS's own published documentation placeholder.
+Nothing sensitive is in this repository.)
 
-Showing **both** is what proves the pipeline ships features rather than merely
-refusing them. The clean ticket is planned, developed, reviewed, scanned,
-SRE-checked and **promoted**; the poisoned one is **blocked** at the security
-stage and never reaches the deploy gates.
+Showing **both** is what separates a pipeline from a wall. The clean ticket is
+planned, developed, reviewed, scanned, SRE-checked and **promoted**. The poisoned
+one is **blocked** at the security stage and never reaches the deploy gates.
 
-The developer↔reviewer loop is real, not decorative. It is capped at
-`MAX_REVISION_LOOPS = 3`, and runs recorded under `runs/` show the reviewer
-requesting changes and the developer producing a fresh diff for each pass. Each
-pass posts its own pair of comments, carrying that pass's own diff — so a run
-that argues with itself three times renders as three attempts, not one repeated
-diff. (With the shipped fixture reviewer, which approves on the first pass, both
-demo runs take one pass; the loop is exercised by tests and by model-path runs.)
+---
 
-## Architecture
+## The flow
 
 ```
-issue ─▶ Lambda (HMAC) ─▶ EventBridge ─▶ run-pipeline.yml ─▶ invoke_agent_runtime ×5
-                                              │
-   plan ─▶ [gate1] ─▶ develop+review+PR+security ─▶ [gate2] ─▶ sre ─▶ [gate3] ─▶ promote
+ GitHub issue opened
+        │
+        ▼
+ Lambda Function URL ── verifies HMAC-SHA256 over the raw body
+        │                (the only access control on a public endpoint)
+        ▼
+ EventBridge bus ── rule: detail-type "issues", action "opened"
+        │           └─▶ API destination ─▶ POST .../run-pipeline.yml/dispatches
+        ▼
+ run-pipeline.yml   ── 7 jobs + 3 rejection recorders
+        │
+        │   plan ──▶ [gate1] ──▶ develop ──▶ [gate2] ──▶ sre ──▶ [gate3] ──▶ promote
+        │             human                   human              human
+        │
+        └── each agent call ──▶ invoke_agent_runtime ──▶ 1 of 5 AgentCore runtimes
+                                                          (arm64, one image, five tags)
 ```
 
-**The five agents** each expose `run(state) -> Result`. Locally that is a Python
-call; in the cloud it is an HTTP POST to a container. Both go through one seam,
-`agentorg/common/agent_client.call_agent`, selected by `REMOTE_AGENTS`.
+`develop` is one job containing four things — the developer↔reviewer revision
+loop, the pull request, and the security verdict — because none of them is a gate
+boundary, and because the revision loop iterates an unknown number of times and
+Actions cannot express "repeat this job until". A blocked run ends there with exit
+code 3, and `gate2` never starts because it `needs` it.
 
-**The three gates are GitHub Environments**, not `if:` conditions. An
-Environment's required reviewer is a repository *setting*, so no edit to the
-workflow and no workflow input can approve a gate on a human's behalf. A gate
-implemented as an `if:` would be skippable, and a skipped gate is
+---
+
+## Why the architecture looks like this
+
+This is the question the previous version of this README failed to answer, and
+part of the honest answer is that one component barely earns its place.
+
+### Why not just put the pipeline logic in the Lambda?
+
+Two structural reasons, and neither is a preference.
+
+**The human gates.** All three gates are GitHub Environments with required
+reviewers. An Environment pauses a **job**, and a job cannot pause in its middle —
+which is precisely why the pipeline is cut into seven jobs at the gate boundaries
+instead of being one `run_pipeline()` call, with the `RunState` handed along as an
+Actions artifact. A Lambda cannot pause for a human at all: it has a hard
+15-minute ceiling, and a gate may sit for hours waiting on someone to read a
+diff. Step Functions *could* wait — but then the approval UI has to be built from
+scratch, and the reason for choosing Environments is that the approval surface is
+the one reviewers already use, and that a required reviewer is a repository
+**setting** that no edit to a workflow file can argue with. A gate implemented as
+`if: inputs.auto_approve != true` would be skippable, and a skipped gate is
 indistinguishable downstream from an approved one.
 
-That has a structural consequence: an Environment pauses a **job**, and a job
-cannot pause in its middle. So the pipeline cannot be one `run_pipeline()` call —
-it is cut at the gate boundaries, seven jobs, with the `RunState` handed along as
-an Actions artifact. Each job runs `scripts/run_stage.py <stage>`.
+**The run has to be visible where the work is.** The surface a reviewer judges
+this on is the target repository: the issue, the pull request, the agent
+comments, the Actions run with its pause. A Lambda's execution lives in
+CloudWatch Logs, which is not a surface anyone reviews a change on.
 
-A refused gate **skips** its job rather than running it with a verdict, so three
-separate `gate*-rejected` recorder jobs exist to write the refusal down. Without
-them a refused run and an in-flight run are byte-identical on disk.
+### Does EventBridge earn its place? Barely.
 
-**The block rule is evaluated before the reviewer's verdict is treated as
-terminal**, and that order is load-bearing. On the poisoned ticket a competent
-reviewer objects to the hardcoded key and the developer re-inserts it on every
-revision, so the revision cap would reliably exhaust and the run would end
-`failed` without the scanners ever running — quietly downgrading "the poisoned
-ticket blocks every time" into "it fails at review".
+It buys three things: a dead-letter queue, so a dispatch that fails after three
+retries is still readable 14 days later instead of vanishing; a retry on the
+dispatch call itself; and a bus other consumers could subscribe to later without
+touching the Lambda.
 
-**Every stage posts its output** to the target repo through one function. Plan
-and gate1 land on the issue (no PR exists yet); everything from the developer
-onward lands on the PR. The PR is the timeline a judge reads, so a stage that ran
-silently is a stage that did not run as far as anyone watching can tell.
+That is the complete list. **The Lambda could call
+`POST /repos/{owner}/{repo}/actions/workflows/run-pipeline.yml/dispatches`
+directly and the system would behave identically** — the same workflow would
+start with the same inputs. The bus is one hop of indirection buying a DLQ and a
+retry policy that ~30 lines of Python in the handler could also provide. If you
+looked at the diagram and thought "why is that hop there", you were right to.
 
-## Quick start
+### Then why a Lambda at all, rather than pointing GitHub at EventBridge?
 
-```bash
-pip install -e ".[dev]"
+Because there is no such thing, and this was checked rather than assumed. The
+`aws events` API has no inbound-webhook operation: `create-api-destination` and
+`create-connection` are **outbound**, and `create-partner-event-source` requires
+an onboarded SaaS partner, which GitHub is not. Something has to terminate the
+HTTPS POST and verify GitHub's `X-Hub-Signature-256` HMAC, and that is the
+Lambda's entire job — verify, then `PutEvents`. Nothing before `compare_digest`
+succeeds is allowed to cost money, mutate anything, or publish; a handler that
+publishes and *then* returns 401 has already started the pipeline while telling
+the caller it refused. `tests/test_ingress_handler.py` asserts zero `PutEvents`
+on every reject path, and proves that assertion is not vacuous by replaying a
+valid delivery through the same stub.
 
-python make_fixtures.py                     # regenerate + validate all fixtures
-pytest -q                                   # 795 passed, 3 skipped
+**Security note, stated rather than buried:** the Function URL is
+`authorization_type = "NONE"`, because GitHub cannot sign a SigV4 request and
+`AWS_IAM` would reject every delivery. So the endpoint is internet-reachable and
+unauthenticated at the AWS layer, and the HMAC is the only access control in the
+entire path. What limits the damage is scope, not authentication: the function's
+IAM role holds two actions on two specific ARNs, and
+`reserved_concurrent_executions` caps the spend an anonymous flood can cause.
 
-python -m agentorg.graph                    # clean ticket   -> promoted
-python -m agentorg.graph --poisoned         # poisoned ticket -> blocked
-python -m agentorg.timeline <run_id>        # render one run as a timeline
+### Is the workflow slow to start?
+
+No. Measured across five dispatches, queue latency was **0 s** — the job picks up
+immediately. What takes time in a run is the work itself: five agent invocations,
+three scanners, and however long a human takes at each of the three gates. The
+gates are the wall clock, and they are supposed to be.
+
+---
+
+## The one field that proves the scanners ran
+
+This project's signature defect — the one it spends the most effort refusing — is
+a check that reports green because it never ran.
+
+The security container really does run gitleaks, trivy and semgrep, pinned in the
+image at CI's versions. But a fixture block and a real gitleaks block produce the
+**same** verdict, the same `blocking=2`, the same rule names (`aws-access-key-id`,
+`aws-secret-access-key`), the same file, the same tool and the same severity. The
+fixture's explanation names a real file and a real remediation and reads exactly
+like real output.
+
+Exactly one field tells them apart:
+
+```
+verdict: block   blocking: 2   files: ['app/auth.py']
+LINES: [3, 4]        <- real scanners   (the fixture reports [4, 5])
+provenance: scanners
 ```
 
-Verified today on merged `main`, with the three scanner binaries on PATH:
+So `blocking=2` proves nothing on its own, and no test in this repository is
+allowed to claim "the scanners ran" from a count. It is asserted from the
+line-number **set** — via `tests/provenance.py`'s `REAL_SCANNER_LINES` and
+`FIXTURE_LINES` — or from `scan_provenance`, which is stamped at the call site
+because inferring it afterwards is impossible. The two sets overlap at line 4, so
+no single finding separates the modes; only the whole set does.
 
-```
-$ python scripts/scan_gate.py
-SCAN OK
-
-$ SCANNERS_REQUIRED=true python -m agentorg.graph
-status=promoted
-security verdict=pass, blocking=0
-
-$ SCANNERS_REQUIRED=true python -m agentorg.graph --poisoned
-status=blocked
-security verdict=block, blocking=2
-```
-
-Everything also runs **on fixtures** with no AWS, no GitHub and no scanners
-installed, so the whole path works before any single lane's real code exists.
-`SCANNERS_REQUIRED` defaults false precisely so a missing binary stays a
-development affordance.
-
-## The verification story
-
-The pipeline's own signature defect — a check that reports green because it never
-ran — is the thing this repo spends the most effort refusing.
-
-**The one field that proves the scanners ran.** A fixture block and a real
-gitleaks block produce the *same* verdict, the same `blocking=2`, the same rule
-names, the same file, the same tool and the same severity. Real scanners report
-`app/auth.py:3` and `:4`; the fixture reports `:4` and `:5`. **The line-number
-pair is the only field distinguishing the two paths**, so `blocking=2` proves
-nothing on its own. Because inferring it after the fact is impossible, it is
-**recorded at the call site** as `scan_provenance`, and the timeline renders it in
-words:
+`scan_provenance` has three values, and the last two are kept apart on purpose:
+`scanners` (a real scan decided), `fixture-fallback` (a scanner raised and the
+fixture stood in — a **fault**), `fixture-stub` (nobody asked for a scan — a
+**choice**). Collapsing those two would hide a broken gate behind a demo setting.
+`agentorg/timeline.py` renders it in words:
 
 ```
 ⛔ security security  blocked [block] — 2 blocking
            ↳ scan: real scanners ran
 ```
 
-**Every test change carries a mandatory RED step**: name the mutation, apply it,
-watch the named test fail, revert. Nineteen-plus assertions in this repo turned
-out to pin nothing. The recurring lesson, found seven times across four layers:
-*a test double, a helper, an inference, or a measurement that cannot express the
-failing case produces confidence that cannot be falsified — and reading it never
-reveals that.*
+### The discipline behind that
 
-**Four autouse guards** in `tests/conftest.py` keep the suite off the live model,
-off the GitHub API, out of the working tree and off the terminal. Each raises
-through `pytest.fail`, whose `Failed` derives from `BaseException` — so the blind
-`except Exception` in the code under test cannot swallow it.
+**Every test change carries a mandatory RED step:** name the mutation, apply it,
+watch the named test fail, revert. Nineteen-plus assertions in this repository
+turned out to pin nothing. The recurring lesson, found seven times across four
+layers:
 
-**Numbers must be reproducible or quoted as a range.** The suite's wall time on
-the same 793 tests measured 102.83s, 116.88s and 149.68s on one day; the spread
-is machine load. "Measured" is a property of a number plus its conditions.
+> A test double, a helper, an inference, or a measurement that cannot express the
+> failing case produces confidence that cannot be falsified — and reading it never
+> reveals that.
 
-## Status
+Concretely: a stub that could only emit `json.dumps` made it impossible to write
+a test for a malformed response body, leaving three refusal paths uncovered. A
+helper that blanks heredocs was used to test a heredoc, so the test searched text
+from which its subject had been erased, matched nothing, and passed. A shared
+expected-comment-count constant worked as a control and simultaneously forbade
+the only run shape that could catch a third bug. And a suite wall time committed
+as "measured" could not be reproduced — 102.83 s, 116.88 s and 149.68 s for the
+same 793-test snapshot on one machine in one day — which is why numbers here are
+quoted as ranges with their conditions, or not quoted.
 
-### Live in AWS (account `339712964409`, `us-east-1`)
+`tests/conftest.py` carries four autouse guards that force the offline path and
+then put a loud raiser on the seam underneath: Bedrock, GitHub, the working tree,
+and `input()`. Each raises through `pytest.fail`, whose `Failed` derives from
+**BaseException** — because the code under test catches `Exception`, so an
+ordinary raiser would be swallowed into the fixture branch and the test would
+pass green while making live billable calls. That detail is what makes the guards
+work; placement alone would not.
 
-| Resource | State |
+---
+
+## Running it
+
+Python is `.venv-main/bin/python`. Do not create a venv.
+
+```bash
+.venv-main/bin/python -m pytest -q          # 816 passed, 3 skipped
+.venv-main/bin/python make_fixtures.py      # regenerate + validate all fixtures
+.venv-main/bin/python scripts/scan_gate.py  # real scanners over both fixtures
+
+.venv-main/bin/python -m agentorg.graph               # clean    -> promoted
+.venv-main/bin/python -m agentorg.graph --poisoned    # poisoned -> blocked
+.venv-main/bin/python -m agentorg.graph --interactive # stop at the real gates
+.venv-main/bin/python -m agentorg.timeline <run_id>   # one run as a timeline
+```
+
+Everything runs with no AWS, no GitHub and no scanners installed, which is how
+five people built five lanes in parallel: `fixtures/` holds a validated sample of
+every result shape, so a lane loads a teammate's fixture instead of waiting for
+their code.
+
+Every knob lives in `agentorg/common/config.py` with its reasoning. Two defaults
+matter more than the rest. `REMOTE_AGENTS=false` runs all five agents in-process,
+which keeps the tested path and the demo's fallback path the same one — if the
+runtimes misbehave, unsetting one variable returns the pipeline to the path that
+has been green all week. `SCANNERS_REQUIRED=false` makes a missing binary a
+development affordance rather than a fault; set true it promotes absent → fault,
+which is correct **only** on the security runtime, the one image that actually
+carries the three binaries. Set it anywhere else and it blocks the clean run too.
+
+Every boolean parses `== "true"` case-insensitively, never
+`bool(os.environ.get(...))` — `bool("false")` is `True`, and that mistake would
+run the poisoned diff on a run somebody asked to be clean with nothing anywhere
+saying so.
+
+---
+
+## What is deployed, and what is verified
+
+Five AgentCore runtimes — `theagentorg_{planner,developer,reviewer,security,sre}` —
+all **READY at version 9**. One arm64 image, five ECR tags, differing only by
+`AGENT_ROLE`; arm64 is not a preference, since AgentCore runs arm64 and an amd64
+image pushes and deploys and then fails to start. `SCANNERS_REQUIRED=true` is set
+on the security runtime only. Zero static AWS keys anywhere: every AWS step
+assumes `arn:aws:iam::339712964409:role/github-actions-role` through GitHub OIDC.
+
+**Verified end to end on 2026-08-22.** Run `32540401814`, a poisoned ticket,
+produced PR #11 on `mohamedsorour1998/auth-service` carrying three agent
+comments. The security comment read:
+
+```
+**BLOCK** — 2 blocking finding(s) of 3 total
+_provenance: scanners_
+gitleaks aws-access-key-id     (critical) at app/auth.py:3
+gitleaks aws-secret-access-key (critical) at app/auth.py:4
+```
+
+Lines 3 and 4 — the real scanners, not the fixture. `status=blocked` survived to
+the end of the run. The gates are real: a run pauses at `gate1` with the reviewer
+named and does not proceed until approved.
+
+### Wired but not yet observed firing
+
+The automatic issue trigger is **wired** — the EventBridge rule has 1 target, the
+connection is `AUTHORIZED`, the API destination is `ACTIVE` — but **no run has
+been observed starting end to end from an opened issue**. Runs so far were
+dispatched by hand. Wired and unverified is the accurate description.
+
+`STATE_BACKEND=dynamodb` is known debt: `scripts/run_stage.py:_load` reaches
+`gates._state_path`, which refuses on that backend by design, so every cloud
+stage after `plan` raises. `run-pipeline.yml` sets no `STATE_BACKEND` and runs on
+the `local` default with the artifact handoff.
+
+---
+
+## Where things live
+
+| Path | What |
 |---|---|
-| Five AgentCore runtimes `theagentorg_{planner,developer,reviewer,security,sre}` | All READY, version 9 |
-| `SCANNERS_REQUIRED=true` | Set on the **security runtime only** |
-| Five ECR repos | One arm64 image each, tagged with the commit SHA |
-| Lambda Function URL, EventBridge bus, Secrets Manager secret, DynamoDB table `theagentorg-runs` | Created |
-| `terraform apply` | `Apply complete! Resources: 0 added, 0 changed, 0 destroyed` |
+| `agentorg/state.py` | The FROZEN contract + `compute_security_verdict` |
+| `agentorg/graph.py` | The local pipeline walk; five `call_agent` sites |
+| `agentorg/common/config.py` | Every knob, with the reasoning |
+| `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
+| `agentorg/agents/` | The five agents + `server.py` (HTTP), `Dockerfile` |
+| `agentorg/security/` | gitleaks / trivy / semgrep wrappers + their rule files |
+| `agentorg/{gates,log,github_ops,timeline}.py` | Gates, decision log, GitHub seam, renderer |
+| `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
+| `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
+| `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 rejection recorders |
+| `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
+| `infra/Terraform/` | All infrastructure. Nothing is created by hand in the console |
+| `infra/ingress/handler.py` | The webhook Lambda (outside `agentorg/` on purpose) |
+| `fixtures/` | A validated sample of every result shape |
+| `tickets/` | `clean.md` and `poisoned.md` — the same feature request |
+| `target_repo/` | The demo's subject repository |
+| `tests/provenance.py` | Which scanner mode a test is in, and the discriminator |
+| `tests/dora_batch.py` | The before/after comparison harness |
 
-Verified today by invoking the deployed `theagentorg_security` runtime with a
-poisoned `RunState`: `verdict: block`, `blocking: 2`, lines `[3, 4]`,
-`provenance: scanners`. The deployed container genuinely scans.
+`agentorg/state.py` is **frozen**: you may add optional fields, never rename or
+remove one. A rename breaks all five lanes at once and nobody notices until
+integration.
 
-Gates: `pytest -q` → 795 passed, 3 skipped · `ruff check agentorg scripts tests`
-→ exit 0 · `actionlint .github/workflows/*.yml` → exit 0 ·
-`terraform fmt -check -recursive` and `validate` → clean.
+A rejected Environment **skips** its job rather than running it with a verdict,
+which is why three separate `gate*-rejected` recorder jobs exist. Without them a
+refused run and an in-flight run are byte-identical on disk — and "denied" versus
+"not ready yet" is the same failure this whole project exists to prevent, wearing
+different clothes.
 
-DORA batch, this run: the Agent Org blocks the poisoned change **10/10** and
-ships **0/10** bad changes; the no-checks baseline blocks **0/10** and ships
-**10/10**. Footer: `provenance: real_scanners`.
-
-### BLOCKED-ON-HUMAN
-
-1. **The GitHub App must be created and installed** on the target repo, and the
-   webhook secret value minted into
-   `theagentorg-shared-github-webhook-secret`. Until then the Lambda returns
-   **500 "webhook secret unavailable"** — deliberately not 401. From
-   `infra/ingress/handler.py`:
-
-   > 500, never 401. "We cannot read our own secret" is not "your signature is
-   > wrong", and conflating them sends the next person to rotate a secret that
-   > was always correct.
-
-   The secret resource exists; it has **no version**, so `GetSecretValue`
-   currently fails with `ResourceNotFoundException`.
-
-2. **The three GitHub Environments (`gate1`, `gate2`, `gate3`) need required
-   reviewers.** Without a reviewer an Environment does **not** pause — it runs.
-   That is the highest-risk silent failure in the design, and no test in this
-   repository can assert a repository setting.
-
-3. **The EventBridge rule has no target yet.** The rule
-   `theagentorg-shared-github-issue-opened` is ENABLED and matches
-   `source: github.webhook`, `detail-type: issues`, `detail.action: opened`, but
-   `list-targets-by-rule` returns `[]`: the connection and API destination are
-   count-gated behind `dispatch_token_secret_name`, which is unset because an
-   `API_KEY` connection needs the token's *value* at plan time. Mint a
-   fine-grained token with `actions: write` on the one repo, put it in Secrets
-   Manager, set the variable, apply.
-
-   **Ordering matters here and it cost real time:** the workflow file must be on
-   `origin/main` *before* the target is applied. GitHub resolves the workflow
-   file on the ref, and it answers **404 both** for "file not on ref" and for an
-   unauthenticated dispatch — two causes, one indistinguishable symptom.
-
-### Not yet verified
-
-- **No live end-to-end run has gone `issue → Lambda → EventBridge → workflow →
-  five runtimes`.** Each link is tested individually; the whole chain has never
-  fired.
-- **No human has rejected a real Environment and watched a rejection-recorder job
-  fire.** That path is verified by in-process invocation and YAML parse only.
+---
 
 ## Who owns what
 
 | Area | Owner |
 |---|---|
-| `infra/` — all Terraform | **Sorour** |
-| `agentorg/{graph,gates,log,state}.py`, `agentorg/common/`, `agentorg/agents/` | **Sorour** |
+| `infra/`, `agentorg/{graph,gates,log,state}.py`, `agentorg/common/`, `agentorg/agents/` | **Sorour** |
 | `agentorg/github_ops.py`, `.github/workflows/`, `scripts/scan_gate.py` | **Mariam** |
-| `agentorg/security/` — semgrep / gitleaks / trivy wrappers | **Habiba** |
+| `agentorg/security/` — gitleaks / trivy / semgrep wrappers | **Habiba** |
 | `target_repo/`, `tickets/`, `tests/test_functional_*`, `tests/test_baseline.py` | **Reem** |
 | `tests/test_block_*`, `tests/test_chaos_*`, `tests/test_dora_*`, `tests/provenance.py` | **Aya** |
 
-## How nobody blocks anybody
-
-1. `agentorg/state.py` is the frozen contract. You may **add** optional fields;
-   never rename or remove one. A rename breaks all five lanes at once and nobody
-   notices until integration.
-2. `fixtures/` holds a validated sample of every result, so a lane loads a
-   teammate's fixture instead of waiting for their real code.
-3. Each person owns their own directory, so no two people edit the same files.
-
-## Plans and docs
-
 Per-person plans are in [`docs/plan/`](docs/plan/); start with
-[`00-timeline.md`](docs/plan/00-timeline.md). The demo runbook, with pasted
-output from real runs, is
-[`docs/plan/reem/demo_script.md`](docs/plan/reem/demo_script.md).
-Instructions for Claude Code sessions are in [`CLAUDE.md`](CLAUDE.md).
+[`00-timeline.md`](docs/plan/00-timeline.md). The demo runbook, with pasted output
+from real runs, is [`docs/plan/reem/demo_script.md`](docs/plan/reem/demo_script.md).
+Working notes for Claude Code sessions are in [`CLAUDE.md`](CLAUDE.md).
