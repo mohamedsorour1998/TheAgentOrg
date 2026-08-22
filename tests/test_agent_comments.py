@@ -570,7 +570,24 @@ def test_plan_and_gate1_land_on_the_issue_and_the_rest_on_the_pr(monkeypatch,
     # `head="someone:"` is a query GitHub can answer with somebody else's PR.
     assert repo.heads, "the PR-targeted comments never asked for a PR"
     assert set(repo.heads) == {f"someone:{state.dev.branch}"}, repo.heads
-    assert len(repo.heads) == len(by_target[PR_NUMBER])
+    # ONE LOOKUP PER PR COMMENT, PLUS ONE FOR THE MERGE.
+    #
+    # `_RecordingRepo.get_pulls` records every PR lookup, and since 2026-08-22 the
+    # promote stage calls `github_ops.merge_pr`, which resolves the PR by branch
+    # and merges it WITHOUT posting a comment. So the counts legitimately differ by
+    # exactly one, and this assertion previously read `==` only because merging did
+    # not exist.
+    #
+    # Written as `len(comments) + 1` rather than a bare `7` so the relationship
+    # stays legible: every comment costs a lookup, and the merge costs one more. A
+    # hardcoded number would go stale the moment a stage is added, and would not
+    # say why it was that number.
+    assert len(repo.heads) == len(by_target[PR_NUMBER]) + 1, (
+        f"expected one PR lookup per PR comment ({len(by_target[PR_NUMBER])}) plus "
+        f"one for the merge, got {len(repo.heads)}. Fewer means a comment or the "
+        f"merge stopped resolving the PR by branch; more means something is "
+        f"looking up the PR without needing to."
+    )
 
 
 # =========================================================================

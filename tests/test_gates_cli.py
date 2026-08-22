@@ -306,8 +306,22 @@ def test_the_log_tells_the_two_review_exits_apart(monkeypatch):
     assert approved_exit.summary != capped_exit.summary
 
     # And only the run that stopped carries a terminal line saying so.
-    assert capped_lines[-1].action == "blocked"
+    #
+    # `failed`, not `blocked`, since 2026-08-22. This assertion previously read
+    # `== "blocked"` and was pinning a defect: the cap exit borrowed the security
+    # rule's action, so a run the SCANNERS CLEARED rendered "⛔ BLOCKED — the
+    # change was stopped" on the timeline. That inverts this pipeline's central
+    # claim, asserting the deterministic rule stopped a change it had passed.
+    #
+    # The test's own purpose -- telling the two loop exits apart from the log
+    # alone -- is served strictly better by a distinct action than by a borrowed
+    # one, which is why this is an update rather than a deletion.
+    assert capped_lines[-1].action == "failed"
     assert "blocked" not in [e.action for e in approved_lines]
+    assert "failed" not in [e.action for e in approved_lines], (
+        "the approved run carries a `failed` row; the two exits must stay "
+        "distinguishable from the log alone, which is this test's whole point"
+    )
 
 
 def test_a_rejected_gate_is_recorded_in_the_log(monkeypatch):

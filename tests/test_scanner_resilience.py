@@ -1824,77 +1824,44 @@ def test_a_boolean_is_not_quietly_read_as_a_line_number(monkeypatch, tmp_path):
     )
 
 
-def test_exception_signalled_absence_hides_real_faults_when_the_knob_is_off(
+def test_an_absent_scanner_no_longer_hides_the_faults_behind_it(
     monkeypatch, tmp_path
 ):
-    """A KNOWN LIMIT, ACCEPTED BY RULING, pinned here so it cannot be forgotten.
+    """THE LIMIT THIS TEST ONCE PINNED IS FIXED. It now asserts the fix.
 
-    THIS TEST ASSERTS A FAIL-OPEN. It is not describing correct behaviour. It
-    records the exact boundary of the plan's central ruling, decided deliberately
-    rather than discovered later, so the limit lives in the suite instead of in a
-    review thread.
+    This function was named `test_exception_signalled_absence_hides_real_faults_
+    when_the_knob_is_off` and it ASSERTED A FAIL-OPEN: with semgrep absent and
+    gitleaks and trivy installed-but-broken, on a clean diff, the measured result
+    was `verdict=pass, blocking=0`. Two genuine faults went unreported, because
+    the knob-off ABSENT path signals absence by RAISING and one raise ended the
+    fan-out before the other two wrappers ran.
 
-    THE CAUSE IS EXCEPTION-SIGNALLING, NOT THE SEQUENTIAL LOOP. That distinction
-        is the whole finding and it is easy to state backwards. `run_all_scanners`
-        does iterate the three scanners in order -- but a sequential loop is
-        harmless on its own. The abort happens because the knob-off ABSENT path
-        signals absence by RAISING (`_run.unrunnable_findings`), and one raise
-        ends the loop. Change nothing about the loop and the limit persists;
-        change how absence is signalled and it disappears, which is exactly what
-        the second half of this test measures. (Independently falsified in review:
-        disabling only the absent `raise`, loop untouched, moved the knob-off
-        outcome from `pass`/0 to `block`/3.)
+    Its docstring carried the instruction this rewrite follows, verbatim: "when it
+    happens, replace the first half with one asserting both real faults ARE
+    reported. Do not silence it."
 
-        THIS TEST WAS ONCE NAMED `test_the_fan_out_stops_at_the_first_absent_
-        scanner_and_hides_real_faults`, which named the loop as the cause -- the
-        error this paragraph exists to correct. A docstring cannot outrun its own
-        function name for a reader skimming the file, so the name was changed to
-        say the mechanism instead. If you find yourself renaming it back towards
-        the loop, re-read the falsification above first.
+    FIXED 2026-08-22 by isolating each wrapper in `run_all_scanners`, so an absent
+    scanner records its own outcome without discarding its siblings'. MEASURED on
+    this exact case, before and after:
 
-    WHAT IT DEMONSTRATES. With semgrep absent but gitleaks and trivy INSTALLED
-        AND BROKEN, on a clean diff, measured: `verdict=pass, blocking=0`. Two
-        genuine faults go unreported -- semgrep's raise ends the fan-out before
-        they run, and the fixture fallback for a clean diff is `pass`.
+        before:  verdict=pass   blocking=0
+        after:   verdict=block  blocking=['gitleaks-scanner-error',
+                                         'trivy-scanner-error']
+                 provenance: scanners
 
-    IT IS PRE-EXISTING: measured identical on 40f2e56, before any of this task's
-        changes. It follows from raise-on-absent, which is the ruling's design.
-
-    THE KNOB DISSOLVES IT, and this was MEASURED rather than assumed -- the
-        measurement is why this docstring reads the way it does. The first version
-        of this test asserted that `SCANNERS_REQUIRED=true` leaves the abort in
-        place, on the reasoning that the knob changes only what the first failure
-        SAYS. That assertion went RED. With the knob on, the absent branch RETURNS
-        a finding instead of raising, so nothing aborts and all three scanners
-        report -- the absent one and both real faults. The second half below pins
-        that.
-
-    WHY IT IS NOT FIXED -- RULED ON, not left open. Keep the raise. The two
-        candidate fixes (the fan-out collecting per-scanner outcomes, or absence
-        ceasing to be exception-signalled) both change the frozen
-        `run_all_scanners` seam's behaviour and the meaning of the four
-        fallback-dependent `len(blocking) == 2` assertions, days before a judged
-        demo, on the seam that produces the demo's central claim.
-
-        What the exposure actually is, once the knob is accounted for: a machine
-        with SOME scanners installed and OTHERS installed-but-broken, with the
-        knob OFF. That is not CI -- no binaries at all there, which is the plain
-        absent path and the designed behaviour. It is not the demo machine or any
-        production image -- all three installed, knob on, so no raise occurs and
-        this limit does not exist. It is a HALF-PROVISIONED LAPTOP.
-
-        ACCEPTED COST: such a machine under-reports faults until someone sets the
-        knob. This test is what makes that acceptable rather than unknown.
-
-    WHAT WOULD MAKE THE FIRST HALF GO RED: fixing the limit. That is a good
-        outcome, not a regression -- when it happens, replace the first half with
-        one asserting both real faults ARE reported. Do not silence it.
+    THE SECOND HALF IS UNCHANGED AND STILL MATTERS. With `SCANNERS_REQUIRED=true`
+    the absent branch returns a finding rather than raising, so all three report.
+    Keeping both halves is what shows the fix did not merely move the abort from
+    one configuration to another: the knob-off and knob-on paths now differ only
+    in whether the ABSENT scanner is itself a finding, which is the knob's entire
+    job.
     """
     bin_dir = tmp_path / "bin"
     for tool in ("gitleaks", "trivy"):
         _fake_scanner(bin_dir, tool, 'echo "internal error" >&2\nexit 2', monkeypatch)
     # semgrep is deliberately NOT created here, and the fan-out runs semgrep
-    # FIRST -- see the tuple in agentorg/security/__init__.py.
+    # FIRST -- see the tuple in agentorg/security/__init__.py. That ordering is
+    # what made this the worst case before the fix.
     assert not (bin_dir / "semgrep").exists(), "semgrep must be the absent one"
 
     state = RunState(
@@ -1906,16 +1873,20 @@ def test_exception_signalled_absence_hides_real_faults_when_the_knob_is_off(
 
     result = security_agent.run(state)
 
-    assert result.verdict == "pass", (
-        f"THE KNOWN LIMIT: expected the documented fail-open (semgrep's absent "
-        f"raise aborts the fan-out, the fixture fallback for a clean diff is "
-        f"'pass'), got {result.verdict!r}. If this is red because both real "
-        f"faults are now reported, the limit has been FIXED -- delete this test "
-        f"and assert the fix instead. See this test's docstring."
+    assert result.verdict == "block", (
+        f"expected the two real faults BEHIND the absent scanner to be reported "
+        f"and to block; got {result.verdict!r}. If this is red with "
+        f"verdict='pass' and blocking=[], the fan-out has gone back to aborting "
+        f"on the first absent scanner -- the fail-open this test used to pin."
     )
-    assert result.blocking == [], (
-        f"the two real faults are expected to be unreported here; got "
-        f"{_summarize(result.blocking)}"
+    assert {f.rule for f in result.blocking} == {
+        "gitleaks-scanner-error",
+        "trivy-scanner-error",
+    }, (
+        f"expected exactly the two BROKEN scanners' faults -- semgrep is absent, "
+        f"and with the knob OFF an absence is a development affordance rather "
+        f"than a fault, so it must NOT appear here. Got "
+        f"{_summarize(result.blocking)}."
     )
 
     # THE SECOND HALF IS THE REMEDY, and it is a real one: with the knob on, the
@@ -2333,14 +2304,18 @@ def test_a_raising_fan_out_is_not_memoised_and_the_next_call_really_retries(
 
     with pytest.raises(FileNotFoundError):
         run_all_scanners(_dev())
-    assert calls == ["semgrep"], (
-        f"semgrep is first in the fan-out and it raised, so the loop must have "
-        f"ended there; got {calls!r}"
+    assert calls == ["semgrep", "gitleaks", "trivy"], (
+        f"every wrapper must be attempted even though semgrep raised; got "
+        f"{calls!r}. UPDATED 2026-08-22: this expected `[\"semgrep\"]` when a "
+        f"single raise ended the fan-out. Per-wrapper isolation means the loop now "
+        f"completes, which is the point of that fix -- an absent scanner must not "
+        f"discard the faults behind it. If this is red with only ['semgrep'], the "
+        f"abort is back."
     )
 
     with pytest.raises(FileNotFoundError):
         run_all_scanners(_dev())
-    assert calls == ["semgrep", "semgrep"], (
+    assert calls == ["semgrep", "gitleaks", "trivy"] * 2, (
         f"the second call did not re-enter the fan-out ({calls!r}). Either the "
         f"raise was stored and replayed, or a partial result was cached -- and "
         f"if that result was the empty list, compute_security_verdict([]) "
