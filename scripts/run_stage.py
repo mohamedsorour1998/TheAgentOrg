@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import typing
 
 from agentorg import gates, github_ops, graph, log
 from agentorg.common import agent_client, config
@@ -95,18 +96,60 @@ from agentorg.state import HumanDecision, LogEvent, RunState
 _TRUE = frozenset({"true"})
 _FALSE = frozenset({"false", ""})
 
-# Exit codes. Three of them, because "the run was blocked", "the run was
-# rejected by a human" and "this job crashed" are three different facts and the
-# demo's whole point is that the first is a WORKING pipeline reporting a real
-# verdict.
+# A run in one of these has ENDED. DERIVED from the frozen contract's own
+# Literal rather than written out, so a status added to `RunState` is terminal
+# here the moment it exists. A hardcoded copy would treat a new ending as
+# "running" and let a recorder overwrite it -- which is the whole defect below,
+# reintroduced by the guard meant to prevent it.
+#
+# `agentorg/approve_server.py:126` states the same set as a literal for its own
+# boundary; it is not imported, because importing an HTTP server into the one
+# script every cloud stage runs would put `http.server` on the pipeline's import
+# path for a four-element frozenset. The two are kept honest by a test that
+# derives this set the same way approve_server's own test does.
+_TERMINAL_STATUSES = frozenset(
+    typing.get_args(typing.get_type_hints(RunState)["status"])
+) - {"running"}
+
+# For each terminal status, the LogEvent action that states that ending. Needed
+# because `agentorg/timeline.py:196-211` reads its banner off the action of the
+# LAST log row -- never off `RunState.status`, which no row carries -- so a
+# recorder that appends any non-ending row last silently downgrades a BLOCKED
+# banner to INCOMPLETE. Measured; see `_stage_gate_rejected`.
+#
+# `failed` maps to "blocked" rather than to an action of its own because the
+# LogEvent vocabulary (state.py:204-207) has no "failed", and `graph.py:473`
+# already logs exactly that pairing for the revision-cap ending. Following the
+# existing convention rather than inventing a second one, since the FROZEN
+# contract may gain optional FIELDS but this is a Literal's members.
+_OUTCOME_ACTIONS = {
+    "blocked": "blocked",
+    "failed": "blocked",
+    "rejected": "rejected",
+    "promoted": "promoted",
+}
+
+# Exit codes. Four of them, because "the run was blocked", "the run was
+# rejected by a human", "this recorder was asked to overwrite a run that had
+# already ended" and "this job crashed" are four different facts and the demo's
+# whole point is that the first is a WORKING pipeline reporting a real verdict.
 #
 # All non-zero: a blocked or rejected run must not proceed, and `needs:` in the
 # workflow is what stops the next job. But 1 is what an uncaught exception
 # already exits with, so a block sharing that code would make the poisoned demo
 # run indistinguishable from a broken workflow on the projector.
+#
+# EXIT_ALREADY_FINAL is the fourth, and it borrows none of the other three FOR
+# THE REASON THIS BLOCK ALREADY GIVES. A recorder that refused to overwrite a
+# finished run did not block anything (it never evaluated the rule), was not
+# rejected by anybody (refusing to invent a human is the point), and did not
+# crash (it is a deliberate refusal, exactly as EXIT_BLOCKED is not 1). Reusing
+# EXIT_REJECTED would be the worst of the four: the code would say a human
+# refused the run, which is the precise lie the guard exists to prevent.
 EXIT_OK = 0
 EXIT_BLOCKED = 3
 EXIT_REJECTED = 4
+EXIT_ALREADY_FINAL = 5
 
 
 def flag(raw: str) -> bool:
@@ -286,8 +329,110 @@ def _stage_gate_rejected(args: argparse.Namespace, gate: str) -> int:
     after a gate needs the gate job, which was skipped, so it is skipped too.
     This function does not enforce the stop -- it records that it happened, which
     is the thing that was missing.
+
+    ─────────────────────────────────────────────────────────────────────────
+    AND IT REFUSES A RUN THAT HAS ALREADY ENDED, WHICH IS NOT BELT-AND-BRACES
+    ─────────────────────────────────────────────────────────────────────────
+
+    MEASURED, run 32509257195 of run-pipeline.yml, on the POISONED ticket:
+    `develop` exited EXIT_BLOCKED and wrote `status=blocked`. gate2 was then
+    SKIPPED because it `needs: develop`, and the recorder's condition at the time
+    -- `always() && needs.gate2.result != 'success'` -- fired on that `skipped`.
+    This function ran, called `gates.resume`, and wrote `status=rejected` OVER
+    `status=blocked`, attributed to a github.actor who never saw a gate. The
+    block, which is the single thing the poisoned demo beat exists to show, was
+    erased by the job written to preserve refusals.
+
+    The workflow now carries the discriminator (`needs.<preceding stage>.result
+    == 'success'`), and that is the real fix -- this refusal cannot restore a
+    block that was already overwritten. It exists because the workflow guard is
+    one `if:` in a YAML file with no compiler and no test that can execute it: a
+    future edit that drops the clause is a one-line diff, and the failure it
+    causes is SILENT on the surface everyone reads. The state file simply says
+    `rejected`. So the same rule is stated a second time where it CAN be
+    executed, and the two are independent -- one is a condition GitHub evaluates,
+    the other is Python this repository's suite runs.
+
+    WHY THIS IS THE RIGHT LAYER, and specifically why the guard is not pushed
+    down into `gates.resume`: that function is shared by four callers
+    (`gates_cli`, `approve_server`, `_stage_gate` and this one) and it genuinely
+    has no opinion about whether a run is over -- `agentorg/gates.py:206-208`
+    only ever SETS `status`, and never reads it.
+    `tests/test_approve_server.py:266-289` pins that gap ON PURPOSE, in a test
+    whose docstring says: "If this test starts failing, `gates.py` grew a guard
+    and the two tests above should be re-read, not deleted." A guard added there
+    would break that test and, more importantly, would revoke the deliberate
+    `gates_cli resume ... --decision overridden` escape hatch that
+    `approve_server`'s docstring names as the documented way to override a
+    security block -- the one capability a human is meant to keep. So the refusal
+    goes on the UNATTENDED caller, which is this one: nobody is at a keyboard
+    when a recorder job runs, so there is nobody to make that judgement.
+
+    IT DOES NOT SWALLOW A REAL REFUSAL. Reaching this function on a live run
+    means `status == "running"`, and every genuine rejection path is exactly
+    that: a reviewer refusing an Environment stops the run AT the gate, so the
+    preceding stage succeeded and nothing has written a terminal status yet. The
+    only states this refuses are the four that mean some earlier stage already
+    decided the outcome -- and in every one of them there is no human refusal to
+    record, which is why inventing one is the defect.
     """
     state = _load(args.run_id)
+
+    if state.status in _TERMINAL_STATUSES:
+        # NOT a crash, and not a rejection either: EXIT_ALREADY_FINAL. The run's
+        # real ending is left exactly as the stage that decided it wrote it, and
+        # the refusal is LOGGED rather than only printed, because
+        # `runs/<run_id>.jsonl` is the surface the timeline and the judges read
+        # -- a refusal that exists only in a job log is a refusal nobody reading
+        # the run can find.
+        #
+        # `action="opened"` because the LogEvent contract's vocabulary has no
+        # word for "declined to write"; "rejected" would put a row on the
+        # timeline saying a human refused this gate, which is the exact false
+        # claim being refused. The summary carries the fact.
+        _log(state, "system", gate, "opened", verdict=state.status,
+             summary=(f"{gate}-rejected declined to record a refusal: this run "
+                      f"already ended as status={state.status}. Recording one "
+                      f"would overwrite that outcome and attribute it to a human "
+                      f"who never saw the gate."))
+
+        # AND THEN THE RUN'S REAL ENDING IS RE-STATED, AS THE LAST ROW.
+        #
+        # MEASURED, and it is the reason this second row exists rather than being
+        # tidier without it. `timeline._outcome` (timeline.py:196-211) reads the
+        # banner off the action of the LAST event, not off `RunState.status`, and
+        # `_OUTCOME` holds only promoted/blocked/rejected. So the explanatory row
+        # above -- action "opened", which is deliberately not an ending -- became
+        # the last row and downgraded the banner:
+        #
+        #     before this job runs:  ⛔ BLOCKED — the change was stopped
+        #     after, with one row:   … INCOMPLETE — run stopped at gate2 without
+        #                                an ending
+        #
+        # That is this very defect one layer out. The guard would have preserved
+        # `status=blocked` in the state file while erasing the word BLOCKED from
+        # the projector, which is the surface the demo beat is actually judged on.
+        # A guard whose own record destroys the evidence it protects is worse than
+        # no guard, because it looks like it worked.
+        #
+        # Re-appending the ending is honest rather than cosmetic: the log is
+        # append-only (state.py:193-195), so the earlier row cannot be edited, and
+        # the fact being restated -- this run ended as `status` -- is true at this
+        # moment and was true before. `verdict` carries the status either way, so
+        # the two rows together read as "a recorder was asked, it declined, the
+        # run is still blocked".
+        _log(state, "system", gate, _OUTCOME_ACTIONS[state.status],
+             verdict=state.status,
+             summary=(f"run remains status={state.status}; the {gate} rejection "
+                      f"recorder changed nothing"))
+
+        print(f"::error::{gate} was not refused by a human -- this run already "
+              f"ended as status={state.status}, so {gate} was skipped because the "
+              f"run stopped earlier, not because anybody rejected it. Refusing to "
+              f"overwrite that outcome.")
+        _emit(state)
+        return EXIT_ALREADY_FINAL
+
     decision = HumanDecision(
         gate=gate,
         decision="rejected",

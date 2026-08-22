@@ -1435,6 +1435,139 @@ def test_every_gate_has_a_rejection_recorder_wired_to_it():
         )
 
 
+def test_each_rejection_recorder_requires_the_stage_before_its_gate_to_have_succeeded():
+    """A SKIPPED gate does not mean a human refused it. This is the discriminator.
+
+    MEASURED, run 32509257195 of this workflow, on the POISONED ticket:
+
+        plan=success gate1=success develop=failure gate1-rejected=skipped
+        gate2-rejected=failure gate2=skipped gate3-rejected=failure
+        sre=skipped gate3=skipped promote=skipped
+
+    `develop=failure` was CORRECT -- EXIT_BLOCKED, the deterministic rule blocking
+    the poisoned diff, with `status=blocked` written to the state. Then two things
+    went wrong, both from the same missing clause:
+
+      * gate2 was SKIPPED because it `needs: develop`. The recorder's condition
+        was `always() && needs.gate2.result != 'success'`, and 'skipped' is not
+        'success', so it FIRED. It called `gates.resume`, which wrote
+        `status=rejected` OVER `status=blocked`, attributed to a github.actor who
+        never saw a gate. The block -- the one thing that demo beat exists to
+        show -- was erased by the job written to preserve refusals.
+      * gate3-rejected fired the same way with `sre` skipped, so artifact
+        `run-state-<id>-sre` did not exist and the job died in
+        download-artifact: a red job on the demo screen that recorded nothing.
+
+    The root cause is that `needs.<gate>.result` alone CANNOT tell those apart. A
+    rejected Environment makes GitHub skip its job, and a gate the run never
+    reached is skipped too -- one observation, two meanings, which is rule 4 of
+    this repository ("denied" versus "not ready yet") in workflow form. The stage
+    BEFORE the gate is the field that separates them: if it succeeded, the only
+    remaining reason the gate did not run is the human.
+
+    WHY THE PRECEDING STAGE IS DERIVED FROM `STAGE_CHAIN` and not written out as a
+    second `{gate: stage}` map: a hardcoded copy is exactly where two definitions
+    drift. `STAGE_CHAIN` is already the declared literal this file checks the
+    workflow's `needs` against, so the gate's predecessor in it IS the stage
+    whose success is being demanded -- and reordering the chain moves both at
+    once.
+
+    `test_every_gate_has_a_rejection_recorder_wired_to_it` above asserts
+    `always()` and `needs.<gate>.result`; this adds only the clause that was
+    missing, and it does NOT contradict
+    `test_no_job_runs_regardless_of_whether_its_dependency_succeeded`, which
+    exempts these three jobs by exact name: `always()` must stay, because a
+    recorder that runs only on success never runs at all. What is asserted here is
+    that `always()` is NARROWED by the upstream result, not removed.
+    """
+    jobs = _jobs()
+
+    # The gate -> preceding stage map, derived. Asserted non-empty and asserted to
+    # cover all three gates, so a STAGE_CHAIN edit that puts a gate first (making
+    # it have no predecessor) fails here rather than silently checking two gates.
+    preceding = {
+        later: earlier
+        for earlier, later in itertools.pairwise(STAGE_CHAIN)
+        if later in GATE_JOBS
+    }
+    assert set(preceding) == set(GATE_JOBS), (
+        f"derived a preceding stage for {sorted(preceding)}, expected all of "
+        f"{sorted(GATE_JOBS)}; STAGE_CHAIN is {STAGE_CHAIN}, so either a gate was "
+        f"reordered to the front of the chain or it left the chain entirely -- "
+        f"and this test would otherwise check one fewer recorder"
+    )
+
+    checked = 0
+    for gate, stage in sorted(preceding.items()):
+        job_name = f"{gate}-rejected"
+        assert job_name in jobs, (
+            f"gate {gate} has no {job_name} job; see "
+            f"test_every_gate_has_a_rejection_recorder_wired_to_it"
+        )
+        job = jobs[job_name]
+        condition = str(job.get("if") or "")
+
+        # 1. The `if:` demands the preceding stage SUCCEEDED. Compared against
+        #    both quotings GitHub accepts, so a switch to double quotes is not a
+        #    silent failure.
+        wanted = [
+            f"needs.{stage}.result == 'success'",
+            f'needs.{stage}.result == "success"',
+        ]
+        assert any(clause in condition for clause in wanted), (
+            f"job {job_name} has `if: {condition}`, which does not require "
+            f"needs.{stage}.result == 'success'. Without it a {gate} that was "
+            f"SKIPPED because {stage} failed or was skipped reads identically to "
+            f"one a human refused, and this job writes status=rejected over "
+            f"whatever the run actually ended as -- measured on run 32509257195, "
+            f"where it erased a status=blocked poisoned run."
+        )
+
+        # 2. And the job NEEDS it. A condition may reference any job in the
+        #    workflow, but `needs.<job>.result` for a job this one does not `needs`
+        #    evaluates against nothing -- GitHub renders it as an empty/skipped
+        #    result, so the clause above would be permanently false and the
+        #    recorder would never fire on a real refusal either. Separate
+        #    assertion with its own message because it is a separate defect:
+        #    assertion 1 passing while this one fails is a recorder that is now
+        #    dead rather than one that over-fires.
+        needs = _needs(job)
+        assert stage in needs, (
+            f"job {job_name} tests needs.{stage}.result but needs {needs}, which "
+            f"does not include {stage}. A condition referencing a job this one "
+            f"does not `needs` always evaluates against `skipped`, so the clause "
+            f"is never true and this recorder never fires -- a refused {gate} "
+            f"would leave no record at all, which is the gates.py:16-20 bug back."
+        )
+
+        # 3. The artifact it downloads is that same stage's. The recorder reads
+        #    the state the preceding stage uploaded, so if the two disagree the
+        #    job dies in download-artifact -- which is exactly how gate3-rejected
+        #    failed on run 32509257195, with `Artifact not found for name:
+        #    run-state-32509257195-sre`.
+        downloaded = _downloaded_names(job)
+        assert downloaded, (
+            f"job {job_name} downloads no named artifact, so it has no state to "
+            f"record a refusal against and would start from nothing"
+        )
+        expected = set(_uploaded_names(jobs[stage]))
+        assert expected, (
+            f"job {stage} uploads no named artifact, so {job_name} has nothing "
+            f"to read; this assertion would otherwise compare against an empty set"
+        )
+        assert set(downloaded) & expected, (
+            f"job {job_name} downloads {sorted(downloaded)} but {stage} -- the "
+            f"stage whose success it now requires -- uploads {sorted(expected)}. "
+            f"The recorder must read the artifact of the stage it gates on, or it "
+            f"dies in download-artifact and records nothing."
+        )
+        checked += 1
+
+    assert checked == len(GATE_JOBS), (
+        f"checked {checked} rejection recorders, expected {len(GATE_JOBS)}"
+    )
+
+
 def test_the_run_id_guard_fires_when_the_plan_stage_prints_no_run_id():
     """MINOR 7: the guard was unreachable in the exact case its message describes.
 
@@ -1520,4 +1653,313 @@ def test_the_run_id_guard_fires_when_the_plan_stage_prints_no_run_id():
         )
         assert not out.read_text().strip(), (
             f"an empty run_id was still written to GITHUB_OUTPUT: {out.read_text()!r}"
+        )
+
+
+# --------------------------------------------------------------------------
+# The CODE-LEVEL half of the same guard, behind the workflow's `if:`.
+#
+# The workflow clause above is the real fix, and it is one line of YAML with no
+# compiler and no test that can execute it. These execute the refusal.
+# --------------------------------------------------------------------------
+
+
+def test_the_recorder_refuses_to_overwrite_a_blocked_run(monkeypatch, tmp_path):
+    """The measured defect, driven end to end: a real block, then the recorder.
+
+    Run 32509257195 in full. `develop` on the POISONED ticket exited EXIT_BLOCKED
+    with `status=blocked`; gate2 was skipped because it `needs: develop`; the
+    recorder's `if:` fired on that `skipped` and `gates.resume` wrote
+    `status=rejected` over the block, by a github.actor who never saw a gate.
+
+    So the state this drives is not synthesised -- it is produced by running the
+    poisoned pipeline through `_cloud_run` until the block rule stops it, exactly
+    as `test_a_blocked_cloud_run_exits_with_the_block_code_and_logs_a_delivered_ref`
+    does, and THEN invoking the recorder on it the way the broken workflow did.
+    A test that hand-set `status="blocked"` on a fresh RunState would pass against
+    a guard keyed on anything at all; this one requires the guard to survive a
+    state the block rule really wrote.
+
+    WHAT MUST HOLD AFTERWARDS is the point, and it is three separate facts:
+    the status still says `blocked`, no rejected decision was appended, and the
+    exit code is neither EXIT_OK (which would report the overwrite as a success)
+    nor EXIT_REJECTED (which would claim a human refused a run nobody saw).
+    """
+    module = _stage_module()
+
+    # A real poisoned run, stopped by the deterministic rule.
+    _posted, blocked_state, rc = _cloud_run(monkeypatch, tmp_path, poisoned="true")
+    assert blocked_state.status == "blocked", (
+        f"this test needs a run the BLOCK RULE stopped; got "
+        f"status={blocked_state.status!r}. Without a genuinely blocked state "
+        f"there is no outcome for the recorder to overwrite and this test would "
+        f"pin nothing."
+    )
+    assert rc == module.EXIT_BLOCKED, f"the poisoned run exited {rc}, not EXIT_BLOCKED"
+    decisions_before = [(d.gate, d.decision) for d in blocked_state.decisions]
+    assert not [d for d in decisions_before if d[1] == "rejected"], (
+        f"the blocked run already carries a rejection {decisions_before}; the "
+        f"overwrite this test looks for would then be invisible"
+    )
+
+    # Now the workflow's defect: gate2 was skipped, so its recorder ran.
+    args = argparse.Namespace(
+        run_id=blocked_state.run_id, ticket_id="", ticket_text="",
+        poisoned="false", auto_approve="false", approver="mohamedsorour1998",
+    )
+    rc = module.STAGES["gate2-rejected"](args)
+
+    after = module.RunState.model_validate_json(
+        (tmp_path / f"{blocked_state.run_id}.state.json").read_text()
+    )
+    assert after.status == "blocked", (
+        f"the recorder overwrote a blocked run with status={after.status!r}. That "
+        f"is the measured defect from run 32509257195: the block -- the one thing "
+        f"the poisoned demo beat exists to show -- erased by the job written to "
+        f"preserve refusals."
+    )
+    assert [(d.gate, d.decision) for d in after.decisions] == decisions_before, (
+        f"the recorder appended a decision to a run that had already ended: "
+        f"{[(d.gate, d.decision) for d in after.decisions]}, was "
+        f"{decisions_before}. status holding is not enough -- an appended "
+        f"'gate2 rejected' renders on the timeline the judges read."
+    )
+    assert rc not in (module.EXIT_OK, module.EXIT_REJECTED), (
+        f"the recorder exited {rc}: EXIT_OK would report the refusal-to-record as "
+        f"an ordinary success, and EXIT_REJECTED would claim a human refused this "
+        f"run -- the precise false claim the guard exists to prevent"
+    )
+    assert rc == module.EXIT_ALREADY_FINAL, (
+        f"the recorder exited {rc}, expected EXIT_ALREADY_FINAL "
+        f"({module.EXIT_ALREADY_FINAL})"
+    )
+
+
+@pytest.mark.parametrize("status", ["blocked", "promoted", "failed", "rejected"])
+@pytest.mark.parametrize("gate", GATE_JOBS)
+def test_no_recorder_records_a_refusal_on_a_run_that_already_ended(
+    monkeypatch, tmp_path, gate, status
+):
+    """All four terminal statuses, all three recorders. Twelve combinations.
+
+    `blocked` is what was measured, but it is not the only one that matters and
+    the guard is deliberately not keyed on it: a `promoted` run is as over as a
+    blocked one, and a recorder firing on a promoted run would write
+    `status=rejected` onto a change that already shipped. `failed` is the
+    revision-cap and SRE no-go ending; `rejected` is the double-record case, where
+    firing twice appends a second refusal by a second actor.
+
+    Parametrised over all three gates for the reason
+    `test_a_rejected_gate_is_recorded_on_disk_and_the_run_stops` gives: the
+    recorder is per-gate wiring and two of three working is the shape that reads
+    as done.
+
+    The state here IS hand-set, unlike the test above -- and that is the division
+    of labour between them. Only the poisoned pipeline can produce a real
+    `blocked`, but no run in this suite ends `promoted` AND has a gate left to
+    record, so the other three endings cannot be reached any other way. The test
+    above proves the guard survives a state the pipeline really wrote; this one
+    proves it covers every ending the frozen contract can express.
+    """
+    module = _stage_module()
+    _posted, state, _rc = _cloud_run(monkeypatch, tmp_path)
+
+    state.status = status
+    before = len(state.decisions)
+    module.gates.save(state)
+
+    args = argparse.Namespace(
+        run_id=state.run_id, ticket_id="", ticket_text="",
+        poisoned="false", auto_approve="false", approver="somebody",
+    )
+    rc = module.STAGES[f"{gate}-rejected"](args)
+
+    after = module.RunState.model_validate_json(
+        (tmp_path / f"{state.run_id}.state.json").read_text()
+    )
+    assert rc == module.EXIT_ALREADY_FINAL, (
+        f"{gate}-rejected exited {rc} on a status={status!r} run, expected "
+        f"EXIT_ALREADY_FINAL ({module.EXIT_ALREADY_FINAL})"
+    )
+    assert after.status == status, (
+        f"{gate}-rejected changed a finished run's status from {status!r} to "
+        f"{after.status!r}"
+    )
+    assert len(after.decisions) == before, (
+        f"{gate}-rejected appended a decision to a status={status!r} run: "
+        f"{[(d.gate, d.decision) for d in after.decisions]}"
+    )
+    refusals = [d for d in after.decisions if d.decision == "rejected"]
+    assert not [d for d in refusals if d.gate == gate], (
+        f"a rejection was recorded against {gate} on a run that ended as "
+        f"{status!r}, so a reader cannot tell a human's refusal from a run that "
+        f"stopped earlier -- which is the defect this whole file is about"
+    )
+
+
+def test_a_recorder_still_records_a_genuine_refusal_on_a_live_run():
+    """The mirror image: a guard that refuses everything passes every test above.
+
+    This is the over-refusal test, and it is not decoration -- the four statuses
+    the guard knows are the four that are NOT "running", so a guard keyed one
+    character wrong (`not in`, or a set including "running") turns every real
+    rejection into a silent no-op and makes the gates non-binding in the opposite
+    direction. Rather than restate that path, it defers to the behavioural test
+    that already owns it, which drives all three gates through `_cloud_run` with
+    `reject_at=` and asserts status, decision, gate attribution and the comment.
+
+    Called directly so this file fails HERE, naming over-refusal, rather than
+    only in a test whose name is about recording.
+    """
+    test_a_rejected_gate_is_recorded_on_disk_and_the_run_stops()
+
+
+def test_the_recorders_terminal_statuses_are_every_ending_the_contract_has():
+    """Derived from `RunState.status`, so a new ending is terminal on arrival.
+
+    A hardcoded set would treat a fifth ending as "running" and let a recorder
+    overwrite it -- the same defect one status later. Derived the same way
+    `tests/test_approve_server.py:1068-1080` derives `approve_server._TERMINAL`,
+    and asserted to EQUAL it: the two are separate literals in separate modules
+    (approve_server does not import run_stage and must not), and two guards
+    against one hazard that disagree about what "over" means is worse than one.
+    """
+    import typing
+
+    from agentorg import approve_server
+
+    module = _stage_module()
+    hints = typing.get_type_hints(module.RunState, include_extras=False)
+    statuses = set(typing.get_args(hints["status"]))
+    assert statuses, "RunState.status is not a Literal; nothing was derived"
+
+    assert module._TERMINAL_STATUSES == statuses - {"running"}
+    assert module._TERMINAL_STATUSES == approve_server._TERMINAL, (
+        f"run_stage says {sorted(module._TERMINAL_STATUSES)} is terminal and "
+        f"approve_server says {sorted(approve_server._TERMINAL)}; two guards "
+        f"against the same hazard must agree on what 'over' means"
+    )
+
+
+def test_the_already_final_exit_code_is_distinguishable_from_every_other_outcome():
+    """Four facts, four codes, and 1 is spoken for by an uncaught exception.
+
+    `run_stage.py:98-109` reasons this out for EXIT_BLOCKED: a block sharing a
+    code with a crash makes the poisoned demo run indistinguishable from a broken
+    workflow on the projector. The same argument is what forbids reusing any
+    existing code here -- and EXIT_REJECTED most of all, since that code asserts a
+    human refused the run, which is the false claim being refused.
+    """
+    module = _stage_module()
+    codes = {
+        "EXIT_OK": module.EXIT_OK,
+        "EXIT_BLOCKED": module.EXIT_BLOCKED,
+        "EXIT_REJECTED": module.EXIT_REJECTED,
+        "EXIT_ALREADY_FINAL": module.EXIT_ALREADY_FINAL,
+    }
+    assert len(set(codes.values())) == len(codes), (
+        f"two exit codes collide: {codes}. Each names a different fact about the "
+        f"run, and a shared value makes two of them unreadable in a job log."
+    )
+    assert module.EXIT_ALREADY_FINAL not in (0, 1), (
+        f"EXIT_ALREADY_FINAL is {module.EXIT_ALREADY_FINAL}: 0 would report the "
+        f"refusal as an ordinary success and 1 is what an uncaught exception "
+        f"already exits with"
+    )
+
+
+def test_the_refused_recorder_leaves_the_blocked_banner_on_the_timeline(
+    monkeypatch, tmp_path
+):
+    """The guard's OWN log row must not erase the word the demo beat is judged on.
+
+    FOUND BY RUNNING IT, not by reading it, and it is the same defect one layer
+    out from the one being fixed. `timeline._outcome` (timeline.py:196-211) reads
+    the banner off the action of the LAST log row -- never off `RunState.status`,
+    which no row carries -- and `_OUTCOME` holds only promoted/blocked/rejected.
+    So the guard's explanatory row, whose action is deliberately `opened` because
+    the vocabulary has no word for "declined to write", became the last row:
+
+        before the recorder ran:  ⛔ BLOCKED — the change was stopped
+        after, with one row:      … INCOMPLETE — run stopped at gate2 without
+                                     an ending
+
+    The state file still said `blocked`. The projector said INCOMPLETE. A guard
+    that preserves the evidence in a file while erasing it from the surface the
+    judges read is worse than no guard, because it looks like it worked -- and
+    every assertion in this file's other new tests reads the STATE, so all of them
+    stayed green through it. That is this repository's own pattern: a check that
+    cannot express the failing case.
+
+    ASSERTED ON THE RENDERED TEXT, not on the log rows, because the rendering is
+    what came apart. Asserting "a row with action='blocked' exists" would have
+    passed against the bug too -- the security row already had one; what was wrong
+    was which row came LAST.
+    """
+    from agentorg import timeline
+
+    module = _stage_module()
+    monkeypatch.setattr(timeline.log, "_LOG_DIR", tmp_path)
+
+    _posted, state, rc = _cloud_run(monkeypatch, tmp_path, poisoned="true")
+    assert state.status == "blocked", f"needs a blocked run; got {state.status!r}"
+    assert rc == module.EXIT_BLOCKED, f"the poisoned run exited {rc}"
+
+    before = timeline.render_text(state.run_id).splitlines()[1]
+    assert "BLOCKED" in before, (
+        f"the banner does not say BLOCKED before the recorder even runs, so this "
+        f"test cannot detect the downgrade it exists for: {before!r}"
+    )
+
+    args = argparse.Namespace(
+        run_id=state.run_id, ticket_id="", ticket_text="",
+        poisoned="false", auto_approve="false", approver="mohamedsorour1998",
+    )
+    assert module.STAGES["gate2-rejected"](args) == module.EXIT_ALREADY_FINAL
+
+    after = timeline.render_text(state.run_id).splitlines()[1]
+    assert "BLOCKED" in after, (
+        f"the recorder's own log row downgraded the timeline banner from "
+        f"{before!r} to {after!r}. The state file still says blocked, so every "
+        f"state-reading assertion stays green while the word BLOCKED disappears "
+        f"from the surface the demo is judged on."
+    )
+    assert "INCOMPLETE" not in after, (
+        f"the banner reads {after!r}: the run has a real ending and the renderer "
+        f"is now reporting it as one that never finished"
+    )
+    # And the refusal itself is still findable by a reader of the run -- the
+    # restated ending must not have replaced the explanation.
+    rendered = timeline.render_text(state.run_id)
+    assert "declined to record a refusal" in rendered, (
+        "the timeline no longer explains why the recorder wrote nothing, so a "
+        "reader sees a recorder job that ran and left no trace"
+    )
+
+
+def test_every_terminal_status_has_an_ending_action_the_timeline_recognises():
+    """The map that keeps the banner honest, checked against the renderer itself.
+
+    Two failure modes, both silent: a terminal status missing from
+    `_OUTCOME_ACTIONS` raises a KeyError inside the guard (turning a refusal into
+    a crash), and an action that `timeline._OUTCOME` does not know renders as
+    INCOMPLETE. Both are asserted against the real map in the real renderer
+    rather than a restatement, so adding a status to the frozen contract fails
+    here rather than on a projector.
+    """
+    from agentorg import timeline
+
+    module = _stage_module()
+
+    assert set(module._OUTCOME_ACTIONS) == module._TERMINAL_STATUSES, (
+        f"_OUTCOME_ACTIONS covers {sorted(module._OUTCOME_ACTIONS)} but the "
+        f"terminal statuses are {sorted(module._TERMINAL_STATUSES)}; a status "
+        f"missing here makes the guard raise KeyError instead of refusing"
+    )
+    assert timeline._OUTCOME, "timeline._OUTCOME is empty; nothing was checked"
+    for status, action in sorted(module._OUTCOME_ACTIONS.items()):
+        assert action in timeline._OUTCOME, (
+            f"status {status!r} maps to action {action!r}, which "
+            f"timeline._OUTCOME does not know ({sorted(timeline._OUTCOME)}); the "
+            f"banner would read INCOMPLETE for a run that really ended"
         )

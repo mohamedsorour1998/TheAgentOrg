@@ -560,9 +560,25 @@ jobs:
   # being fixed once already.
   #
   # No credentials, no agent call: it writes a decision and posts a comment.
+  # THE UPSTREAM RESULT IS A DISCRIMINATOR, NOT A REDUNDANCY. A rejected
+  # Environment makes GitHub SKIP its job -- and a gate the run never reached is
+  # skipped too, so `needs.gate1.result` on its own reads IDENTICALLY for "a human
+  # refused this" and "the run stopped before this". Recording the second as a
+  # refusal writes status="rejected" over a run nobody rejected and attributes it
+  # to github.actor, who never saw the gate.
+  #
+  # MEASURED, run 32509257195: a poisoned run blocked at `develop` recorded
+  # `status=blocked` correctly, then gate2-rejected fired on gate2's `skipped` and
+  # overwrote it with `status=rejected` by mohamedsorour1998. The block -- the one
+  # thing that demo beat exists to show -- was erased by the job written to
+  # preserve refusals.
+  #
+  # The stage before the gate is the only field that separates the two: if it
+  # SUCCEEDED, the sole reason the gate did not run is the human. It also keeps the
+  # download below honest, since the artifact this job reads is that stage's.
   gate1-rejected:
     needs: [plan, gate1]
-    if: always() && needs.gate1.result != 'success'
+    if: always() && needs.plan.result == 'success' && needs.gate1.result != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -619,9 +635,13 @@ jobs:
   # being fixed once already.
   #
   # No credentials, no agent call: it writes a decision and posts a comment.
+  # `needs.develop.result == 'success'` -- see gate1-rejected for why. This is the
+  # pair that was measured wrong: a blocked poisoned run's `status=blocked` was
+  # overwritten with `status=rejected` because gate2 was skipped, and a skipped
+  # gate reads the same whether a reviewer refused it or develop blocked first.
   gate2-rejected:
-    needs: [plan, gate2]
-    if: always() && needs.gate2.result != 'success'
+    needs: [plan, develop, gate2]
+    if: always() && needs.develop.result == 'success' && needs.gate2.result != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -678,9 +698,13 @@ jobs:
   # being fixed once already.
   #
   # No credentials, no agent call: it writes a decision and posts a comment.
+  # `needs.sre.result == 'success'` -- see gate1-rejected. Here the missing guard
+  # failed loudly rather than quietly: with `sre` skipped there is no `-sre`
+  # artifact, so this job died in download-artifact before reaching its stage --
+  # a red job on the demo screen that recorded nothing at all.
   gate3-rejected:
-    needs: [plan, gate3]
-    if: always() && needs.gate3.result != 'success'
+    needs: [plan, sre, gate3]
+    if: always() && needs.sre.result == 'success' && needs.gate3.result != 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
