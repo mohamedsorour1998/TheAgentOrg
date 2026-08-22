@@ -48,3 +48,10 @@ include = ["agentorg*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Registered so an unknown-marker warning cannot hide a typo. A misspelled
+# `@pytest.mark.real_snapshoot` would otherwise silently not apply, and the test
+# would run against the stub it was written to bypass -- passing while measuring
+# nothing, which is this repository's signature defect in miniature.
+markers = [
+    "real_snapshot: exercises repo_snapshot.snapshot itself, so the autouse stub in tests/test_repo_snapshot.py steps aside",
+]

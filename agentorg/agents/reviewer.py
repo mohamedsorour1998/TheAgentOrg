@@ -13,7 +13,7 @@ is the one signal this function acts on. Wrapping it again would also swallow
 caller bugs and serve fixture data while the run looked live.
 """
 
-from .. import fixtures_loader
+from .. import fixtures_loader, repo_snapshot
 from ..common import llm
 from ..state import ReviewResult, RunState
 
@@ -29,22 +29,36 @@ ONE JSON object and nothing else. Shape:
 THE TARGET IS A PYTHON 3.12 FLASK APPLICATION, and the change is a focused edit to
 an existing small file — not a production-grade library.
 
-Use "changes_requested" ONLY when the diff is WRONG or UNSAFE:
+YOUR REVIEW BUDGET IS SMALL AND REAL: a handful of rounds, then the run ends. A
+change you keep sending back does not get better -- it runs out of revisions and
+ships nothing, even when the security scanners have already cleared it.
+
+So the standard is not "is this what I would have written". It is "would shipping
+this be WRONG or UNSAFE":
+
   * it does not do what the ticket asked
   * it hardcodes a credential, or logs one
   * it would crash, or it references something undefined
   * it is written in the wrong language
 
-APPROVE otherwise. These are NOT blocking issues, and requesting them costs the
-change a revision it cannot afford:
-  * a different storage choice you would have preferred
-  * missing headers, cleanup timers, retry logic or mutexes the ticket did not ask for
+APPROVE EVERYTHING ELSE. If your objection is a matter of degree, taste, robustness
+or completeness, approve and put it in `comments`, where it is recorded on the pull
+request without costing a round. Specifically approve despite:
+  * a different storage or library choice you would have preferred
+  * missing headers, cleanup timers, retry logic, locks or error handling the ticket
+    did not ask for
   * configurability beyond what the ticket specified
-  * anything you would phrase as "consider" or "ideally"
+  * missing tests, unless the ticket asked for tests
+  * anything you would phrase as "consider", "ideally", "should also" or "could be
+    improved"
 
-If the diff implements the ticket in Python without a credential in it, return
-"approve" with an empty must_fix. Put preferences in `comments`, where they are
-recorded without blocking — that is what `comments` is for."""
+AND IF YOU HAVE ALREADY ASKED ONCE: a later round is for a problem the developer did
+not fix, not for a new preference you noticed on re-reading. If the thing you first
+objected to is now addressed, approve — even if the fix is not how
+you would have done it.
+
+A change that implements the ticket in Python with no credential in it gets
+"approve" and an empty must_fix. `comments` is where the rest goes."""
 
 # Last-resort must_fix line, used only when the model asked for changes and
 # named none. See _ensure_actionable.
@@ -57,7 +71,25 @@ NO_DETAIL_MUST_FIX = (
 def _prompt(state: RunState) -> str:
     diff = state.dev.diff if state.dev else ""
     tasks = "\n- ".join(state.plan.tasks) if state.plan else ""
-    return f"PLAN TASKS:\n- {tasks}\n\nDIFF UNDER REVIEW:\n{diff}"
+    parts = [f"PLAN TASKS:\n- {tasks}", f"DIFF UNDER REVIEW:\n{diff}"]
+
+    # THE REPOSITORY WITH THIS DIFF APPLIED, which is not the same thing the
+    # developer saw and should not be.
+    #
+    # The developer wanted the file as it stands, because it was about to change it.
+    # The reviewer wants the file AS THE CHANGE WOULD LEAVE IT -- otherwise it is
+    # handed an original plus a patch and asked to apply the patch in its head, and
+    # that is precisely the work that produced "Missing import for the authenticate
+    # function" as a blocking issue about an import defined twenty lines above the
+    # hunk.
+    #
+    # Passing `diff` is what switches `render` from before-view to after-view.
+    if state.plan is not None:
+        context = repo_snapshot.render(state.plan.target_files, diff=diff)
+        if context:
+            parts.append(context)
+
+    return "\n\n".join(parts)
 
 
 def _ensure_actionable(result: ReviewResult) -> ReviewResult:

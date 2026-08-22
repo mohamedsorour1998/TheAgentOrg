@@ -20,7 +20,7 @@ which is the one signal this function acts on.
 
 import re
 
-from .. import fixtures_loader
+from .. import fixtures_loader, repo_snapshot
 from ..common import llm
 from ..common.diff import added_files
 from ..state import DevResult, RunState
@@ -72,6 +72,27 @@ def _prompt(state: RunState) -> str:
     if state.plan is not None:
         parts.append("PLAN TASKS:\n- " + "\n- ".join(state.plan.tasks))
         parts.append("TARGET FILES:\n- " + "\n- ".join(state.plan.target_files))
+
+        # THE WHOLE REPOSITORY, not just the file names.
+        #
+        # Without it the agent writes a diff against files it has never seen: it
+        # invents the originals, so its `@@` hunk headers and context lines are
+        # guesses and `git apply` would refuse the result. MEASURED on the deployed
+        # pipeline -- `sync.RWMutex` and `NewRateLimiter` proposed for a Python Flask
+        # app, four revisions running, until the cap expired with the scanners
+        # reporting PASS. The reviewer was right every time and the developer could
+        # not act on it, because nothing in the prompt said what the file contained.
+        #
+        # The SAME snapshot every other agent reads, so the reviewer judges the diff
+        # against the bytes the developer wrote it from. Two agents reasoning about
+        # different information is a reviewer whose objections are unactionable.
+        #
+        # Empty when the target is private or unreachable; `render` returns "" and
+        # nothing is appended, degrading to the names-only prompt rather than failing.
+        context = repo_snapshot.render(state.plan.target_files)
+        if context:
+            parts.append(context)
+
     if state.review is not None and state.review.must_fix:
         # This is a revision, not a first pass. graph.py re-calls run() before
         # it overwrites state.dev, so state.dev still holds the diff the

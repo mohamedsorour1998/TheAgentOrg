@@ -24,7 +24,7 @@ carrying an AWS key. Never substitute an empty list here.
 # measured rule.
 import logging
 
-from .. import fixtures_loader
+from .. import fixtures_loader, repo_snapshot
 from ..common import config, llm
 from ..common.diff import added_files
 from ..security import run_all_scanners
@@ -160,14 +160,21 @@ def _explain(verdict: str, blocking: list[Finding]) -> str:
     The verdict is passed in already decided. Whatever comes back is used as
     text and nothing else -- it is never parsed, and it never reaches the
     verdict. It is also length-capped: see MAX_EXPLANATION_CHARS.
+
+    The repository snapshot is included so the explanation can name what the file
+    actually does rather than paraphrasing the finding back. It cannot affect the
+    verdict -- that was computed before this function was called, and this reply is
+    only ever assigned to `explanation`.
     """
     findings_txt = "\n".join(
         f"- {f.tool} {f.rule} {f.severity} {f.file}:{f.line} {f.description}"
         for f in blocking
     ) or "(none)"
-    reply = llm.text(
-        SYSTEM_PROMPT, f"VERDICT: {verdict}\nBLOCKING FINDINGS:\n{findings_txt}"
-    )
+    context = repo_snapshot.render([f.file for f in blocking])
+    user = f"VERDICT: {verdict}\nBLOCKING FINDINGS:\n{findings_txt}"
+    if context:
+        user = f"{user}\n\n{context}"
+    reply = llm.text(SYSTEM_PROMPT, user)
     if reply and len(reply) > MAX_EXPLANATION_CHARS:
         logging.getLogger(__name__).warning(
             "model explanation was %d chars (cap %d); using the deterministic one",

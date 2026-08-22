@@ -245,7 +245,25 @@ jobs:
             # account state rather than on this repository, and a knob added to
             # only one would surface as an intermittent difference between a
             # fresh runtime's first deploy and every later one.
-            env_vars="AGENT_ROLE=${agent}"
+            # DEMO_REPO GOES ON ALL FIVE, because every agent now reads the target
+            # repository before it answers.
+            #
+            # `agentorg/repo_snapshot.py` shallow-clones the target so the planner
+            # names files that exist, the developer patches bytes it has actually
+            # seen, the reviewer judges against them, and the SRE knows what it is
+            # deploying into. `config.GITHUB_REPO` reads this variable, and with it
+            # unset `snapshot()` returns {} -- so every agent would silently fall
+            # back to the names-only prompt and the whole change would appear to
+            # have no effect. That is this project's signature failure shape, and it
+            # would have been invisible: five green runtimes, five degraded prompts.
+            #
+            # A NAME, NOT A CREDENTIAL. The clone is anonymous, which is why no token
+            # is passed here: the target is public, and shipping a GitHub token into
+            # five containers so they could read a public repository would put a real
+            # credential in five more places for no capability. A private target gets
+            # no snapshot and the pipeline still completes -- degraded, stated in
+            # repo_snapshot's docstring, and preferable to the token.
+            env_vars="AGENT_ROLE=${agent},DEMO_REPO=${{ vars.DEMO_REPO }}"
             if [ "$agent" = "security" ]; then
               env_vars="${env_vars},SCANNERS_REQUIRED=true"
             fi

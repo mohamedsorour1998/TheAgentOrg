@@ -10,7 +10,7 @@ again would also swallow caller bugs (a bad model_cls, a fixture that no longer
 validates) and quietly serve fixture data while the run looked live.
 """
 
-from .. import fixtures_loader
+from .. import fixtures_loader, repo_snapshot
 from ..common import llm
 from ..state import PlanResult, RunState
 
@@ -35,7 +35,22 @@ def run(state: RunState) -> PlanResult:
     runs and the provenance would read *unknown* on the one path every offline
     run takes. This branch is the fact -- it is where the fixture is loaded.
     """
-    result = llm.structured(PlanResult, SYSTEM_PROMPT, state.ticket_text)
+    # THE REPOSITORY, so the plan names files that exist.
+    #
+    # MEASURED before this: for a Python Flask target the planner named
+    # `app/controllers/password_resets_controller.rb`,
+    # `config/initializers/rate_limit_config.rb` and `spec/requests/...` -- a RAILS
+    # layout, and nothing in the repository resembles it. A plan naming files that do
+    # not exist is not harmless: the developer then writes a diff against a project
+    # that is not there.
+    #
+    # This agent needs the snapshot MORE than the others, because it is the one that
+    # CHOOSES the paths every later stage works from.
+    context = repo_snapshot.render()
+    user_prompt = (
+        f"{state.ticket_text}\n\n{context}" if context else state.ticket_text
+    )
+    result = llm.structured(PlanResult, SYSTEM_PROMPT, user_prompt)
     if result is None:
         llm.record_fixture_fallback()
         return fixtures_loader.plan()

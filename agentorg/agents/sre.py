@@ -44,7 +44,7 @@ is the one signal this function acts on. `github_ops.ci_status` likewise never
 raises, and its docstring is where that guarantee is recorded.
 """
 
-from .. import fixtures_loader, github_ops
+from .. import fixtures_loader, github_ops, repo_snapshot
 from ..common import llm
 from ..state import RunState, SLOCheck, SREResult
 
@@ -85,6 +85,15 @@ def _prompt(state: RunState) -> str:
         parts.append("FILES CHANGED:\n" + (", ".join(state.dev.files_changed)
                                            or "(none)"))
         parts.append(f"DIFF:\n{state.dev.diff}")
+
+    # THE REPOSITORY, so "operational risk" is judged against what is actually
+    # deployed rather than against a generic web service. The same snapshot every
+    # other agent reads.
+    context = repo_snapshot.render(
+        state.dev.files_changed if state.dev is not None else None
+    )
+    if context:
+        parts.append(context)
     if state.security is not None:
         parts.append(
             f"SECURITY VERDICT: {state.security.verdict} "

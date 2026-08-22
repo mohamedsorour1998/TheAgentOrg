@@ -883,8 +883,19 @@ def test_the_reviewer_prompt_distinguishes_wrong_from_merely_different():
         "the reviewer's prompt does not state the blocking standard as WRONG or "
         "UNSAFE, so preferences read as blocking issues"
     )
-    assert "comments" in prompt and "without blocking" in prompt, (
-        "the prompt does not tell the reviewer where to put a preference that is "
-        "not blocking -- `comments` exists for exactly that, and without saying so "
-        "every observation lands in must_fix"
+    # Asserted on the ROUTE, not on a phrase. An earlier version of this looked for
+    # the literal "without blocking" and broke when the prompt was reworded to be
+    # clearer -- a matcher keyed on wording, pinning nothing about behaviour.
+    assert "comments" in prompt, (
+        "the prompt never mentions `comments`, so the reviewer has nowhere to put a "
+        "preference that is not blocking and every observation lands in must_fix"
+    )
+    assert "approve" in prompt and ("taste" in prompt or "preference" in prompt
+                                   or "consider" in prompt), (
+        "the prompt does not tell the reviewer to APPROVE despite preferences. "
+        "Measured: four rounds of changes_requested whose must_fix items were a "
+        "different storage choice, a missing Retry-After header, absent cleanup "
+        "timers and unrequested configurability -- each defensible, none a defect, "
+        "and together they exhausted the revision budget on a diff the scanners "
+        "had cleared."
     )
