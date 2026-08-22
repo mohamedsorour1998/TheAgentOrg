@@ -44,6 +44,13 @@ actionlint .github/workflows/*.yml                            # exit 0
 cd infra/Terraform && terraform fmt -check -recursive          # exit 0
 ```
 
+**If you touched `scripts/make_deck.py`, also regenerate the deck** — none of the four
+gates opens it, so a broken slide passes all of them:
+
+```bash
+.venv-main/bin/python scripts/make_deck.py                    # exit 0, prints its own checks
+```
+
 **The pass count is deliberately not written here.** It was `816 passed, 3
 skipped` / `--collect-only` **819** before the 2026-08-22 four-lane pre-demo work,
 and every lane added tests concurrently — so any number in this file is stale
@@ -1006,7 +1013,7 @@ an audit trail.
 
 ## The test suite
 
-**41 test files** as of 2026-08-22 (`ls tests/test_*.py | wc -l`), plus five
+**41 test files** as of 2026-08-23 (`ls tests/test_*.py | wc -l`), plus five
 non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
 `--collect-only`; the table lists the largest and the ones whose subject matters,
@@ -1125,7 +1132,7 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
-### The pattern found EIGHT times across four layers
+### The pattern found NINE times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -1175,6 +1182,15 @@ The instances, briefly:
   guard that the stripping still works. Reading either test would never have
   revealed the gap — which is the whole pattern.
 
+- **A test that REQUIRED the bug.** Three tests read `run-pipeline.yml`'s text to check
+  the per-run revision cap, and one asserted that `== 'true'` was PRESENT — so it passed
+  on an expression that never fired and would have failed on the fix. This is the first
+  instance where a test did not merely miss a defect but actively defended it, and the
+  only witness was a deployed run printing `POISONED: true` beside
+  `MAX_REVISION_LOOPS: 3`. A workflow expression cannot be tested by reading the
+  workflow; the runner's type coercion IS the behaviour. Replaced with four tests that
+  evaluate the expression across both dispatch shapes.
+
 - **Sixteen SRE tests that never ran pydantic.** Every one stubs `llm.structured` to
   return a ready-made `SREResult`, which is the correct isolation for "what does the
   agent do with advice" — and it meant no test validated a real reply against the
@@ -1199,7 +1215,7 @@ whole project exists to prevent.** Same for "denied" versus "not ready yet".
 
 ## Verified runs — what the cloud path has actually done
 
-### The demo pair — verified at runtime version 16, all five agents on the model
+### The demo pair — verified at runtime version 18, all five agents on the model
 
 The current pair. Both scenarios re-run after the SRE schema fix below, which is the
 first run where **every stage of both halves reported `_source=model`**.
@@ -1255,6 +1271,48 @@ Not a loop. On 2026-08-22 the poisoned dispatch and the auto-run both started on
 #43 five seconds apart; `gh run cancel` on the auto one left the issue with a single
 clean record. **Cancel the auto-run rather than racing it** — that is the reliable
 move, and it takes one command.
+
+### A TEST THAT REQUIRED THE BUG — the worst instance of the pattern so far
+
+`MAX_REVISION_LOOPS` is set per run in `run-pipeline.yml`: `1` when poisoned, `3`
+otherwise. The first version of that expression **never applied**, and the tests were
+worse than absent.
+
+`poisoned` is declared `type: boolean`, so in an **expression** context
+`inputs.poisoned` is a real boolean on a UI or `gh workflow run` dispatch — and
+`== 'true'` against a boolean is always **false**. MEASURED on run `32585947588`, the
+final verification run of the poisoned path:
+
+```
+POISONED: true
+MAX_REVISION_LOOPS: 3        <- the CLEAN branch, on a poisoned run
+```
+
+Every run silently took the clean cap and the demo ran four review rounds exactly as
+before. **Three tests read the workflow TEXT and passed throughout — and one of them
+asserted that `== 'true'` was PRESENT**, so it passed on the broken expression and would
+have failed on the fix. It actively defended the defect. The previous commit's own comment
+asserted the opposite of what the runner does, and the tests agreed with the comment
+rather than with GitHub.
+
+The condition is now a truthiness test that **also excludes the string `"false"`**, because
+both input shapes are real: a REST dispatch (EventBridge, and every `gh api` call) sends
+these inputs as JSON strings, and a non-empty `"false"` string is **truthy** to GitHub. A
+bare `inputs.poisoned` would send clean API-triggered runs down the poisoned branch.
+
+```yaml
+MAX_REVISION_LOOPS: ${{ (inputs.poisoned && inputs.poisoned != 'false') && '1' || '3' }}
+```
+
+Four tests now **evaluate** the expression the way the runner does, across both dispatch
+shapes, with a deliberately narrow evaluator that **raises on any operator it was not
+written for** — an evaluator that silently mishandles an operator is the same false
+confidence one level up.
+
+**Two lessons.** A workflow expression cannot be tested by reading the workflow: the
+runner's type coercion is the whole behaviour. And when a comment and a test agree with
+each other but nobody checked either against the platform, the agreement is worthless —
+only the deployed run could tell.
 
 ### THE SRE'S ADVICE WAS REJECTED BY THE SCHEMA IT WAS ASKED FOR
 
@@ -1511,8 +1569,8 @@ Three things worth keeping:
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 16** — re-read 2026-08-22 with `list-agent-runtimes`, and confirmed by
-`preflight.py` check 2 on the same run that verified the demo pair. All five carry the
+**version 19** — re-read 2026-08-23 with `preflight.py` check 2. The number climbs on
+every deploy; what matters is that all five carry the SAME one. All five carry the
 **same** version: a split would mean a partial deploy, where some agents run new code
 and some old and no stage's output says
 which, so `scripts/preflight.py` check 2 fails on a version mismatch as well as on
@@ -1562,6 +1620,116 @@ file, so deleting one blank line shifts every finding below it. Therefore
 `REAL_SCANNER_LINES` is a property of *the scanners* **and** *that exact diff*, and
 the script loads the reference diff from `fixtures/dev_result_poisoned.json` rather
 than carrying a second copy.
+
+---
+
+## The presentation — `scripts/make_deck.py`
+
+The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-prefinal.pptx`,
+15 slides, real transitions and click-advanced animations. One command, and it
+self-checks:
+
+```bash
+.venv-main/bin/python scripts/make_deck.py
+```
+
+```
+docs/pitch/TheAgentOrg-prefinal.pptx  (376 KB)
+  slides:      15
+  animated:    13
+  layout:      clean
+  sections:    all four covered
+  transitions: all
+  OK — motion, content rules and layout verified in the saved file
+  file(1):     Microsoft OOXML
+```
+
+**Why generated.** Somebody has to be able to fix a typo at 11pm the night before and
+regenerate. And a hand-built `.pptx` lets a stale figure survive on a slide indefinitely
+— every number is a constant at the top of the script, each annotated with the command
+that produced it, which makes rule 4 of this file enforceable rather than aspirational.
+
+`python-pptx>=1.0,<2` is in the **`dev` extra only**. Nothing under `agentorg/` imports
+it; a presentation tool has no business in a container where every extra import is
+another thing that can fail at runtime on arm64.
+
+### Motion is not a python-pptx feature
+
+Measured before relying on it: `dir(slide)` exposes nothing matching `trans` or `anim`.
+The library models shapes and text, **not the timing tree**. Both live in the slide's raw
+XML, which it does expose, so `_transition` and `_animate` build that XML directly.
+
+- `<p:transition>` must be appended to `<p:sld>` as its **LAST child** — the schema
+  requires that order, and an element out of place makes PowerPoint declare the file
+  corrupt and offer to repair it, which on a projector is indistinguishable from a broken
+  deck.
+- An entrance animation is one `<p:timing>` tree per slide. Each shape needs `<p:set>` to
+  make it visible **plus** `<p:animEffect filter="fade">` — without the `<p:set>` the
+  shape is on screen from the start and the fade animates something already visible.
+- Circular photographs are `auto_shape_type = MSO_SHAPE.OVAL` on the picture, which
+  writes `<a:prstGeom prst="ellipse">`. Verified in the saved XML: 5 pictures, 5
+  ellipses.
+
+### `verify()` reads the saved archive back, and that is the point
+
+**A deck that silently lost its motion is byte-different but visually identical until it
+is presented**, and python-pptx will never report it — it never knew about those
+elements. So the file is re-opened and four things are counted. Each has caught a real
+defect:
+
+| check | what it caught |
+|---|---|
+| transitions + `animEffect` per slide | the library cannot tell you they are missing |
+| **wrapped-height** collisions | a width-only check reported clean while **six** boxes overlapped |
+| banned phrases | cut copy and source code are easy to reintroduce while editing prose |
+| required sections present | a deck that reads well and omits a required topic fails the brief |
+
+**On the layout check:** the question is wrapped **height**, not line width. With
+`word_wrap` on, a long line does not overflow sideways — it wraps, and the box grows
+**downward** into whatever sits below it. Compare boxes only when they overlap
+**horizontally**: two columns side by side share a vertical band by design, and flagging
+those made the audit cry wolf on every stat slide. Give single-line boxes an explicit
+`height`, or the 1in default hangs past the slide edge and all fifteen slides report a
+false positive.
+
+### Design in the browser first
+
+`docs/pitch/preview/index.html` renders the same palette, type scale and 16:9 geometry as
+HTML:
+
+```bash
+.venv-main/bin/python -m http.server 8412 --directory docs/pitch
+```
+
+A colour decision then takes one reload instead of regenerate → open PowerPoint → squint.
+**That loop is why this deck came out well**, and it is the step most likely to be
+skipped. The preview's CSS custom properties and the generator's palette constants are
+the **two places a colour lives** and must change together — otherwise what is on screen
+stops being what was signed off.
+
+### The palette, and the three content rules
+
+Dark: near-black with a hint of blue (**not flat grey**, which reads as dead), off-white
+text (**never pure white**, which glares), cyan for every structural mark, rose and mint
+only where a slide states a failure or a success. Dark because the delivery medium is a
+Teams screen share where the viewer's own brightness is unknown.
+
+Three rules the first version of the deck broke, all now enforced by `verify()`:
+
+- **No source code on a slide.** Nobody reads five lines of Python off a screen share in
+  sixty seconds, and asking them to spends their attention on parsing instead of on the
+  argument.
+- **No per-person slides.** A slide headed with one engineer's name invites "so what did
+  the other four do", and makes a five-person team read as five people who worked
+  separately. One *combined* team slide with photographs is different, and good.
+- **Photographs are pre-cropped square** in `docs/pitch/photos/square/`. CSS crops with
+  `object-fit: cover`; **PowerPoint has no equivalent and stretches instead**, and a
+  stretched face is the one defect an audience notices instantly. Portraits are biased to
+  the upper third — a centre crop on a tall photograph cuts the top of the head off.
+
+The recipe is also written up in `~/sorour/BringingtheModelHome/CLAUDE.md`, with the
+generator copied to `reference/` there, so a future deck for a different event starts
+from this one rather than from scratch.
 
 ---
 
@@ -1804,7 +1972,12 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `tests/conftest.py` | The six autouse guards |
 | `tests/provenance.py` | Which scanner mode a test is in, and the discriminator |
 | `tests/test_issue_lifecycle.py` | The issue links its PR, learns the ending, closes |
-| `docs/plan/` | Per-person plans; `reem/demo_script.md` is the runbook |
+| `scripts/make_deck.py` | Generates the pitch deck; self-checks motion, layout and content |
+| `scripts/demo_{clean,poisoned}.sh` | The demo's two paths as one command each |
+| `docs/pitch/` | The deck, the speaking script, and the browser design mirror |
+| `docs/demo-runbook.md` | The live demo, step by step — the operator handout |
+| `docs/handout-*.md` | One per engineer: their lane, their numbers, their questions |
+| `docs/plan/` | Per-person plans; `reem/demo_script.md` is the OFFLINE runbook |
 | `runs/` | Run logs + paused state. Gitignored, ~10k files — **never `ls` in here** |
 
 `make_fixtures.py` regenerates all seven fixtures and re-validates each from disk.
