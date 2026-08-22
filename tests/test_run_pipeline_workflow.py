@@ -2200,13 +2200,30 @@ def test_the_poisoned_run_gets_a_smaller_cap_than_the_clean_run():
         f"the cap does not depend on `poisoned`, so both halves of the demo share one "
         f"value: {expression}"
     )
-    # `'true'` as a STRING: workflow_dispatch inputs arrive as strings even when
-    # declared boolean, and the REST dispatch API rejects real JSON booleans inside
-    # `inputs`. With `== true` the expression is always false and every run gets the
-    # clean value -- silently, with the poisoned beat still blocking, so nothing fails.
-    assert "== 'true'" in expression or '== "true"' in expression, (
-        f"the cap compares `poisoned` against a boolean, not the string GitHub "
-        f"actually sends, so the condition is always false: {expression}"
+    # NOT AN EQUALITY AGAINST 'true'. THIS ASSERTION USED TO REQUIRE THE BUG.
+    #
+    # `poisoned` is declared `type: boolean`, so in an expression context
+    # `inputs.poisoned` is a real boolean on a UI or `gh workflow run` dispatch, and
+    # `== 'true'` against a boolean is always FALSE. MEASURED on run 32585947588: the
+    # develop job printed `POISONED: true` and `MAX_REVISION_LOOPS: 3` -- the cap took
+    # the clean branch on a poisoned run and the demo ran four review rounds.
+    #
+    # The first version of this test asserted `== 'true'` was PRESENT, so it passed on
+    # the broken expression and would have failed on the fix. A test can be worse than
+    # absent: this one actively defended the defect, and only a deployed run could tell.
+    assert "== 'true'" not in expression and '== "true"' not in expression, (
+        f"the cap compares `inputs.poisoned` against the string 'true'. That input is "
+        f"declared `type: boolean`, so on a UI or `gh workflow run` dispatch the "
+        f"comparison is always false and every run silently gets the clean cap -- "
+        f"measured on run 32585947588: `POISONED: true` with "
+        f"`MAX_REVISION_LOOPS: 3`. Expression: {expression}"
+    )
+    # And the string shape still has to be handled: a REST dispatch (EventBridge, and
+    # every `gh api` call) sends `"false"` as a non-empty STRING, which a bare
+    # truthiness test reads as true. Both shapes are real, so both must be covered.
+    assert "!= 'false'" in expression or '!= "false"' in expression, (
+        f"the cap does not exclude the STRING \"false\" that a REST dispatch sends, "
+        f"so an API-triggered clean run would take the poisoned branch: {expression}"
     )
 
     numbers = [int(n) for n in re.findall(r"'(\d+)'", expression)]
@@ -2238,4 +2255,103 @@ def test_the_cap_still_admits_at_least_one_reviewer_pass_on_a_clean_run():
     assert clean_cap >= 2, (
         f"the clean run's cap is {clean_cap}, so a reviewer withholding approval once "
         f"ends the run `failed` -- measured on run 32557597915"
+    )
+
+
+# ── THE CAP EXPRESSION IS EVALUATED, NOT READ ─────────────────────────────────
+#
+# Every test above reads the workflow TEXT, and that is why the first version of this
+# cap shipped broken. `inputs.poisoned` is declared `type: boolean`, so on a UI or
+# `gh workflow run` dispatch it is a real boolean in an expression context and
+# `== 'true'` is always false. MEASURED on run 32585947588: the develop job printed
+#
+#     POISONED: true
+#     MAX_REVISION_LOOPS: 3
+#
+# -- the cap took the CLEAN branch on a poisoned run, four review rounds ran, and three
+# text-level tests were green the whole time. One of them asserted `== 'true'` was
+# present, so it required the bug.
+#
+# This evaluates the expression against BOTH real input shapes instead. A tiny
+# evaluator, not a general GitHub-expression engine: it handles exactly the operators
+# this one line uses, and it FAILS LOUDLY on anything it does not recognise, so a
+# rewritten expression cannot silently start being un-evaluated -- which is the same
+# trap one level up.
+
+def _github_truthy(value):
+    """GitHub's truthiness: `false`, `''` and `0` are false; any other string is true.
+
+    The non-empty-string rule is the whole reason `!= 'false'` is needed: a REST
+    dispatch sends the STRING "false", which is truthy here.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value not in ("", "false")
+    return bool(value)
+
+
+def _eval_cap(expression, poisoned):
+    """Evaluate `${{ (A && B) && 'x' || 'y' }}` for one value of inputs.poisoned.
+
+    Raises on any shape it was not written for, rather than guessing -- an evaluator
+    that silently mishandles an operator is exactly the false confidence this file
+    documents seven times over.
+    """
+    body = re.fullmatch(r"\$\{\{\s*(.+?)\s*\}\}", expression.strip())
+    assert body, f"not a single GitHub expression: {expression!r}"
+    inner = body.group(1)
+
+    m = re.fullmatch(r"(.+?)\s*&&\s*'(\d+)'\s*\|\|\s*'(\d+)'", inner)
+    assert m, (
+        f"the cap expression is no longer `<condition> && 'n' || 'm'`, so this "
+        f"evaluator cannot check it. Extend it deliberately rather than deleting this "
+        f"test: {inner!r}"
+    )
+    condition, when_true, when_false = m.group(1).strip(), m.group(2), m.group(3)
+    condition = condition.strip("()").strip()
+
+    def one(term):
+        term = term.strip()
+        if term == "inputs.poisoned":
+            return _github_truthy(poisoned)
+        neq = re.fullmatch(r"inputs\.poisoned\s*!=\s*'([^']*)'", term)
+        if neq:
+            return str(poisoned).lower() != neq.group(1)
+        eq = re.fullmatch(r"inputs\.poisoned\s*==\s*'([^']*)'", term)
+        if eq:
+            # A real boolean never equals a string in GitHub expressions.
+            return (not isinstance(poisoned, bool)) and str(poisoned) == eq.group(1)
+        raise AssertionError(f"unrecognised term in the cap condition: {term!r}")
+
+    return when_true if all(one(t) for t in condition.split("&&")) else when_false
+
+
+@pytest.mark.parametrize(("poisoned", "shape"), [
+    (True, "boolean true -- a UI or `gh workflow run` dispatch"),
+    ("true", "string 'true' -- a REST dispatch, which EventBridge uses"),
+])
+def test_a_poisoned_run_evaluates_to_the_small_cap(poisoned, shape):
+    """THE test the text-level ones could not be. Both dispatch shapes are real."""
+    expression = _job("develop")["env"]["MAX_REVISION_LOOPS"]
+    result = _eval_cap(expression, poisoned)
+    assert result == "1", (
+        f"a poisoned run ({shape}) evaluates the cap to {result}, not 1. This is the "
+        f"defect measured on run 32585947588, where `POISONED: true` came with "
+        f"`MAX_REVISION_LOOPS: 3`. Expression: {expression}"
+    )
+
+
+@pytest.mark.parametrize(("poisoned", "shape"), [
+    (False, "boolean false -- the declared default"),
+    ("false", "string 'false' -- what a REST dispatch sends, and TRUTHY to GitHub"),
+])
+def test_a_clean_run_evaluates_to_the_full_cap(poisoned, shape):
+    """The other half, and the string case is the one a bare truthiness test breaks."""
+    expression = _job("develop")["env"]["MAX_REVISION_LOOPS"]
+    result = _eval_cap(expression, poisoned)
+    assert result == "3", (
+        f"a clean run ({shape}) evaluates the cap to {result}, not 3. A clean run needs "
+        f"its retries -- measured on run 32557597915, which ended `failed` at the cap "
+        f"with security reporting PASS. Expression: {expression}"
     )

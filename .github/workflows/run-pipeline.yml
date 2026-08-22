@@ -349,11 +349,26 @@ jobs:
       # loop exits, over whatever diff the loop settled on -- and every pass of a
       # poisoned run carries the key. Fewer rounds, same block, same two findings.
       #
-      # `inputs.poisoned` is the STRING "true": workflow_dispatch inputs arrive as
-      # strings even when declared boolean, and the REST dispatch API rejects real JSON
-      # booleans inside `inputs`. Comparing against the string is deliberate -- with
-      # `== true` this expression is always false and every run silently gets 3.
-      MAX_REVISION_LOOPS: ${{ inputs.poisoned == 'true' && '1' || '3' }}
+      # TRUTHINESS, NOT AN EQUALITY, and this took a live run to get right.
+      #
+      # `poisoned` is declared `type: boolean`, so in an EXPRESSION context
+      # `inputs.poisoned` is a real boolean when the run came from the Actions UI or
+      # `gh workflow run` -- and `== 'true'` against a boolean is always FALSE.
+      # MEASURED on run 32585947588: a poisoned run whose develop job printed
+      # `POISONED: true` and `MAX_REVISION_LOOPS: 3`, so the cap silently took the
+      # clean branch and the demo ran four review rounds anyway.
+      #
+      # The `!= 'false'` half is not redundant. `run_stage.flag` exists because these
+      # inputs reach a STEP as strings, and the REST dispatch API (which EventBridge
+      # uses) sends them as JSON strings -- so a hand dispatch can yield the boolean
+      # `true` while an API dispatch yields the string `"false"`, and a bare
+      # truthiness test would read that non-empty string as true. Both shapes are
+      # real; this handles both.
+      #
+      # The first version's own comment asserted the opposite of what the runner does,
+      # and three tests agreed with the comment because they read the workflow TEXT.
+      # Only the deployed run could tell the difference.
+      MAX_REVISION_LOOPS: ${{ (inputs.poisoned && inputs.poisoned != 'false') && '1' || '3' }}
     steps:
       - uses: actions/checkout@v4
 
