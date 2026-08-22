@@ -43,6 +43,10 @@ _MARK = {
     "opened": "•", "proposed": "→", "reviewed": "✎", "passed": "✓",
     "blocked": "⛔", "approved": "✓", "rejected": "✗", "overridden": "!",
     "merged": "⇄", "promoted": "★",
+    # A run that ENDED without shipping and without a block. Distinct glyph from
+    # "blocked"'s ⛔ on purpose: at projector distance the glyph is read before the
+    # word, and ⛔ on a run the scanners cleared is the wrong claim made largest.
+    "failed": "✗",
 }
 
 # Provenance, in words a judge can read without knowing the schema. The three
@@ -120,6 +124,14 @@ _OUTCOME = {
     "promoted": ("PROMOTED", "★", "the change shipped"),
     "blocked": ("BLOCKED", "⛔", "the change was stopped"),
     "rejected": ("REJECTED", "✗", "a human said no"),
+    # ENDED, but not shipped and not blocked: the revision cap expired without an
+    # approval, or the SRE returned no_go. Kept apart from BLOCKED and REJECTED
+    # because both of those name a cause that did not happen here -- BLOCKED claims
+    # the deterministic rule stopped the change, REJECTED claims a human refused
+    # it, and this run is neither. Before this entry existed a capped run rendered
+    # as BLOCKED, which is the pipeline's central claim asserted about a change the
+    # scanners had cleared.
+    "failed": ("FAILED", "✗", "the change did not ship"),
 }
 
 

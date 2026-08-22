@@ -189,6 +189,44 @@ class RunState(BaseModel):
     # RunState built without it -- a clean run.
     poisoned: bool = False
 
+    # WHICH PATH ANSWERED: the model, or a fixture. An ADDITION, per the rule at
+    # the top of this file. "" means a run written before this field existed --
+    # reported as unknown rather than guessed, exactly as scan_provenance's "" is.
+    #
+    # ADDED 2026-08-22, and the reason is the defect it would have caught. Every
+    # model-calling agent in the deployed pipeline had been serving fixtures for a
+    # week, because `bedrock:InvokeModel` was implicitDeny on the inference profile
+    # `config.BEDROCK_MODEL` names -- the runtime role granted `foundation-model/*`
+    # only, and `us.amazon.nova-2-lite-v1:0` is an `inference-profile/` ARN.
+    # `llm.text()` catches the denial by design, so every run completed, every job
+    # was green, and the plan comment on the target repo matched
+    # fixtures/plan_result.json byte for byte. The fallback is correct behaviour;
+    # being unable to SEE it is not.
+    #
+    # A plain `str`, deliberately not a Literal: an older run carrying an
+    # unexpected value must read as unknown, not fail validation. This field exists
+    # to report honestly, and a field that refuses to load cannot report at all.
+    #
+    # "mixed" is a real value, not a hedge. A run where the planner reached the
+    # model and the reviewer did not is neither a model run nor a fixture run, and
+    # collapsing it either way makes a partial outage look total or invisible --
+    # the same reasoning that keeps `fixture-fallback` distinct from
+    # `fixture-stub`.
+    model_provenance: str = ""
+
+    # HOW THIS RUN STARTED. An ADDITION. Defaults "manual", which is what a hand
+    # dispatch leaves it as; the EventBridge input transformer sends "issue".
+    #
+    # It exists because `event:` cannot answer the question. EventBridge triggers
+    # the workflow through the same REST dispatch API `gh workflow run` uses, so
+    # both read `workflow_dispatch` and NO field distinguishes them -- measured on
+    # run 32542152671, which an opened issue started and which reports
+    # `workflow_dispatch` like every hand dispatch before it.
+    #
+    # Trustworthy in the direction that matters: only the rule sends "issue", so a
+    # run claiming it was issue-triggered was.
+    trigger: str = "manual"
+
 
 # --------------------------------------------------------------------------
 # Decision log — one row per event, append only. Never update, never delete.
@@ -204,6 +242,27 @@ class LogEvent(BaseModel):
     action: Literal[
         "opened", "proposed", "reviewed", "blocked", "passed",
         "approved", "rejected", "overridden", "merged", "promoted",
+        # ADDED 2026-08-22. A new MEMBER of the union, not a rename -- this file is
+        # frozen against renames and removals, and an addition breaks nothing that
+        # already reads it.
+        #
+        # It exists because `failed` had no action of its own, so both pipeline
+        # paths borrowed one, and the two borrowings were wrong in opposite
+        # directions. MEASURED:
+        #
+        #   run_stage._OUTCOME_ACTIONS mapped failed -> "blocked", so a run whose
+        #   revision cap expired rendered "⛔ BLOCKED — the change was stopped"
+        #   while its security verdict was `pass` with 0 blocking findings. That
+        #   inverts the pipeline's central claim: it says the deterministic rule
+        #   stopped a change the scanners had cleared.
+        #
+        #   The SRE no_go path logged nothing at all, so the run rendered
+        #   "… INCOMPLETE — run stopped at sre without an ending" -- and
+        #   timeline._outcome reads the LAST row's action, never RunState.status,
+        #   so a finished run looked abandoned.
+        #
+        # A run nobody approved, and a run the rule stopped, are different endings.
+        "failed",
     ]
     verdict: str = ""
     summary: str = ""
