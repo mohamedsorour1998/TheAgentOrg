@@ -699,10 +699,37 @@ So nothing inside a gate job executes on a refusal, and a branch in there could
 never record one. Hence three separate recorder jobs.
 
 ```yaml
-gate1-rejected:  if: always() && needs.plan.result    == 'success' && needs.gate1.result != 'success'
-gate2-rejected:  if: always() && needs.develop.result == 'success' && needs.gate2.result != 'success'
-gate3-rejected:  if: always() && needs.sre.result     == 'success' && needs.gate3.result != 'success'
+gate1-rejected:  if: always() && needs.plan.result    == 'success'
+                    && needs.gate1.result != 'success' && needs.gate1.result != 'cancelled'
+gate2-rejected:  if: always() && needs.develop.result == 'success'
+                    && needs.gate2.result != 'success' && needs.gate2.result != 'cancelled'
+gate3-rejected:  if: always() && needs.sre.result     == 'success'
+                    && needs.gate3.result != 'success' && needs.gate3.result != 'cancelled'
 ```
+
+**`!= 'cancelled'` IS A THIRD CAUSE, and it was missing until 2026-08-22.** GitHub
+gives a non-success job three results and the recorders treated two of them as one:
+
+| result | meaning | who records it |
+|---|---|---|
+| `success` | approved | the gate job itself |
+| `skipped` | **a reviewer refused** | the recorder — its whole reason to exist |
+| `cancelled` | **nobody decided** | nothing; the run's own status is the ending |
+
+MEASURED, run `32575709109`: the poisoned run was cancelled at gate1 — two runs
+contending for one concurrency slot — and the recorder posted **`REJECTED by
+mohamedsorour1998`** to issue #37, naming a human who never saw the gate, then exited
+4. **The upstream-stage clause does not catch this**, because a cancelled run's
+upstream stage usually DID succeed. Fabricating a decision against a person's name is
+the inverse of the defect this job exists to prevent.
+
+The recorded reason also said *"was refused, **or** its job did not complete"* —
+honest hedging when the recorder genuinely could not tell, and unreadable as a result:
+a person is told a decision was recorded against their name and then told it might not
+have been a decision. With `cancelled` excluded there is one cause, so it names that
+one and says the change was not merged. Pinned by
+`test_the_recorded_refusal_reason_names_one_cause_not_two`, which fails on the word
+`" or "` — the hedge itself is the thing being forbidden.
 
 **The upstream-stage clause is a discriminator, not redundancy.** A gate the run
 never reached is *also* skipped, so `needs.<gate>.result` alone reads identically
@@ -1145,6 +1172,16 @@ The clean run was **auto-triggered by opening the issue** — run `32580985840`,
 `TRIGGER: issue`, no command typed. The poisoned run was hand-dispatched
 (`32581285927`) because `poisoned` is hardcoded `"false"` in the ingress transformer.
 
+**`CI unknown` on the clean half is the token, not a bug** — see the `Checks: read`
+note under the dispatch token. The change still merged; `unknown` yields `go`.
+
+**Issue #37 is a pre-fix artifact and is not evidence of anything.** Kept, closed by
+hand, with a comment explaining each symptom, because all four of that morning's
+defects are visible on one issue: two plan comments (the dispatch/auto-trigger race),
+a `REJECTED` followed by an `APPROVED` (the recorder firing on `cancelled`), no
+outcome comment, and no linked PR — #38's body predates `Closes #<n>` by an hour. Do
+not read #37 as a demo run. The pair is #41/#43.
+
 **The issue is now a complete record on its own.** `Closes #<n>` in the PR body
 populates GitHub's Development sidebar — verified through the GraphQL timeline, which
 reports a `CrossReferencedEvent` for the PR and a `ClosedEvent` with the reason. An
@@ -1374,6 +1411,33 @@ component hardest to justify.
 **The token needs BOTH repositories**: `auth-service` for contents + issues + pull
 requests, `TheAgentOrg` for `actions:write`. Narrowed to either alone, the other
 half fails silently.
+
+**AND IT IS MISSING `Checks: read`, WHICH IS WHY THE SRE REPORTS `CI unknown` ON A
+GREEN BUILD.** Measured on the verified clean run: the SRE said `CI unknown` while both
+check runs on that exact commit were `completed/success`, finished **49 seconds before**
+the stage asked. The code is correct — `ci_status` reads the check-runs API precisely
+so it can tell "nothing ran" from "still running" — but `get_check_runs()` raised a 403
+and the broad handler returned `unknown`. Proof it is the token and not the code:
+
+```
+# with a token that HAS the scope, same branch, same commit
+ci_status -> passing
+totalCount: 2
+   test: status=completed conclusion='success'
+   GitGuardian Security Checks: status=completed conclusion='success'
+```
+
+The verdict is fail-safe and defensible; `unknown` yields `go` and nothing shipped
+wrongly. **The missing REASON was the defect**, and it is the same class as a silent
+fixture fallback: a correct answer with no way to tell which question it answered. Each
+of the three causes now logs distinctly and the lookup failure is at **WARNING** with
+the exception named and `Checks: read` suggested. It was DEBUG, and it cost half an
+hour of looking at the wrong thing.
+
+**Adding `Checks: read` to `DEMO_GITHUB_TOKEN` is an operator action** — a secret's
+value cannot be read back, so nothing in this repository can verify or change it. Until
+it is added, `CI unknown` on the clean run is expected and the demo should say so rather
+than be surprised by it.
 
 ### Live configuration
 
