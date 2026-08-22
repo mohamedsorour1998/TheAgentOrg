@@ -27,8 +27,8 @@ You produce `Finding` objects. **You do not decide pass/block** — that is
 `compute_security_verdict()`, five lines of pure Python in `state.py`.
 
 > I deliberately do not return a verdict. My job is evidence; the decision is a severity
-> comparison with no model in it. That separation is why a prompt-injected diff cannot
-> talk its way past the gate.
+> comparison — arithmetic, not judgement. That separation is why a prompt-injected diff
+> cannot talk its way past the gate.
 
 ### Absent vs broken — the thing to be proud of
 

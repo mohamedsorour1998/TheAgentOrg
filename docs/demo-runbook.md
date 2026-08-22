@@ -219,6 +219,6 @@ it was meant to do and move on — do not debug live.
 
 **Closing line:**
 
-> Five agents did the work. Three humans approved it. One function decided whether it could
-> ship — and that function has no model in it. The creative parts are AI, the gate is
-> deterministic, and every step left a record on the issue you can read afterwards.
+> Agents did the work. Humans stayed in control of what shipped. And the change that
+> should not have shipped, did not — because the safety check is arithmetic, not
+> judgement, and every step left a record on the issue you can read afterwards.
