@@ -589,15 +589,48 @@ issue starting a run with nobody typing a command.
   exist, but `scripts/run_stage.py` reads state through a path helper that refuses
   on that backend by design. The cloud path runs on the `local` default with an
   artifact handoff between jobs.
-- An auto-started run reports `event: workflow_dispatch`, because EventBridge
-  triggers the workflow through the same REST API a manual dispatch uses. No field
-  distinguishes them; read the plan job's `ticket_id` instead.
-- The reviewer's verdict is advisory. A reviewer that never approves takes the run
-  to `MAX_REVISION_LOOPS` and it ends `failed` — correct, but it means a
-  persistently unhappy reviewer stops a change the scanners cleared.
+- **Reported line numbers are indices into the added-lines-only file**, not into
+  the real file — a finding at `app/auth.py:3` means "the third added line". This
+  is **deliberately not fixed before the demo**: correcting the materialiser would
+  shift the pinned `{3, 4}` onto `{4, 5}`, which is the **fixture's** pair, and
+  that pair is the only field distinguishing a real scan from a fixture verdict.
+  Fixing the offset would collapse the discriminator the whole verification story
+  rests on. Post-demo, both must move together.
+- All three gate Environments have **`can_admins_bypass: true`**. A repository
+  admin can push a gate through without a reviewer clicking, so the honest answer
+  to "can a gate be skipped?" is yes, by an admin. An operator setting rather than
+  a code path; `scripts/preflight.py` check 4 reports it on every run.
 - `agentorg/approve_server.py` has **no authentication** and binds `127.0.0.1`
   only. It is a local convenience over `gates.resume`, superseded by GitHub
   Environments, and must never be exposed off-host.
+
+**Deliberate, and previously listed as limitations:**
+
+- **The reviewer's verdict is advisory, and that is the design.** A reviewer that
+  never approves takes the run to `MAX_REVISION_LOOPS` and the run ends `failed`,
+  even though the scanners cleared the diff. A change nobody approved should not
+  ship, and promoting on a scanner pass alone would make the reviewer decorative.
+  What was wrong was that such a run *claimed to have been blocked*; it now renders
+  `✗ FAILED`, which distinguishes "the reviewer never approved" from "the security
+  rule stopped it".
+
+**Closed:**
+
+- An auto-started run used to be indistinguishable from a manual one — EventBridge
+  dispatches through the same REST API `gh workflow run` uses, so both report
+  `event: workflow_dispatch` and no Actions field separates them. The ingress now
+  sends `trigger: issue` and the workflow defaults to `manual`, recorded on
+  `RunState.trigger`. The two values must differ or the field would prove nothing,
+  and a test asserts exactly that.
+- **Every model-calling agent was silently serving fixtures**, for about a week.
+  `bedrock:InvokeModel` was `implicitDeny` on the cross-region inference profile
+  the code names, because the runtime role granted `foundation-model/*` only.
+  `llm.text()` catches a denial by design, so every run completed, every job was
+  green, and the deployed plan comment matched `fixtures/plan_result.json` byte for
+  byte. Both ARN shapes are now granted — the profile is what gets called, the
+  foundation models are what answer, and either grant alone is still a denial.
+  `scripts/preflight.py` check 1 re-runs the simulation, because a green
+  `terraform apply` proves the policy was written, not that it permits the call.
 
 ---
 

@@ -46,6 +46,62 @@ binaries are installed makes the CLEAN run block (measured: `status=blocked`,
     6. export LLM_DISABLED=true                              # pacing; see above
     7. python -m agentorg.graph                              # status=promoted
     8. python -m agentorg.graph --poisoned                   # status=blocked, blocking=2
+    9. python scripts/preflight.py                           # must exit 0 — THE CLOUD PATH
+
+**Step 9 checks the DEPLOYED path, which steps 0-8 do not touch.** Steps 1-8 prove
+this laptop works; step 9 is the only thing that proves the five AgentCore runtimes
+do. It runs four checks, and **if check 3 fails, the security container is
+answering from a fixture and Beat 3's central claim is false** — the demo would
+assert the scanners found the key while showing a fixture verdict. The two are
+identical in every field except the line numbers.
+
+Pasted from a real run, 2026-08-22:
+
+```
+$ .venv-main/bin/python scripts/preflight.py
+[PASS] check 2: five runtimes exist and report READY
+        theagentorg_planner          READY    v10
+        theagentorg_developer        READY    v10
+        theagentorg_reviewer         READY    v10
+        theagentorg_security         READY    v10
+        theagentorg_sre              READY    v10
+
+[PASS] check 3: the security runtime returns REAL scanner line numbers
+        runtime:     theagentorg_security
+        verdict:     block
+        blocking:    2
+        LINES:       [3, 4]
+        provenance:  scanners
+        expected:    [3, 4]  (REAL_SCANNER_LINES)
+        fixture set: [4, 5]   real set: [3, 4]
+
+[PASS] check 4: the three Environments each require a reviewer
+        gate1    rules=['required_reviewers'] can_admins_bypass=True
+        gate2    rules=['required_reviewers'] can_admins_bypass=True
+        gate3    rules=['required_reviewers'] can_admins_bypass=True
+```
+
+`LINES: [3, 4]` with `provenance: scanners` is the whole claim of Beat 3, measured
+against the deployed container rather than asserted. `blocking: 2` on its own
+proves nothing — the fixture produces that too.
+
+**Check 1 currently FAILS**, and that is expected until the Terraform apply lands:
+
+```
+[FAIL] check 1: the runtime role can invoke the model the code asks for
+        resource: arn:aws:bedrock:us-east-1:339712964409:inference-profile/us.amazon.nova-2-lite-v1:0
+        decision: implicitDeny
+```
+
+Until it says `allowed`, **every model-calling agent is serving its fixture** — the
+run still completes and every job is still green, which is exactly why this check
+exists. If a judge asks whether the agents are really using a model, the answer
+before that apply is no.
+
+**If `can_admins_bypass=True` prompts a question:** yes, a repository admin can
+push a gate through without a reviewer clicking. It is a repository setting, not a
+code path, and it is printed on every preflight run so the answer is available
+rather than discovered mid-demo.
 
 **Step 0 is not optional and it is not cosmetic. MEASURED on this machine:**
 

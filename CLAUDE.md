@@ -38,18 +38,27 @@ somewhere other than where you are editing.
 ### Before you commit
 
 ```bash
-.venv-main/bin/python -m pytest -q                            # 816 passed, 3 skipped
+.venv-main/bin/python -m pytest -q                            # green; see the note below
 .venv-main/bin/python -m ruff check agentorg scripts tests    # exit 0
 actionlint .github/workflows/*.yml                            # exit 0
 cd infra/Terraform && terraform fmt -check -recursive          # exit 0
 ```
 
-`pytest --collect-only` reports a stable **819**. The 816/3 split is
-machine-specific: the three skips are in `tests/test_provenance.py` and fire only
-when all three scanner binaries ARE on PATH. On a machine with no scanners those
-three run and you get `819 passed`. `docs/plan/reem/demo_script.md:729-733`
-treats that inversion as an instrument check — `7 passed` from that file on a
-provisioned machine means the skips are broken.
+**The pass count is deliberately not written here.** It was `816 passed, 3
+skipped` / `--collect-only` **819** before the 2026-08-22 four-lane pre-demo work,
+and every lane added tests concurrently — so any number in this file is stale
+within hours of being written. Measure it:
+
+```bash
+.venv-main/bin/python -m pytest --collect-only -q | tail -1
+```
+
+What has NOT changed is the **shape** of the result, and that part is the useful
+instrument. The three skips live in `tests/test_provenance.py` and fire only when
+all three scanner binaries **are** on PATH. On a machine with no scanners those
+three RUN, and the skip count is 0. `docs/plan/reem/demo_script.md` treats that
+inversion as an instrument check — `7 passed` from that file on a provisioned
+machine means the skips are broken.
 
 Anything that looks like a crash on a projector outranks polish.
 
@@ -184,11 +193,17 @@ Two properties to keep in mind:
   docstrings depend on that, and it is why a scanner failure must never become an
   empty list — that would send a poisoned change green with the whole suite
   staying green alongside it.
-- **An unknown threshold raises `KeyError` mid-run.** Verified:
-  `compute_security_verdict([], threshold="HIGH")` → `KeyError: 'HIGH'`.
-  `config.SECURITY_BLOCK_THRESHOLD` is an unvalidated string passed straight in,
-  so unlike `STATE_BACKEND` this fails inside the security agent rather than at
-  import. Latent, unfixed, worth knowing.
+- **An unknown threshold used to raise `KeyError` mid-run.** Verified:
+  `compute_security_verdict([], threshold="HIGH")` → `KeyError: 'HIGH'`, raised
+  from inside the security agent — the one stage whose whole purpose is to produce
+  a verdict, dying while producing one, with a traceback naming a dict lookup
+  rather than a misconfigured knob. **Fixed 2026-08-22:**
+  `config.SECURITY_BLOCK_THRESHOLD` is now validated **at import** against
+  `SEVERITY_ORDER`, like `STATE_BACKEND`. `SEVERITY_ORDER` is imported into
+  `config`, not restated — there is no cycle, measured by AST: `state.py` imports
+  only `__future__`, `datetime`, `typing`, `uuid` and `pydantic`. The import is
+  **absolute**, because `tests/test_scanner_resilience.py` loads `config.py`
+  standalone through `spec_from_file_location`, where a relative import raises.
 
 ### `RunState.poisoned`, and why the field exists
 
@@ -242,6 +257,32 @@ individual findings.
 `shutil.which` and raises when the two disagree**, because a silently wrong answer
 here would mislabel the provenance column of every metric, and a mislabelled
 metric is worse than a missing one: it reads as evidence.
+
+### The reported line numbers are wrong, and MUST NOT be fixed before the demo
+
+A finding at `app/auth.py:3` does **not** mean line 3 of `app/auth.py`. It means
+the **third added line** — the numbers are indices into the added-lines-only file
+`common/diff.py` materialises, not into the real file. Genuinely a defect, and
+deliberately left alone until after Aug 25.
+
+**Correcting the materialiser would shift `{3, 4}` to `{4, 5}` — which is the
+FIXTURE's pair.** The two modes would then be indistinguishable, and the
+discriminator this entire verification story rests on would be gone. The fixture
+would still say `{4, 5}` and so would the real scanners, so every provenance
+assertion in the suite would keep passing while proving nothing. Fixing the offset
+and re-measuring the fixture are **one change, not two**, and doing the first
+without the second is strictly worse than doing neither.
+
+Two consequences worth holding onto:
+
+- **`REAL_SCANNER_LINES` is a property of the scanners AND of one exact diff.**
+  Measured 2026-08-22: a poisoned diff differing from
+  `fixtures/dev_result_poisoned.json` by a **single missing blank line** produced
+  `LINES: [2, 3]` with `provenance: scanners`, a correct `block` and
+  `blocking=2`. Anything that edits the reference diff moves the discriminator, so
+  `scripts/preflight.py` loads that diff rather than carrying a copy of it.
+- A finding's line number is not usable for navigation. Do not build a "jump to
+  line" affordance on it, and do not quote it to a judge as a file position.
 
 ### The three provenance values, and why the last two stay apart
 
@@ -307,7 +348,7 @@ the string `"false"` as `True`.
 | `LLM_DISABLED` | same | `false` | True forces every agent onto its fixture with no model call attempted. |
 | `STATE_BACKEND` | same | `local` | Unknown values **raise at import** rather than falling back — a typo'd `dynamo` silently writing to disk would leave an operator believing a run is durable. |
 | `STATE_TABLE` | same | `theagentorg-runs` | The DynamoDB table. Same literal as the Terraform module's default — two places, one value. |
-| `SECURITY_BLOCK_THRESHOLD` | same | `high` | Passed straight to the block rule. **Unvalidated** — see the `KeyError` note above. |
+| `SECURITY_BLOCK_THRESHOLD` | same | `high` | Passed straight to the block rule. **Validated at import** against `SEVERITY_ORDER` since 2026-08-22 — unvalidated, a typo raised `KeyError` inside the security agent mid-run. |
 | `MAX_REVISION_LOOPS` | same | `3` | Caps the developer↔reviewer loop. `int()`, so a non-numeric value raises at import. |
 | `SCANNER_TIMEOUT_SECONDS` | same | `120` | Per-scanner-**invocation**, not whole-suite. A hung scanner is worse than a crashed one: on a projector it is indistinguishable from a freeze. |
 | `GITHUB_REPO` | **`DEMO_REPO`** | `""` | **The one name mismatch in the file.** Setting `GITHUB_REPO` in the environment has no effect. |
@@ -589,7 +630,20 @@ a pull request on somebody else's repository on every commit to this one. The
 EventBridge target dispatches this same event through the REST API.
 
 Four inputs, all strings on the wire: `ticket_id` (required), `ticket_text`
-(required), `poisoned` (default false), `auto_approve` (default false).
+(required), `poisoned` (default false), `auto_approve` (default false) — plus a
+fifth, `trigger` (type string, default `manual`), added 2026-08-22.
+
+**`trigger` exists because no Actions field can answer "how did this run start?"**
+EventBridge dispatches through the same REST API `gh workflow run` uses, so an
+auto-started run and a typed one both report `event: workflow_dispatch` —
+measured on run `32542152671`, started by opening issue #15. The ingress
+`input_template` sends `"trigger": "issue"`; a hand dispatch leaves the default.
+**The two values must DIFFER**, and `tests/test_trigger_provenance.py` asserts
+that: identical values would make a run recording the value indistinguishable
+from a run whose trigger was never set, so the field would be present, populated
+and worthless. The evidence is asymmetric and the tests say so — a run recording
+`issue` was sent by the rule, because nothing else sends that string, but
+`manual` may be a hand dispatch **or** a caller that forgot.
 
 ### The jobs
 
@@ -856,8 +910,11 @@ an audit trail.
 
 ## The test suite
 
-**816 passed, 3 skipped** on a provisioned machine; `--collect-only` reports a
-stable **819**. 28 test files, plus five non-test modules in `tests/`.
+**39 test files** as of 2026-08-22 (`ls tests/test_*.py | wc -l`), plus five
+non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
+`dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
+`--collect-only`; the table lists the largest and the ones whose subject matters,
+not every file.
 
 | File | Covers | Tests |
 |---|---|---:|
@@ -875,10 +932,12 @@ stable **819**. 28 test files, plus five non-test modules in `tests/`.
 | `test_offline_mode.py` | a real local branch and NOTES file, no network | 25 |
 | `test_agent_fallbacks.py` | every agent degrades to its fixture | 25 |
 | `test_gates_cli.py` | interactive halt, async resume, resumability | 22 |
+| `test_trigger_provenance.py` | `trigger` provenance + `SECURITY_BLOCK_THRESHOLD` at import | 20 |
 | `test_llm_helper.py` | JSON extraction, disabled path, KeyboardInterrupt | 20 |
 | `test_deploy_note.py` | reports the real deploy or admits it cannot | 19 |
 | `test_agent_comments.py` | one labelled comment per stage; issue-vs-PR routing | 19 |
 | `test_dora_batch.py` | the headline claim under test | 14 |
+| `test_agentcore_iam.py` | the inference-profile grant + the deploy smoke test's discriminator | 11 |
 | `test_dora_harness.py` | the harness's raw numbers | 10 |
 | `test_ingress_dispatch_target.py` | connection, API destination, input transformer | 9 |
 | `test_functional_contract.py` | every result matches the frozen schema | 9 |
@@ -889,6 +948,11 @@ stable **819**. 28 test files, plus five non-test modules in `tests/`.
 | `test_block_determinism.py` | poisoned → blocked, 20 consecutive runs | 3 |
 | `test_baseline.py` | the no-checks "before" | 3 |
 | `test_chaos_gate_and_loop.py` | a gate that never returns must fail safe | 2 |
+
+Counts above are per-file and were measured with `--collect-only`; the **total is
+deliberately not restated here**, because four lanes were adding tests
+concurrently and a total goes stale the moment any of them commits. Run
+`pytest --collect-only -q | tail -1` rather than trusting a number in prose.
 
 Support modules: `conftest.py` (the guards), `provenance.py` (the discriminator),
 `dora_runner.py`, `dora_batch.py`, `dora_table.py`. **`tests/README.md` is stale** —
@@ -985,6 +1049,23 @@ The instances, briefly:
   real-from-fixture, **not where it ran**.
 - **A guard whose own record destroyed the evidence it protected** — see the
   timeline-banner note below.
+- **A test satisfied by the comment explaining the thing it was checking.** Found
+  TWICE in one lane on 2026-08-22, and it is the most repeatable form of this
+  pattern in a codebase whose files are 40% commentary:
+  - `deploy.yml`'s new smoke check assigns `fixture_note='<the fixture's notes>'`,
+    and the surrounding comment quotes that same literal as the measured output of
+    the command that read it. A test asserting the literal appeared anywhere in the
+    step's `run` body passed while the assignment was changed to a different
+    sentence — which destroys the discriminator entirely.
+  - `config.py`'s threshold validation carries a comment saying "SEVERITY_ORDER is
+    imported, not restated". `assert "SEVERITY_ORDER" in source` was satisfied by
+    that sentence, so replacing the import with a hardcoded severity tuple left all
+    19 tests green.
+
+  Both were caught **only by running the mutation**, and both fixes have the same
+  shape: assert over a **comment-stripped** form or over the **AST**, and add a
+  guard that the stripping still works. Reading either test would never have
+  revealed the gap — which is the whole pattern.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -1076,9 +1157,56 @@ half fails silently.
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 9**. Environments `gate1`/`gate2`/`gate3`, each with `required_reviewers`.
+**version 10** — re-read 2026-08-22 with `list-agent-runtimes`; this file said v9
+until then. All five carry the **same** version: a split would mean a partial
+deploy, where some agents run new code and some old and no stage's output says
+which, so `scripts/preflight.py` check 2 fails on a version mismatch as well as on
+a non-READY status.
+
+Environments `gate1`/`gate2`/`gate3`, each with `required_reviewers` — **and each
+with `can_admins_bypass: true`**, measured:
+
+```
+gate1  rules=['required_reviewers']  can_admins_bypass=True
+gate2  rules=['required_reviewers']  can_admins_bypass=True
+gate3  rules=['required_reviewers']  can_admins_bypass=True
+```
+
+So the honest answer to "can a gate be skipped?" is **yes, by a repository
+admin**, without a reviewer clicking. That is an operator setting, not a code
+path, and it is left as-is deliberately — but a judge may ask, and the answer
+should not have to be discovered mid-demo. `preflight.py` check 4 prints it on
+every run and does **not** fail on it: failing would make the script refuse a
+configuration the team chose.
+
 Repository variable `DEMO_REPO`; secret `DEMO_GITHUB_TOKEN`. EventBridge rule at
 **1 target**, connection `AUTHORIZED`, API destination `ACTIVE`, DLQ empty.
+
+### The pre-demo check — `scripts/preflight.py`
+
+One command, four checks, exit 0 or 1. Each answers a question whose wrong answer
+has already happened here **while reporting green**:
+
+| # | Question | Why it is not redundant |
+|---|---|---|
+| 1 | Can the runtime role invoke the model the code names? | `simulate-principal-policy`, not a green apply. An apply proves the policy was **written**; only this proves it **permits the call**. |
+| 2 | Five runtimes, READY, one version? | Necessary, **not sufficient** — a runtime reports READY before its endpoint serves the new version. |
+| 3 | Does the security runtime return **real** scanner lines? | The only sufficient check, and the only field that separates a real scan from the fixture. |
+| 4 | Do all three Environments require a reviewer? | An Environment with no reviewer **does not pause — it runs**. |
+
+The line sets are **imported** from `tests/provenance.py`, never restated: a copy
+would be a second declaration of the fact this repository's whole verification
+story rests on, and both copies would keep passing as they drifted.
+
+**Check 3 caught a defect in itself on its first live run**, and the lesson
+generalises. With a hand-written poisoned diff differing from the reference one by
+a **single missing blank line**, it reported `LINES: [2, 3]` against an expected
+`[3, 4]` — while `provenance` read `scanners`, the verdict was a correct `block`
+and `blocking` was 2. Reported lines are indices into the **added-lines-only**
+file, so deleting one blank line shifts every finding below it. Therefore
+`REAL_SCANNER_LINES` is a property of *the scanners* **and** *that exact diff*, and
+the script loads the reference diff from `fixtures/dev_result_poisoned.json` rather
+than carrying a second copy.
 
 ---
 
@@ -1115,6 +1243,51 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
 
 **AWS / AgentCore**
 
+- **The model id is an INFERENCE PROFILE, and it needs its own grant.** The most
+  valuable thing found in this project. `config.BEDROCK_MODEL` is
+  `us.amazon.nova-2-lite-v1:0`, and the `us.` prefix makes it a **cross-region
+  inference profile**, not a foundation model. The two live at different ARN
+  shapes, and the runtime role granted only the second:
+
+  ```
+  arn:aws:bedrock:us-east-1:339712964409:inference-profile/us.amazon.nova-2-lite-v1:0  implicitDeny
+  arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0                  allowed
+  ```
+
+  So `bedrock:InvokeModel` was denied, `llm.text()` caught it **by design**,
+  `structured()` returned `None`, and **every model-calling agent served its
+  fixture for about a week** — with every job green and the deployed plan comment
+  matching `fixtures/plan_result.json` byte for byte. Nothing anywhere said the
+  model had not answered.
+
+  **Both ARN shapes are required**: the profile is the thing **called**, the
+  foundation models are the things that **answer**, and either grant alone is still
+  a denial. Note the asymmetry — the profile ARN carries an account and the
+  foundation-model ARN does not; that is AWS's, not a typo. Inference profiles are
+  account-scoped, foundation models are not.
+
+  The fallback is correct behaviour. Being unable to **see** it was the defect, and
+  the check positioned to catch it — `deploy.yml`'s smoke step — grepped for
+  `"tasks"`, which `fixtures/plan_result.json` contains on **line 2**. So it passed
+  identically for a fixture and a real completion, in the step whose own comment
+  claimed to assert on content to avoid "the reassuring non-answer".
+- **`ListAgentRuntimeEndpoints` is not grantable to the CI role.** Measured with
+  `simulate-principal-policy`: `implicitDeny` against both the runtime and
+  runtime-endpoint ARNs, while the role's policy grants `bedrock-agentcore:*` on
+  `"*"`. **RE-VERIFIED 2026-08-22** against the live account, because one audit
+  reported it had become `allowed`:
+
+  ```
+  runtime/theagentorg_security-Wa42fz7FCC                          implicitDeny
+  runtime/theagentorg_security-Wa42fz7FCC/runtime-endpoint/DEFAULT  implicitDeny
+  (no --resource-arns at all)                                       allowed
+  ```
+
+  The audit was reading the **resource-less** form. That answers `allowed` and
+  means nothing: an action simulated without a resource does not exercise the
+  resource clause any statement is scoped by. `deploy.yml`'s comment and this file
+  are **correct** — do not "fix" them. This is the same "denied versus not ready
+  yet" confusion the retry loop exists to avoid.
 - **`aws --output text` appends a literal `None` line.** Cost two failed deploy
   runs. Read fields from the boto3 response; do not scrape CLI text.
 - **`invoke_agent_runtime` needs `qualifier="DEFAULT"`.** Without it the call is
@@ -1123,10 +1296,6 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
   API.
 - **A runtime reports READY before its endpoint serves the new version.** Retry the
   invoke rather than polling a status field.
-- **`ListAgentRuntimeEndpoints` is not grantable to the CI role.** Measured with
-  `simulate-principal-policy`: `implicitDeny` against both the runtime and
-  runtime-endpoint ARNs, while the role's policy grants `bedrock-agentcore:*` on
-  `"*"`.
 - **`iam:CreateServiceLinkedRole` is `implicitDeny` for the CI role**, and
   EventBridge needs an SLR to create an API-destination connection. Created by hand
   once, rather than granting CI standing power to mint roles for any AWS service.
@@ -1150,10 +1319,41 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
 - **`python -m pytest` and bare `pytest` are not interchangeable** in
   `target_repo/`: `python -m` prepends cwd to `sys.path`, the console script does
   not, and the bare form dies with `ModuleNotFoundError: No module named 'app'`. Do
-  not harmonise those two CI lines.
+  not harmonise those two CI lines. **RE-MEASURED 2026-08-22** in a clean venv on
+  the deployed `auth-service` checkout, against the same tests: `python -m pytest
+  tests -q` → `1 passed`; `pytest tests -q` → `ModuleNotFoundError: No module named
+  'app'`. That repo's new `ci.yml` uses the `python -m` form for this reason.
 
 **Terraform**
 
+- **A binary `tfplan` embeds Terraform STATE, so uploading it publishes every
+  secret in that state.** Fixed in `d237b32`; recorded here because the shape is
+  not obvious and the naive check misses it.
+
+  `terraform.yml` uploaded the binary plan as an artifact. A binary plan carries a
+  full copy of state, and this state holds
+  `aws_secretsmanager_secret_version.dispatch_token` — the ingress module reads that
+  secret **at plan time**, because an API_KEY connection needs the token's value as
+  a configuration value. So every `tfplan-*` artifact carried a live `github_pat_`
+  with `actions:write` here and contents/issues/pull-requests on the target repo.
+
+  **A raw grep of the outer file finds nothing**, and that is the trap: `tfplan` is
+  **itself a zip**. Unpacked from artifact `9466368657`, three entries each matched
+  `github_pat_[A-Za-z0-9_]{20,}` exactly once — `tfplan` (43990 bytes), `tfstate`
+  (106725) and `tfstate-prev` (107238). Ten artifacts were deleted and the upload
+  narrowed to `plan.txt`.
+
+  **This is not the same exposure as the accepted S3-state one.** That risk is
+  documented under Secrets and its audience is "anyone with read access to the
+  backend bucket". An Actions artifact's audience is anyone who can read the
+  repository's workflow runs, plus anyone the artifact URL is shared with, for the
+  retention period — a different and much wider set. Same secret, different blast
+  radius; do not let the accepted risk excuse this one.
+
+  **THE TOKEN STILL NEEDS ROTATING.** Deleting the artifacts removed the
+  distribution channel, not the exposure. Until it is rotated, treat that
+  `github_pat_` as compromised. That is the operator's action, not a code change,
+  and nothing in this repository can do it.
 - **`*.tfvars` is gitignored** (`.gitignore:14`), so a value set there exists only
   on the machine that wrote it while CI applies from a fresh checkout — it looks
   configured locally and the rule stays at zero targets. Use `TF_VAR_<name>` in the
@@ -1236,6 +1436,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile` |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
+| `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
 | `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
@@ -1243,7 +1444,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `infra/ingress/handler.py` | The webhook Lambda (outside `agentorg/` on purpose) |
 | `fixtures/` | Seven files — a validated sample of every result shape |
 | `tickets/` | `clean.md` and `poisoned.md` — the same feature request |
-| `target_repo/` | The demo's subject app: a Flask login handler |
+| `target_repo/` | The demo's subject app: a Flask login handler. The **deployed** copy is `mohamedsorour1998/auth-service`, which had **no CI at all** until 2026-08-22 — head commit `{"state":"pending","total_count":0}`. A `ci.yml` running `python -m pytest tests -q` on every push and PR is open as **PR #18** there. GitHub reports `pending` when NOTHING has run, so zero checks must read as `unknown`, never `passing` |
 | `tests/conftest.py` | The five autouse guards |
 | `tests/provenance.py` | Which scanner mode a test is in, and the discriminator |
 | `docs/plan/` | Per-person plans; `reem/demo_script.md` is the runbook |
