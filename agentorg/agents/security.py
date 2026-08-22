@@ -26,6 +26,7 @@ import logging
 
 from .. import fixtures_loader
 from ..common import config, llm
+from ..common.diff import added_files
 from ..security import run_all_scanners
 from ..state import (
     Finding,
@@ -74,9 +75,74 @@ def _one_line(text: str, limit: int = MAX_LOG_DETAIL_CHARS) -> str:
     return f"{flat[:limit]}... [{len(text)} chars total, full text at DEBUG]"
 
 
+def _AWS_KEY_search(text: str):
+    """The shared credential pattern, resolved at CALL time, not import time.
+
+    `from .developer import _AWS_KEY` at module level would bind the compiled
+    object once, at import, which makes the sharing unobservable: a test
+    substituting the pattern on the module that OWNS it would see this agent keep
+    answering from a stale reference, and so would a future edit to the pattern.
+    Reading it through the module is the same trap-avoidance the config knobs
+    use, for the same reason.
+
+    The import is function-local for a second reason too: `agents/developer.py`
+    and this module are peers, and `server.py` imports all five agents, so a
+    module-level import of one agent into another couples the package's import
+    order to a two-line helper.
+    """
+    from .developer import _AWS_KEY
+
+    return _AWS_KEY.search(text)
+
+
 def _looks_poisoned(state: RunState) -> bool:
-    """Does the diff carry an AWS access key id? Pure string check, no model."""
-    return state.dev is not None and "AKIA" in (state.dev.diff or "")
+    """Does the change ADD an AWS access key id? Pure code, no model.
+
+    Which fixture stands in on the fallback path -- `block` or `pass` -- so this
+    is choosing a verdict, on the path taken when the scanners have ALREADY
+    failed. Both signals are gone by then, which is why it must fail closed.
+
+    THE PREVIOUS FORM WAS `"AKIA" in (state.dev.diff or "")`, the whole-diff
+    substring scan `common/diff.py` was written to delete, and both error
+    directions were measured:
+
+      * A key on a `-` line -- a key the change REMOVES -- read as poisoned. That
+        is the shape of every revision after the reviewer correctly asks for the
+        hardcoded credentials to be taken out. CLAUDE.md records this exact
+        confusion in the developer's copy costing 2 blocks in 5 live runs.
+      * Any prose containing the four letters read as poisoned, and every
+        credential that is not an AWS key id was missed -- a GitHub PAT on an
+        added line measured False.
+
+    `added_files` and `developer._AWS_KEY` are IMPORTED rather than re-spelled.
+    Four private copies of "what does this change contain?" once drifted until
+    the poisoned demo stopped blocking, and a fifth here would be the same bet:
+    the copies agree until one is edited, and the one that drifts is by
+    definition the one nobody noticed.
+
+    AN UNREADABLE DIFF IS POISONED, NOT CLEAN. `added_files` raises ValueError on
+    a non-empty diff that parses to zero files, precisely so an unparseable diff
+    cannot be mistaken for an empty change. Letting that escape, or answering
+    False, would pick the PASS fixture for a change nobody could read -- while
+    the scanners had already failed. Answering True picks the block fixture, so a
+    human looks at a run that stopped rather than at nothing. Note `added_files`
+    does NOT raise for `None` or `""`: those legitimately mean "no added lines"
+    and stay clean, which is what keeps the clean demo half green.
+    """
+    if state.dev is None:
+        return False
+    try:
+        files = added_files(state.dev.diff)
+    except ValueError:
+        # A diff this parser cannot read is not evidence of cleanliness. One
+        # bounded line at WARNING, because on the fallback path this is the only
+        # record that the fixture choice was made blind.
+        logging.getLogger(__name__).warning(
+            "could not parse the diff to decide the fallback fixture; treating it "
+            "as poisoned so the run blocks rather than passing unread"
+        )
+        return True
+    return any(_AWS_KEY_search(body) for body in files.values())
 
 
 def _default_explanation(verdict: str, blocking: list[Finding]) -> str:

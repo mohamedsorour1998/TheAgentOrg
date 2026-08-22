@@ -660,3 +660,226 @@ def test_SCANNERS_REQUIRED_still_turns_an_absence_into_a_blocking_fault(
     assert verdict == "block" and len(blocking) == 3, (
         f"expected block with blocking=3, got {verdict!r} with {len(blocking)}"
     )
+
+
+# ==========================================================================
+# A4 -- `_looks_poisoned` was the whole-diff substring scan common/diff.py was
+# written to delete. It chooses which fixture stands in on the fallback path, so
+# it is choosing between `block` and `pass`.
+# ==========================================================================
+
+
+def test_looks_poisoned_reads_the_change_not_the_whole_diff_text():
+    """MEASURED both directions. This function chooses which fixture stands in on
+    the fallback path, so it is choosing between `block` and `pass`.
+
+    CLAUDE.md records the whole-diff substring form costing 2 blocks in 5 live runs.
+    The developer agent already does this correctly via added_files() and a real
+    AKIA[0-9A-Z]{16} regex; the security agent is the straggler.
+    """
+    from agentorg.agents import security as sec_agent
+    from agentorg.state import RunState
+
+    def _state(diff: str) -> RunState:
+        s = RunState(ticket_id="T-1", ticket_text="x")
+        s.dev = DevResult(branch="b", diff=diff, summary="s", files_changed=["app/auth.py"])
+        return s
+
+    removed = ('--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1,2 +1,1 @@\n'
+               '-AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n+import os\n')
+    assert sec_agent._looks_poisoned(_state(removed)) is False, (
+        "a key on a REMOVED line read as poisoned. That is the shape of every "
+        "revision after the reviewer asks for credentials to be taken out, and "
+        "CLAUDE.md records this exact confusion costing 2 blocks in 5 live runs."
+    )
+
+    added = ('--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n'
+             '+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n')
+    assert sec_agent._looks_poisoned(_state(added)) is True, (
+        "an ADDED key did not read as poisoned -- the fix went too far and the "
+        "poisoned demo would pick the pass fixture"
+    )
+
+
+def test_looks_poisoned_requires_a_real_key_shape_not_the_four_letters_AKIA():
+    """`"AKIA" in text` is a substring test, not a credential test.
+
+    Two measured consequences of the old form, and they point opposite ways:
+
+      * it fired on any prose containing the letters -- a ticket discussing
+        `AKIA` prefixes, a comment naming the pattern -- so a clean change could
+        pick the BLOCK fixture;
+      * and it missed every credential that is not an AWS key id. A GitHub PAT
+        added on a `+` line measured False.
+
+    The regex is `AKIA[0-9A-Z]{16}`, imported rather than re-spelled -- see the
+    test below on why a fifth copy is the thing to avoid here.
+    """
+    from agentorg.agents import security as sec_agent
+    from agentorg.state import RunState
+
+    def _looks(diff: str) -> bool:
+        s = RunState(ticket_id="T-1", ticket_text="x")
+        s.dev = DevResult(branch="b", diff=diff, summary="s", files_changed=["app/auth.py"])
+        return sec_agent._looks_poisoned(s)
+
+    mentions = ('--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n'
+                '+Never commit a key beginning AKIA to this repository.\n')
+    assert _looks(mentions) is False, (
+        "prose mentioning the four letters AKIA read as poisoned. The substring "
+        "form cannot tell a credential from a sentence about credentials, and "
+        "this direction makes a CLEAN change pick the block fixture."
+    )
+
+    real = ('--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n'
+            '+KEY = "AKIAIOSFODNN7EXAMPLE"\n')
+    assert _looks(real) is True, (
+        "a real AKIA-shaped key on an added line must read as poisoned"
+    )
+
+
+def test_looks_poisoned_uses_the_shared_regex_rather_than_a_fifth_private_copy():
+    """The anti-drift pin. CLAUDE.md: four private copies of "what does this
+    change contain?" drifted until the poisoned demo stopped blocking.
+
+    Substituting the developer's compiled pattern must change the security
+    agent's answer. If it does not, this module has grown its own copy, and the
+    two will agree only until one is edited -- which is precisely how the 2-of-5
+    failure happened.
+
+    The substitution is made on the DEVELOPER module, deliberately: that is the
+    module that owns the pattern, so following it there is what "shared" means.
+    """
+    import re
+
+    from agentorg.agents import developer as dev_agent
+    from agentorg.agents import security as sec_agent
+    from agentorg.state import RunState
+
+    s = RunState(ticket_id="T-1", ticket_text="x")
+    s.dev = DevResult(
+        branch="b",
+        diff='--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n+KEY = "AKIAIOSFODNN7EXAMPLE"\n',
+        summary="s",
+        files_changed=["app/auth.py"],
+    )
+    assert sec_agent._looks_poisoned(s) is True, "control: this diff is poisoned"
+
+    original = dev_agent._AWS_KEY
+    try:
+        # A pattern that cannot match the fixture key. If the security agent still
+        # says True, it is reading something other than this object.
+        dev_agent._AWS_KEY = re.compile(r"THIS_PATTERN_MATCHES_NOTHING_AKIA")
+        assert sec_agent._looks_poisoned(s) is False, (
+            "the security agent's answer did not follow developer._AWS_KEY, so it "
+            "carries its own copy of the credential pattern. That is the fifth "
+            "copy common/diff.py exists to prevent -- the copies agree until one "
+            "is edited, and CLAUDE.md records that drift costing 2 blocks in 5 "
+            "live runs."
+        )
+    finally:
+        dev_agent._AWS_KEY = original
+
+
+def test_an_UNPARSEABLE_diff_is_treated_as_poisoned_rather_than_clean():
+    """Lane B's `added_files` raises ValueError on a non-empty diff that parses to
+    zero files. A diff this parser cannot read is NOT evidence of cleanliness.
+
+    The direction is the whole point. Letting the ValueError escape, or answering
+    False, would make an unreadable diff pick the PASS fixture -- and this
+    function is only ever called on the fallback path, i.e. when the scanners
+    have already failed. Both signals lost at once, reported as clean.
+
+    Answering True picks the block fixture, which is the fail-closed choice: a
+    human then looks at a run that stopped, rather than at nothing.
+    """
+    from agentorg.agents import security as sec_agent
+    from agentorg.common.diff import added_files
+    from agentorg.state import RunState
+
+    unparseable = "this text is not a unified diff and names no files at all"
+    with pytest.raises(ValueError):
+        added_files(unparseable)
+
+    s = RunState(ticket_id="T-1", ticket_text="x")
+    s.dev = DevResult(branch="b", diff=unparseable, summary="s", files_changed=[])
+    assert sec_agent._looks_poisoned(s) is True, (
+        "a diff the parser could not read was treated as clean. added_files "
+        "raises rather than returning {} precisely so this cannot be mistaken "
+        "for an empty change, and this function runs only when the scanners have "
+        "ALREADY failed -- so answering False loses both signals and reports pass."
+    )
+
+
+def test_an_EMPTY_or_absent_diff_is_not_poisoned():
+    """The negative control for the refusal above, and it must not raise.
+
+    `added_files(None)` and `added_files("")` both return `{}` WITHOUT raising --
+    that is deliberate in Lane B's parser, and it is a real call: `state.dev` may
+    be None early in a run, and a DevResult whose diff is "" is a different
+    question from an unparseable one. A fix that treated every falsy answer as
+    poisoned would block the CLEAN demo run.
+    """
+    from agentorg.agents import security as sec_agent
+    from agentorg.state import RunState
+
+    empty = RunState(ticket_id="T-1", ticket_text="x")
+    empty.dev = DevResult(branch="b", diff="", summary="s", files_changed=[])
+    assert sec_agent._looks_poisoned(empty) is False, (
+        "an empty diff read as poisoned; added_files('') returns {} without "
+        "raising and that must stay a clean answer"
+    )
+
+    no_dev = RunState(ticket_id="T-1", ticket_text="x")
+    assert no_dev.dev is None, "control: this state has no DevResult"
+    assert sec_agent._looks_poisoned(no_dev) is False, (
+        "a state with no DevResult read as poisoned"
+    )
+
+
+def test_the_fallback_fixture_choice_follows_looks_poisoned_end_to_end(monkeypatch):
+    """The consequence, through `security.run`, because that is what this decides.
+
+    `_looks_poisoned` is not interesting in itself -- it is the argument to
+    `fixtures_loader.security(block=...)` on the path taken when the scanners
+    raise. So the removed-line diff must produce a PASS fixture and the
+    added-line diff a BLOCK fixture, both stamped `fixture-fallback`.
+
+    Without this test the two above could pass against a function whose answer
+    nothing reads.
+    """
+    from agentorg.agents import security as sec_agent
+    from agentorg.state import RunState
+
+    def _boom(dev):
+        raise FileNotFoundError("no scanners installed")
+
+    monkeypatch.setattr(sec_agent, "run_all_scanners", _boom)
+
+    def _run(diff: str):
+        s = RunState(ticket_id="T-1", ticket_text="x")
+        s.dev = DevResult(branch="b", diff=diff, summary="s", files_changed=["app/auth.py"])
+        return sec_agent.run(s)
+
+    removed = ('--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1,2 +1,1 @@\n'
+               '-AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n+import os\n')
+    cleaned = _run(removed)
+    assert cleaned.verdict == "pass", (
+        f"a revision that REMOVES the key fell back to the block fixture "
+        f"({cleaned.verdict!r}). This is the shape of every revision after the "
+        f"reviewer asks for credentials to be taken out."
+    )
+    assert cleaned.scan_provenance == "fixture-fallback", (
+        f"expected fixture-fallback, got {cleaned.scan_provenance!r} -- if this "
+        f"says `scanners` the stub did not take effect and this test pins nothing"
+    )
+
+    added = ('--- a/app/auth.py\n+++ b/app/auth.py\n@@ -1 +1,2 @@\n'
+             '+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"\n')
+    poisoned = _run(added)
+    assert poisoned.verdict == "block", (
+        f"a diff ADDING the key fell back to the pass fixture "
+        f"({poisoned.verdict!r}) -- the poisoned demo would go green with no "
+        f"scanner involved"
+    )
+    assert poisoned.scan_provenance == "fixture-fallback"
