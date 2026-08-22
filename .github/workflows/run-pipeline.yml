@@ -627,9 +627,24 @@ jobs:
   # The stage before the gate is the only field that separates the two: if it
   # SUCCEEDED, the sole reason the gate did not run is the human. It also keeps the
   # download below honest, since the artifact this job reads is that stage's.
+  #
+  # `!= 'cancelled'` IS A THIRD CAUSE, and it was missing. A cancelled run -- someone
+  # clicks Cancel, or a concurrency group evicts it -- also leaves the gate not
+  # 'success' with its upstream stage green, so this recorder fired and wrote
+  # `REJECTED by <whoever>` onto the issue of a run NOBODY refused. MEASURED on run
+  # 32575709109: the poisoned run was cancelled at gate1 and the recorder posted
+  # "REJECTED by mohamedsorour1998" to issue #37, then exited 4. Attributing a
+  # decision to a named human who never made it is worse than recording nothing --
+  # it is the inverse of the defect this job exists to prevent.
+  #
+  # Three of GitHub's job results are now handled distinctly: 'success' (approved,
+  # the gate job itself records it), 'skipped' (a human refused -- this job), and
+  # 'cancelled' (nobody decided; the run's own status is the honest ending).
   gate1-rejected:
     needs: [plan, gate1]
-    if: always() && needs.plan.result == 'success' && needs.gate1.result != 'success'
+    if: always() && needs.plan.result == 'success'
+      && needs.gate1.result != 'success'
+      && needs.gate1.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -692,7 +707,9 @@ jobs:
   # gate reads the same whether a reviewer refused it or develop blocked first.
   gate2-rejected:
     needs: [plan, develop, gate2]
-    if: always() && needs.develop.result == 'success' && needs.gate2.result != 'success'
+    if: always() && needs.develop.result == 'success'
+      && needs.gate2.result != 'success'
+      && needs.gate2.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -755,7 +772,9 @@ jobs:
   # a red job on the demo screen that recorded nothing at all.
   gate3-rejected:
     needs: [plan, sre, gate3]
-    if: always() && needs.sre.result == 'success' && needs.gate3.result != 'success'
+    if: always() && needs.sre.result == 'success'
+      && needs.gate3.result != 'success'
+      && needs.gate3.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

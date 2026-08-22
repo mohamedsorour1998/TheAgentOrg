@@ -1990,3 +1990,126 @@ def test_every_terminal_status_has_an_ending_action_the_timeline_recognises():
             f"timeline._OUTCOME does not know ({sorted(timeline._OUTCOME)}); the "
             f"banner would read INCOMPLETE for a run that really ended"
         )
+
+
+# ── A CANCELLED RUN IS NOT A HUMAN REFUSAL ────────────────────────────────────
+#
+# GitHub gives a job that did not succeed three distinct results, and the recorders
+# treated two of them as one:
+#
+#     'success'    approved -- the gate job records it itself
+#     'skipped'    a reviewer refused -- the recorder's whole reason to exist
+#     'cancelled'  NOBODY DECIDED -- someone clicked Cancel, or concurrency evicted it
+#
+# `needs.<gate>.result != 'success'` matches the last two, so a cancelled run had
+# `REJECTED by <github.actor>` written onto its issue and attributed to a named human
+# who never saw the gate. MEASURED on run 32575709109: the poisoned run was cancelled
+# at gate1 and issue #37 received
+#
+#     Agent Org · gate1
+#     REJECTED by mohamedsorour1998
+#     at 2026-08-22T13:30:21.835861+00:00
+#
+# then the recorder exited 4. Fabricating a decision against a person's name is the
+# inverse of the defect these jobs exist to prevent -- and the upstream-stage clause
+# does not help, because the upstream stage of a cancelled run often DID succeed.
+
+@pytest.mark.parametrize(("recorder", "gate"), [
+    ("gate1-rejected", "gate1"),
+    ("gate2-rejected", "gate2"),
+    ("gate3-rejected", "gate3"),
+])
+def test_a_rejection_recorder_does_not_fire_on_a_cancelled_gate(recorder, gate):
+    """THE test. Without the clause a cancelled run is recorded as a refusal."""
+    condition = _job(recorder)["if"]
+    assert condition, f"{recorder} has no if: at all"
+
+    assert f"needs.{gate}.result != 'cancelled'" in condition, (
+        f"{recorder} fires when {gate} is CANCELLED, which is not a refusal -- so a "
+        f"cancelled run gets `REJECTED by <github.actor>` posted to its issue, "
+        f"naming a human who never made that decision. Condition was:\n  {condition}"
+    )
+
+
+@pytest.mark.parametrize(("recorder", "gate", "upstream"), [
+    ("gate1-rejected", "gate1", "plan"),
+    ("gate2-rejected", "gate2", "develop"),
+    ("gate3-rejected", "gate3", "sre"),
+])
+def test_a_rejection_recorder_still_fires_on_a_skipped_gate(recorder, gate, upstream):
+    """The clause above must not have narrowed the job out of existence.
+
+    A guard that suppresses the case it was written for is the failure mode of every
+    fix in this file, so the three surviving requirements are asserted here rather
+    than left implied: the recorder still keys on the gate NOT succeeding, and still
+    carries the upstream-stage discriminator that separates "a human refused" from
+    "the run never got here".
+    """
+    condition = _job(recorder)["if"]
+
+    assert f"needs.{gate}.result != 'success'" in condition, (
+        f"{recorder} no longer fires on a refused gate, which is the only thing it "
+        f"exists to record. Condition:\n  {condition}"
+    )
+    assert f"needs.{upstream}.result == 'success'" in condition, (
+        f"{recorder} lost its upstream-stage discriminator, so a gate the run never "
+        f"REACHED now reads as a refusal. Condition:\n  {condition}"
+    )
+    assert "always()" in condition, (
+        f"{recorder} no longer runs on a failed run, so a refusal after a failing "
+        f"stage would go unrecorded. Condition:\n  {condition}"
+    )
+
+
+# ── THE RECORDED REASON IS WHAT A HUMAN READS ─────────────────────────────────
+#
+# This comment IS the record: GitHub skips the gate job on a refusal, so there is no
+# job log to read and the issue comment is all a reader gets. It used to say
+#
+#     "gate1 was refused, or its job did not complete."
+#
+# -- honest hedging when the recorder genuinely could not tell those apart, and
+# unreadable as a result: a person is told a decision was recorded against their name
+# and then told it might not have been a decision. Now that `cancelled` is excluded
+# above, one cause remains, so the sentence names it.
+
+def test_the_recorded_refusal_reason_names_one_cause_not_two():
+    """A reason that hedges between two causes tells a reader neither."""
+    module = _stage_module()
+    # Reached through the module, the way this file reaches RunState -- run_stage.py
+    # is loaded by path, not imported, so its names are only on that object.
+    HumanDecision = module.HumanDecision
+    captured = {}
+
+    def _resume(run_id, decision):
+        captured["decision"] = decision
+        state = module.RunState(ticket_id="7", ticket_text="x")
+        state.status = "rejected"
+        return state
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(module.gates, "resume", _resume)
+        monkeypatch.setattr(module.gates, "load", lambda run_id: module.RunState(
+            ticket_id="7", ticket_text="x"))
+        monkeypatch.setattr(module.graph, "_gate_comment", lambda *a, **k: None)
+        monkeypatch.setattr(module, "_emit", lambda *a, **k: None)
+        module._stage_gate_rejected(argparse.Namespace(
+            run_id="r", approver="someone", stage="gate1-rejected"), "gate1")
+    finally:
+        monkeypatch.undo()
+
+    decision = captured.get("decision")
+    assert isinstance(decision, HumanDecision), "no decision was recorded at all"
+    reason = decision.reason
+
+    assert " or " not in reason, (
+        f"the recorded reason hedges between two causes, so a reader learns neither. "
+        f"`cancelled` is excluded by the workflow now, so there is one cause. "
+        f"Reason was:\n  {reason}"
+    )
+    assert "refused" in reason, f"the reason does not say a human refused: {reason}"
+    assert "not merged" in reason, (
+        f"the reason does not say the change did not ship, which is the fact a "
+        f"reader of an issue most needs: {reason}"
+    )

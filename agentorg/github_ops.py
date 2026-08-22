@@ -577,12 +577,30 @@ def ci_status(state: RunState) -> str:
 
     Works against a target repository with CI and one without. `unknown` is a
     first-class answer, not an error.
+
+    THE THREE CAUSES OF `unknown` ARE NOT THE SAME FAULT, and until 2026-08-22 they
+    were indistinguishable at WARNING level, which cost a real diagnosis. Measured on
+    the clean demo run: the SRE reported `CI unknown` while both check runs on that
+    exact commit were `completed/success`, finished 49 seconds before the stage asked.
+    The code was right and the TOKEN was the problem — `DEMO_GITHUB_TOKEN` is a
+    fine-grained PAT scoped to contents, issues and pull requests, with **no
+    `Checks: read`**, so `get_check_runs()` raised and the handler below returned
+    `unknown` at DEBUG, invisible in the job log.
+
+    That is the fail-safe direction and the verdict was correct. But "nothing has run"
+    and "we are not allowed to look" call for opposite actions from whoever reads it,
+    so each `unknown` now says WHY at WARNING. A silent `unknown` is the same defect
+    class as a silent fixture fallback: the answer is defensible and the reason for it
+    is missing.
     """
+    log = logging.getLogger(__name__)
+
     # No branch means no head to look up -- and we do NOT ask. `get_branch("")`
     # is not a query that selects nothing, so a lookup built from an empty branch
     # is a lookup that can come back with something else. Same refusal, and the
     # same reasoning, as post_comment's empty-branch guard above.
     if _use_local() or state.dev is None or not state.dev.branch:
+        log.info("ci_status unknown: no GitHub seam or no branch to look a commit up by")
         return "unknown"
 
     try:
@@ -594,7 +612,7 @@ def ci_status(state: RunState) -> str:
         # surfaces here rather than at the first read below.
         total = runs.totalCount
         conclusions = [r.conclusion for r in runs]
-    except Exception:
+    except Exception as exc:
         # Broad on purpose, and the reason is the same one post_comment gives:
         # the failure set spans PyGithub, the network, an expired token and the
         # response shape, and the SRE stage must not die because one of them
@@ -603,10 +621,26 @@ def ci_status(state: RunState) -> str:
         # option. Note `_repo()` is inside the try, and conftest's guard survives
         # it only because pytest.fail raises Failed, which derives from
         # BaseException rather than Exception.
-        logging.getLogger(__name__).debug("ci_status lookup failed", exc_info=True)
+        #
+        # AT WARNING, WITH THE EXCEPTION NAMED. This was DEBUG, and it hid a
+        # 403 from a token without `Checks: read` behind an `unknown` that read as
+        # "this repo has no CI" -- see the docstring. One bounded line: the type and
+        # a truncated message, because a PyGithub error body can be a whole JSON
+        # document and this goes in a job log a human skims.
+        log.warning(
+            "ci_status unknown: could not read check runs for branch %r "
+            "(%s: %s). A 403 here usually means the token lacks `Checks: read` "
+            "-- CI may well be green.",
+            state.dev.branch, type(exc).__name__, str(exc)[:200],
+        )
+        log.debug("ci_status lookup failed", exc_info=True)
         return "unknown"
 
     if total == 0:
+        log.info(
+            "ci_status unknown: zero check runs on this commit, so nothing has "
+            "examined it. NOT the same as passing."
+        )
         return "unknown"
 
     # A check with no conclusion has not finished. In progress is not green:
@@ -616,6 +650,8 @@ def ci_status(state: RunState) -> str:
     # only the finished ones is how a merge lands during CI while looking fully
     # informed.
     if any(c is None for c in conclusions):
+        log.info("ci_status unknown: %d of %d check runs have not finished",
+                 sum(c is None for c in conclusions), total)
         return "unknown"
     if all(c in _CI_NOT_A_FAILURE for c in conclusions):
         return "passing"

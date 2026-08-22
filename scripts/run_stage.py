@@ -536,10 +536,22 @@ def _stage_gate_rejected(args: argparse.Namespace, gate: str) -> int:
         gate=gate,
         decision="rejected",
         by=args.approver or "github-environment-reviewer",
+        # NAMES ONE CAUSE, not two. This read "was refused, OR its job did not
+        # complete", which was honest hedging when the recorder genuinely could not
+        # tell those apart -- and it made the most important sentence on the issue
+        # unreadable: a human is told a decision was recorded against their name and
+        # then told it might not have been a decision.
+        #
+        # The workflow now excludes `cancelled`, so the only remaining reason this
+        # job runs is a refusal at the Environment. So this says so plainly, and says
+        # where to look, since the gate job itself has no log to read -- GitHub
+        # SKIPS a job whose Environment was rejected rather than running it with a
+        # verdict, which is why a recorder exists at all.
         reason=(
-            f"{gate} was refused, or its job did not complete. GitHub skips a job "
-            f"whose Environment a reviewer rejected, so this was recorded by the "
-            f"rejection recorder rather than by the gate job itself."
+            f"a required reviewer refused this change at {gate}, so the run stopped "
+            f"here and was not merged. GitHub skips the {gate} job itself when its "
+            f"Environment is rejected, so there is no {gate} job log to read -- this "
+            f"comment is the record."
         ),
     )
     # `gates.resume` sets status="rejected" for a rejected decision (gates.py:86)

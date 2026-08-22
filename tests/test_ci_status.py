@@ -321,3 +321,97 @@ def test_it_reads_the_runs_branch_not_a_hardcoded_one(monkeypatch):
         f"ci_status looked up {repo.asked_for}, not the run's own branch. "
         f"Reading main's status would report green for every change."
     )
+
+
+# ── EVERY `unknown` MUST SAY WHY ──────────────────────────────────────────────
+#
+# `unknown` has three causes and they call for opposite actions:
+#
+#     no seam / no branch    nothing to look up; expected on every local run
+#     zero check runs        nothing has examined this commit
+#     the lookup RAISED      we could not look -- CI may well be green
+#
+# The third was logged at DEBUG, invisible in a job log, and it cost a real
+# diagnosis. MEASURED on the clean demo run: the SRE reported `CI unknown` while both
+# check runs on that exact commit were `completed/success`, finished 49 seconds before
+# the stage asked. The code was right; `DEMO_GITHUB_TOKEN` is a fine-grained PAT with
+# no `Checks: read`, so `get_check_runs()` raised a 403 and the handler swallowed it.
+#
+# The verdict was correct and fail-safe. The missing REASON is the defect -- same
+# class as a silent fixture fallback: a defensible answer with no way to tell which
+# question it answered.
+
+def test_a_lookup_failure_is_reported_at_warning_not_debug(monkeypatch, caplog):
+    """THE test. A 403 from a token without Checks:read must be visible."""
+    class _Raises:
+        def get_branch(self, name):
+            raise RuntimeError("403 Resource not accessible by personal access token")
+
+    monkeypatch.setattr(github_ops, "_use_local", lambda: False)
+    monkeypatch.setattr(github_ops, "_repo", lambda: _Raises())
+
+    with caplog.at_level("WARNING", logger="agentorg.github_ops"):
+        assert github_ops.ci_status(_state()) == "unknown"
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, (
+        "a failed CI lookup produced no WARNING, so `CI unknown` on a pull request "
+        "is indistinguishable from `this repository has no CI` -- which is what sent "
+        "a real diagnosis looking at the wrong thing for half an hour"
+    )
+    message = warnings[0].getMessage()
+    assert "403" in message, f"the exception is not named in the log line: {message}"
+    assert "Checks: read" in message, (
+        f"the log line does not name the likeliest cause, which is the one thing "
+        f"that turns this line into an action: {message}"
+    )
+
+
+def test_zero_checks_and_a_failed_lookup_do_not_log_the_same_thing(monkeypatch,
+                                                                  caplog):
+    """Both answer `unknown`; a reader must still be able to tell them apart.
+
+    This is the assertion the return value cannot make. `unknown == unknown`, so if
+    the two paths logged the same sentence the distinction would exist only in the
+    source -- and the whole point of the field is that somebody reading a job log can
+    act on it.
+    """
+    monkeypatch.setattr(github_ops, "_use_local", lambda: False)
+
+    _online(monkeypatch, [])
+    with caplog.at_level("INFO", logger="agentorg.github_ops"):
+        assert github_ops.ci_status(_state()) == "unknown"
+    zero_checks = " ".join(r.getMessage() for r in caplog.records)
+    caplog.clear()
+
+    class _Raises:
+        def get_branch(self, name):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(github_ops, "_repo", lambda: _Raises())
+    with caplog.at_level("INFO", logger="agentorg.github_ops"):
+        assert github_ops.ci_status(_state()) == "unknown"
+    raised = " ".join(r.getMessage() for r in caplog.records)
+
+    assert zero_checks and raised, "one of the two paths logged nothing at all"
+    assert zero_checks != raised, (
+        f"'nothing has run' and 'we could not look' log the same line, so the two "
+        f"are indistinguishable to a reader:\n  {zero_checks}"
+    )
+    assert "zero check runs" in zero_checks, zero_checks
+
+
+def test_an_unfinished_check_says_how_many(monkeypatch, caplog):
+    """`unknown` mid-CI is ordinary, and the count is what says to wait."""
+    monkeypatch.setattr(github_ops, "_use_local", lambda: False)
+    _online(monkeypatch, [_FakeCheckRun("success"),
+                          _FakeCheckRun(None, status="in_progress")])
+
+    with caplog.at_level("INFO", logger="agentorg.github_ops"):
+        assert github_ops.ci_status(_state()) == "unknown"
+
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "1 of 2" in message, (
+        f"the log does not say how many checks are still running, so a mid-CI "
+        f"`unknown` reads the same as a broken one: {message}"
+    )
