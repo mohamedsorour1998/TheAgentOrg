@@ -503,8 +503,94 @@ def post_comment(state: RunState, body: str, finding: Finding | None = None) -> 
         return _undelivered(f"comment on the PR for branch {branch!r}", exc, body, ref)
 
 
-# The five AgentCore runtimes this repo deploys, in the order the spec prints
-# them (docs/plan/mariam/week3.md:118-131). UNDERSCORED on purpose: these are
+# CI conclusions that are NOT failures. GitHub's own semantics: a skipped or
+# neutral check is not a red build, and a path-filtered workflow reports
+# `skipped` on every commit its filter excludes -- calling that a failure would
+# block every such change.
+#
+# An ALLOW-LIST, not a deny-list of the bad ones, and that is the fail-closed
+# direction. GitHub's conclusion vocabulary can grow; a value this set has never
+# seen means CI said something we do not understand, and the safe reading of that
+# is "not green". A deny-list would send every future conclusion to `passing`.
+_CI_NOT_A_FAILURE = frozenset({"success", "skipped", "neutral"})
+
+
+def ci_status(state: RunState) -> str:
+    """`"passing"`, `"failing"` or `"unknown"` for this run's head commit.
+
+    THE THIRD VALUE IS THE POINT. GitHub reports a commit status of `pending`
+    when NOTHING has run, which is indistinguishable from "still running" if you
+    read that field. MEASURED 2026-08-22 on the target repo before it had any
+    workflow at all:
+
+        gh api repos/.../contents/.github/workflows -> 404 Not Found
+        gh api repos/.../commits/<sha>/status       -> {"state": "pending",
+                                                        "total_count": 0}
+
+    So zero checks is `unknown`, never `passing`. A commit nothing has examined
+    is not a green commit, and an SRE agent reporting "CI passing" about a
+    repository that has never run a test is the fail-open shape the security lane
+    exists to prevent, one agent over.
+
+    Reads CHECK RUNS rather than the commit `status` field, deliberately. The
+    status API's `state` collapses "nothing ran" and "still running" into one
+    word; check runs keep `status` and `conclusion` separate, which is the only
+    way to tell those two apart -- and telling them apart is this function's
+    entire job.
+
+    NEVER RAISES, and always returns one of the three. Every caller is on the
+    pipeline path, and a promoted run must not depend on GitHub being reachable
+    at the moment the SRE stage happens to run -- but an unreachable GitHub is
+    `unknown`, not `passing`, so an outage cannot read as a green build.
+
+    Works against a target repository with CI and one without. `unknown` is a
+    first-class answer, not an error.
+    """
+    # No branch means no head to look up -- and we do NOT ask. `get_branch("")`
+    # is not a query that selects nothing, so a lookup built from an empty branch
+    # is a lookup that can come back with something else. Same refusal, and the
+    # same reasoning, as post_comment's empty-branch guard above.
+    if _use_local() or state.dev is None or not state.dev.branch:
+        return "unknown"
+
+    try:
+        repo = _repo()
+        head = repo.get_branch(state.dev.branch).commit.sha
+        runs = repo.get_commit(head).get_check_runs()
+        # totalCount and the iteration BOTH inside the try: PyGithub defers the
+        # HTTP request until one of them is touched, so a network failure
+        # surfaces here rather than at the first read below.
+        total = runs.totalCount
+        conclusions = [r.conclusion for r in runs]
+    except Exception:
+        # Broad on purpose, and the reason is the same one post_comment gives:
+        # the failure set spans PyGithub, the network, an expired token and the
+        # response shape, and the SRE stage must not die because one of them
+        # moved. The inline exc_info is what satisfies BLE001 -- narrowing this
+        # clause would satisfy it too, with no logging at all, which is the worse
+        # option. Note `_repo()` is inside the try, and conftest's guard survives
+        # it only because pytest.fail raises Failed, which derives from
+        # BaseException rather than Exception.
+        logging.getLogger(__name__).debug("ci_status lookup failed", exc_info=True)
+        return "unknown"
+
+    if total == 0:
+        return "unknown"
+
+    # A check with no conclusion has not finished. In progress is not green:
+    # treating it as passing would let a merge land before CI completed. Checked
+    # BEFORE the all-success test, because a run of green checks plus one still
+    # going is the ordinary mid-CI shape of a real pull request -- and reading
+    # only the finished ones is how a merge lands during CI while looking fully
+    # informed.
+    if any(c is None for c in conclusions):
+        return "unknown"
+    if all(c in _CI_NOT_A_FAILURE for c in conclusions):
+        return "passing"
+    return "failing"
+
+
+# The five AgentCore runtimes this repo deploys, in the order the spec prints# them (docs/plan/mariam/week3.md:118-131). UNDERSCORED on purpose: these are
 # AgentCore RUNTIME names, a different namespace from the HYPHENATED ECR
 # REPOSITORY names (theagentorg-shared-<agent>-agent) recorded in
 # docs/plan/week1-verification-log.md, which Tasks 5/6 push images to. Both are
