@@ -5,6 +5,15 @@ All AWS + LLM knobs live here so no agent hardcodes a model id or region.
 
 import os
 
+# ABSOLUTE, not `from ..state import` -- and that is measured, not style.
+# tests/test_scanner_resilience.py loads this module STANDALONE via
+# `importlib.util.spec_from_file_location(..., Path(config.__file__))` to probe
+# the shipped defaults with a cleared environment. A module loaded that way has
+# no package context, so a relative import raises
+# `ImportError: attempted relative import with no known parent package` and takes
+# two tests down. The absolute form resolves under both load paths.
+from agentorg.state import SEVERITY_ORDER
+
 # LLM configuration --------------------------------------------------------
 # Default path: Bedrock via IAM role (no external dependency).
 # Fallback path: OpenAI-compatible gateway when LLM_BASE_URL is set.
@@ -19,6 +28,45 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 # Pipeline behaviour -------------------------------------------------------
 # Block threshold for the deterministic security gate (see state.compute_security_verdict).
 SECURITY_BLOCK_THRESHOLD = os.environ.get("SECURITY_BLOCK_THRESHOLD", "high")
+
+# VALIDATED AT IMPORT, like STATE_BACKEND below and unlike its own past self.
+#
+# MEASURED before this check existed:
+#
+#   SECURITY_BLOCK_THRESHOLD=HIGH python -c \
+#     "from agentorg.state import compute_security_verdict; \
+#      compute_security_verdict([], threshold='HIGH')"
+#   KeyError: 'HIGH'
+#
+# raised from `cutoff = SEVERITY_ORDER[threshold]`, which is reached from
+# agentorg/agents/security.py:187 -- INSIDE the security agent, halfway through a
+# run. So a typo killed the one stage whose entire purpose is to produce a
+# verdict, at the moment it was producing it, and the traceback named a dict
+# lookup rather than a misconfigured knob. On a projector that is indistinguishable
+# from the pipeline being broken.
+#
+# `HIGH` is the realistic typo, not a contrived one: SEVERITY_ORDER's keys are
+# lowercase, but every severity in this project's log output and prose is
+# uppercase, so the wrong spelling looks right. `none` and `0` are the other two
+# worth knowing about -- both look like deliberate configuration (turn the gate
+# off; use the numeric order) and both previously crashed the security stage
+# rather than telling the operator the knob does not work that way.
+#
+# SEVERITY_ORDER IS IMPORTED, NOT RESTATED, and there is no import cycle to work
+# around: agentorg/state.py imports only __future__, datetime, typing, uuid and
+# pydantic -- verified by AST, not assumed. A second declaration of "the legal
+# severities" here would be the thing that drifts, and the block rule reads the
+# real one.
+if SECURITY_BLOCK_THRESHOLD not in SEVERITY_ORDER:
+    raise ValueError(
+        f"SECURITY_BLOCK_THRESHOLD={SECURITY_BLOCK_THRESHOLD!r} is not a "
+        f"severity; expected one of {', '.join(SEVERITY_ORDER)}. Refused at "
+        f"import rather than raising KeyError inside the security agent halfway "
+        f"through a run, which is where an unvalidated value landed: the stage "
+        f"whose whole purpose is to produce a verdict died while producing one, "
+        f"and the traceback named a dict lookup instead of this knob."
+    )
+
 # Cap on developer<->reviewer revision loops so a run can't spin forever.
 MAX_REVISION_LOOPS = int(os.environ.get("MAX_REVISION_LOOPS", "3"))
 

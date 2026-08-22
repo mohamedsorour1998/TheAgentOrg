@@ -336,3 +336,236 @@ def test_run_stage_accepts_the_trigger_flag():
         f"job of the pipeline -- would die with `unrecognized arguments`. "
         f"argparse help:\n{result.stdout}"
     )
+
+
+# --------------------------------------------------------------------------
+# THE OTHER KNOB THAT DECIDES A VERDICT: SECURITY_BLOCK_THRESHOLD.
+#
+# Not about the trigger, but the same defect class and the same file
+# (agentorg/common/config.py), so it lives here rather than in a module of its
+# own: a malformed knob that fails LATE instead of at import.
+#
+# MEASURED before the fix:
+#   SECURITY_BLOCK_THRESHOLD=HIGH python -c \
+#     "from agentorg.state import compute_security_verdict; \
+#      compute_security_verdict([], threshold='HIGH')"
+#   KeyError: 'HIGH'
+#
+# raised from `cutoff = SEVERITY_ORDER[threshold]` -- which is reached from
+# agentorg/agents/security.py:187, INSIDE the security agent, halfway through a
+# run. So a typo took down the one stage whose entire purpose is to produce a
+# verdict, and the traceback named a dict lookup rather than a misconfigured knob.
+# Every other malformed knob in config.py already fails at import: STATE_BACKEND
+# raises ValueError, MAX_REVISION_LOOPS and SCANNER_TIMEOUT_SECONDS raise from
+# int().
+# --------------------------------------------------------------------------
+
+
+def _import_config_with(env: dict[str, str]) -> "tuple[int, str, str]":
+    """Import `agentorg.common.config` in a FRESH interpreter with `env` applied.
+
+    A subprocess, not importlib.reload: the raise this pins happens AT IMPORT, and
+    the module is already imported by the time any test runs. Reloading in-process
+    would also leave a half-initialised module object bound in sys.modules for
+    every later test in the session -- the failure mode would be another test
+    file's, which is the worst place for it to surface.
+    """
+    import os
+    import subprocess
+    import sys
+
+    return_env = {**os.environ, **env}
+    result = subprocess.run(
+        [sys.executable, "-c", "import agentorg.common.config"],
+        cwd=REPO_ROOT,
+        env=return_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def test_a_legal_threshold_imports_cleanly():
+    """The control. Without it, a check that ALWAYS raised would pass every test below."""
+    code, _, stderr = _import_config_with({"SECURITY_BLOCK_THRESHOLD": "critical"})
+    assert code == 0, (
+        f"SECURITY_BLOCK_THRESHOLD=critical failed to import (exit {code}). The "
+        f"validation is rejecting a legal severity, which would break every run "
+        f"on a correctly configured machine.\n{stderr}"
+    )
+
+
+def test_the_default_imports_cleanly():
+    """The value every machine actually runs with."""
+    code, _, stderr = _import_config_with({})
+    assert code == 0, f"config.py does not import with no overrides:\n{stderr}"
+
+
+def test_an_unknown_threshold_is_refused_AT_IMPORT_not_mid_run():
+    """The measured defect: `KeyError: 'HIGH'` from inside the security agent.
+
+    Case matters, and `HIGH` is the realistic typo -- SEVERITY_ORDER's keys are
+    lowercase, every other severity in this project's logs is uppercase in prose,
+    and the workflow inputs are lowercase strings. So the wrong spelling looks
+    right.
+    """
+    code, _, stderr = _import_config_with({"SECURITY_BLOCK_THRESHOLD": "HIGH"})
+    assert code != 0, (
+        "SECURITY_BLOCK_THRESHOLD=HIGH imported successfully. It then reaches "
+        "compute_security_verdict and raises `KeyError: 'HIGH'` from inside the "
+        "security agent, mid-run -- killing the one stage whose purpose is to "
+        "produce a verdict, with a traceback naming a dict lookup rather than a "
+        "misconfigured knob."
+    )
+    assert "SECURITY_BLOCK_THRESHOLD" in stderr, (
+        f"the import failed but the error does not name the knob, so an operator "
+        f"cannot tell which setting is wrong:\n{stderr}"
+    )
+
+
+def test_the_refusal_names_the_legal_values():
+    """An error that says "invalid" without saying what IS valid costs a round trip.
+
+    Same standard STATE_BACKEND's message already meets.
+    """
+    _, _, stderr = _import_config_with({"SECURITY_BLOCK_THRESHOLD": "HIGH"})
+    from agentorg.state import SEVERITY_ORDER
+
+    for severity in SEVERITY_ORDER:
+        assert severity in stderr, (
+            f"the refusal message does not mention the legal severity "
+            f"{severity!r}, so it tells an operator what is wrong without telling "
+            f"them what to write instead:\n{stderr}"
+        )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "HIGH",       # the measured case: right word, wrong case
+        "hgih",       # a transposition
+        "",           # explicitly set to empty, which is not the same as unset
+        "none",       # a plausible "turn it off" that would silently pass nothing
+        "0",          # the severity's ORDER rather than its name
+        "urgent",     # a severity vocabulary from somewhere else
+    ],
+)
+def test_every_malformed_threshold_is_refused(bad):
+    """Parametrised because one rejected value proves only that one value is checked.
+
+    `"none"` and `"0"` are the interesting ones. Both look like deliberate
+    configuration rather than typos, and both would previously have raised
+    `KeyError` from inside the security agent -- so an operator trying to turn the
+    gate off would have crashed the run rather than been told the knob does not
+    work that way.
+    """
+    code, _, stderr = _import_config_with({"SECURITY_BLOCK_THRESHOLD": bad})
+    assert code != 0, (
+        f"SECURITY_BLOCK_THRESHOLD={bad!r} imported successfully; it would reach "
+        f"compute_security_verdict and raise KeyError inside the security agent"
+    )
+    assert "SECURITY_BLOCK_THRESHOLD" in stderr
+
+
+def test_the_validation_reads_the_contract_rather_than_restating_the_severities():
+    """One declaration of "the legal severities", not two.
+
+    There is NO import cycle -- measured: agentorg/state.py imports only
+    __future__, datetime, typing, uuid and pydantic, so config can import
+    SEVERITY_ORDER from it directly. The plan allowed a second declaration in
+    config plus a tripwire if a cycle existed; it does not, so the tripwire is
+    unnecessary and a second declaration would be strictly worse.
+
+    ASSERTED OVER THE AST, NOT THE SOURCE TEXT, and that is not fussiness -- it
+    was measured. A first version of this test asserted `"SEVERITY_ORDER" in
+    source`, and the validation's own comment block explains at length that
+    SEVERITY_ORDER is imported rather than restated. So replacing the import with
+    a hardcoded `("low", "medium", "high", "critical")` tuple left all 19 tests
+    GREEN, satisfied by the comment saying it had not been done. The second
+    instance of that trap found in this lane's work.
+    """
+    import ast
+
+    from agentorg.state import SEVERITY_ORDER
+
+    source = (REPO_ROOT / "agentorg" / "common" / "config.py").read_text()
+    tree = ast.parse(source)
+
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "SEVERITY_ORDER" in imported, (
+        f"config.py does not IMPORT SEVERITY_ORDER (imported names: "
+        f"{sorted(imported)}). Either the validation is gone, or it restates the "
+        f"severity names -- two declarations of one fact, which is the thing that "
+        f"drifts. Note the module's comments discuss the import, so a substring "
+        f"check over the source would be satisfied by prose; this reads the AST."
+    )
+
+    # And no hardcoded severity tuple/list/set anywhere in the module, which is
+    # the specific shape a "tidy" would introduce.
+    literal_severity_groups = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set))
+        and {
+            elt.value
+            for elt in node.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        }
+        >= set(SEVERITY_ORDER)
+    ]
+    assert not literal_severity_groups, (
+        f"config.py contains a literal collection of every severity name "
+        f"({len(literal_severity_groups)} found), which is a second declaration "
+        f"of SEVERITY_ORDER. Import it instead -- there is no cycle."
+    )
+
+    # And the value it validates against really is the contract's.
+    import agentorg.common.config as config_module
+
+    assert config_module.SECURITY_BLOCK_THRESHOLD in SEVERITY_ORDER, (
+        f"the ambient SECURITY_BLOCK_THRESHOLD "
+        f"({config_module.SECURITY_BLOCK_THRESHOLD!r}) is not in SEVERITY_ORDER, "
+        f"which means the import-time check did not run"
+    )
+
+
+def test_the_validated_threshold_actually_reaches_the_block_rule():
+    """The knob and the rule must agree, or validating it proves nothing.
+
+    A threshold validated in config and then ignored by the security agent would
+    pass every test above while the gate used a different cutoff.
+    """
+    from agentorg.common import config as config_module
+    from agentorg.state import SEVERITY_ORDER, Finding, compute_security_verdict
+
+    threshold = config_module.SECURITY_BLOCK_THRESHOLD
+    cutoff = SEVERITY_ORDER[threshold]
+
+    # A finding exactly AT the threshold must block; one below it must not.
+    at_threshold = Finding(
+        tool="gitleaks", severity=threshold, rule="r",
+        file="app/auth.py", line=1, description="d",
+    )
+    verdict, blocking = compute_security_verdict([at_threshold], threshold=threshold)
+    assert verdict == "block" and len(blocking) == 1, (
+        f"a finding at severity {threshold!r} did not block against threshold "
+        f"{threshold!r}; the knob and the rule disagree"
+    )
+
+    below = [s for s, order in SEVERITY_ORDER.items() if order < cutoff]
+    if below:
+        quiet = Finding(
+            tool="gitleaks", severity=below[0], rule="r",
+            file="app/auth.py", line=1, description="d",
+        )
+        verdict, blocking = compute_security_verdict([quiet], threshold=threshold)
+        assert verdict == "pass" and not blocking, (
+            f"a finding at severity {below[0]!r} blocked against threshold "
+            f"{threshold!r}, which is above it"
+        )
