@@ -578,18 +578,23 @@ def ci_status(state: RunState) -> str:
     Works against a target repository with CI and one without. `unknown` is a
     first-class answer, not an error.
 
-    THE THREE CAUSES OF `unknown` ARE NOT THE SAME FAULT, and until 2026-08-22 they
-    were indistinguishable at WARNING level, which cost a real diagnosis. Measured on
-    the clean demo run: the SRE reported `CI unknown` while both check runs on that
-    exact commit were `completed/success`, finished 49 seconds before the stage asked.
-    The code was right and the TOKEN was the problem — `DEMO_GITHUB_TOKEN` is a
-    fine-grained PAT scoped to contents, issues and pull requests, with **no
-    `Checks: read`**, so `get_check_runs()` raised and the handler below returned
-    `unknown` at DEBUG, invisible in the job log.
+    THE THREE CAUSES OF `unknown` ARE NOT THE SAME FAULT, and they used to be
+    indistinguishable, which cost a real diagnosis. Measured on the clean demo run: the
+    SRE reported `CI unknown` while both check runs on that exact commit were
+    `completed/success`, finished 49 seconds before the stage asked.
 
-    That is the fail-safe direction and the verdict was correct. But "nothing has run"
-    and "we are not allowed to look" call for opposite actions from whoever reads it,
-    so each `unknown` now says WHY at WARNING. A silent `unknown` is the same defect
+    NOT A TOKEN PROBLEM, and an earlier version of this comment said it was. Verified
+    by calling the two endpoints with the deployed token: both answer **HTTP 200**,
+    `total_count: 2`, both checks `completed/success`. The real cause is structural --
+    under `REMOTE_AGENTS=true` this function runs INSIDE the AgentCore container, which
+    carries `AGENT_ROLE` and `DEMO_REPO` and no token, so `_use_local()` is True and
+    this returns `unknown` on its first line without ever calling GitHub. Fixed by
+    measuring on the runner and carrying the answer on `RunState.ci_status_measured`;
+    see that field.
+
+    That is the fail-safe direction and the verdict was correct. But "nothing has run",
+    "we could not look" and "nobody asked" call for different actions from whoever
+    reads it, so each `unknown` now says WHY. A silent `unknown` is the same defect
     class as a silent fixture fallback: the answer is defensible and the reason for it
     is missing.
     """
@@ -622,15 +627,14 @@ def ci_status(state: RunState) -> str:
         # it only because pytest.fail raises Failed, which derives from
         # BaseException rather than Exception.
         #
-        # AT WARNING, WITH THE EXCEPTION NAMED. This was DEBUG, and it hid a
-        # 403 from a token without `Checks: read` behind an `unknown` that read as
-        # "this repo has no CI" -- see the docstring. One bounded line: the type and
-        # a truncated message, because a PyGithub error body can be a whole JSON
-        # document and this goes in a job log a human skims.
+        # AT WARNING, WITH THE EXCEPTION NAMED, so an `unknown` caused by a failed
+        # lookup is never mistaken for "this repository has no CI". One bounded line:
+        # the type and a truncated message, because a PyGithub error body can be a
+        # whole JSON document and this goes in a job log a human skims.
         log.warning(
-            "ci_status unknown: could not read check runs for branch %r "
-            "(%s: %s). A 403 here usually means the token lacks `Checks: read` "
-            "-- CI may well be green.",
+            "ci_status unknown: could not read check runs for branch %r (%s: %s). "
+            "CI may well be green -- this says we could not look, not that nothing "
+            "ran.",
             state.dev.branch, type(exc).__name__, str(exc)[:200],
         )
         log.debug("ci_status lookup failed", exc_info=True)

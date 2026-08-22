@@ -227,6 +227,33 @@ class RunState(BaseModel):
     # run claiming it was issue-triggered was.
     trigger: str = "manual"
 
+    # THE MEASURED CI STATUS, CARRIED ON THE STATE. An ADDITION, per the rule at the
+    # top of this file. Exactly the `RunState.poisoned` pattern, for exactly the same
+    # reason: the value must be measured on one machine and read on another.
+    #
+    # WHY IT CANNOT BE MEASURED WHERE IT IS USED. `sre.run` calls
+    # `github_ops.ci_status(state)`, which needs a GitHub token. Under
+    # REMOTE_AGENTS=true that function body executes INSIDE the AgentCore container,
+    # and the five runtimes carry exactly `AGENT_ROLE` and `DEMO_REPO` (deploy.yml) --
+    # no token, deliberately, because shipping a credential into five containers to
+    # read a public repository is a real secret in five more places. So `_use_local()`
+    # is True in there and `ci_status` returns "unknown" on its FIRST LINE, with no
+    # API call and no exception.
+    #
+    # MEASURED on the verified clean run: the SRE reported `CI unknown` while both
+    # check runs on that commit were `completed/success`, finished 49 seconds before
+    # the stage ran. Nothing was broken -- the question was asked in the one place that
+    # structurally cannot answer it.
+    #
+    # `scripts/run_stage.py` measures it on the RUNNER, which does hold
+    # `DEMO_GITHUB_TOKEN`, and puts it here. `sre.run` prefers this value and falls
+    # back to measuring for the in-process path, where the runner IS the caller.
+    #
+    # "" means nobody measured, which `sre.run` treats as "measure it yourself" --
+    # NOT as "unknown". Those are different: a run written before this field existed,
+    # or a local run, must still get a real answer rather than inheriting a blank.
+    ci_status_measured: str = ""
+
 
 # --------------------------------------------------------------------------
 # Decision log — one row per event, append only. Never update, never delete.

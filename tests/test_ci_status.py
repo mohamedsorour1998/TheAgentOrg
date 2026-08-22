@@ -331,15 +331,22 @@ def test_it_reads_the_runs_branch_not_a_hardcoded_one(monkeypatch):
 #     zero check runs        nothing has examined this commit
 #     the lookup RAISED      we could not look -- CI may well be green
 #
-# The third was logged at DEBUG, invisible in a job log, and it cost a real
-# diagnosis. MEASURED on the clean demo run: the SRE reported `CI unknown` while both
-# check runs on that exact commit were `completed/success`, finished 49 seconds before
-# the stage asked. The code was right; `DEMO_GITHUB_TOKEN` is a fine-grained PAT with
-# no `Checks: read`, so `get_check_runs()` raised a 403 and the handler swallowed it.
+# The third was logged at DEBUG, invisible in a job log. MEASURED on the clean demo
+# run: the SRE reported `CI unknown` while both check runs on that exact commit were
+# `completed/success`, finished 49 seconds before the stage asked.
 #
-# The verdict was correct and fail-safe. The missing REASON is the defect -- same
-# class as a silent fixture fallback: a defensible answer with no way to tell which
-# question it answered.
+# THAT RUN'S CAUSE WAS THE FIRST ONE, not this third one, and the distinction is why
+# these tests exist. `sre.run` executed inside a container with no GitHub token, so
+# `_use_local()` was True and this function returned `unknown` on its first line
+# without calling GitHub -- fixed by measuring on the runner
+# (`RunState.ci_status_measured`). A first diagnosis blamed a missing `Checks: read`
+# scope; the deployed token answers **HTTP 200** on both endpoints, so that was wrong.
+# Three causes, one return value, and no way to tell them apart is exactly how a
+# wrong diagnosis gets written down.
+#
+# The verdict was correct and fail-safe throughout. The missing REASON is the defect
+# -- same class as a silent fixture fallback: a defensible answer with no way to tell
+# which question it answered.
 
 def test_a_lookup_failure_is_reported_at_warning_not_debug(monkeypatch, caplog):
     """THE test. A 403 from a token without Checks:read must be visible."""
@@ -361,9 +368,9 @@ def test_a_lookup_failure_is_reported_at_warning_not_debug(monkeypatch, caplog):
     )
     message = warnings[0].getMessage()
     assert "403" in message, f"the exception is not named in the log line: {message}"
-    assert "Checks: read" in message, (
-        f"the log line does not name the likeliest cause, which is the one thing "
-        f"that turns this line into an action: {message}"
+    assert "could not look" in message, (
+        f"the log line does not distinguish `we could not look` from `nothing ran`, "
+        f"which is the whole reason it is at WARNING: {message}"
     )
 
 
@@ -415,3 +422,110 @@ def test_an_unfinished_check_says_how_many(monkeypatch, caplog):
         f"the log does not say how many checks are still running, so a mid-CI "
         f"`unknown` reads the same as a broken one: {message}"
     )
+
+
+# ── THE MEASUREMENT MUST CROSS THE REMOTE SEAM ────────────────────────────────
+#
+# THE DEFECT, and it is structural rather than a mistake in this function. Under
+# REMOTE_AGENTS=true, `sre.run` executes inside an AgentCore container whose entire
+# environment is `AGENT_ROLE` and `DEMO_REPO` -- no GitHub token, deliberately, because
+# a credential in five containers to read a public repository is five more places to
+# leak one. So `_use_local()` is True in there and `ci_status` returns `unknown` on its
+# FIRST LINE: no API call, no exception, nothing to log.
+#
+# MEASURED on the verified clean run: `CI unknown` on a pull request whose two check
+# runs were `completed/success` 49 seconds earlier. The question was asked in the one
+# place that structurally cannot answer it.
+#
+# Fixed the way `RunState.poisoned` was: measured on the runner, carried on the state.
+
+def test_the_sre_agent_prefers_the_measurement_carried_on_the_state(monkeypatch):
+    """THE test. The container cannot measure, so it must read.
+
+    `ci_status` is patched to a raiser rather than to a value: if the agent consults
+    it at all when the field is set, this fails loudly instead of silently agreeing.
+    """
+    from agentorg.agents import sre
+
+    def _must_not_be_called(state):
+        raise AssertionError(
+            "sre.run called ci_status even though the state carries a measurement. "
+            "In the container that call answers `unknown` without asking GitHub, "
+            "which is the whole defect this field exists to fix."
+        )
+
+    monkeypatch.setattr(github_ops, "ci_status", _must_not_be_called)
+    monkeypatch.setattr(sre.llm, "structured", lambda *a, **k: None)
+
+    state = _state()
+    state.ci_status_measured = "passing"
+    result = sre.run(state)
+
+    assert result.ci_status == "passing", result.ci_status
+    assert result.verdict == "go"
+    ci_check = [c for c in result.slo_checks if c.name == sre.CI_CHECK_NAME]
+    assert ci_check and ci_check[0].passed, (
+        f"the measured CI check does not reflect the carried value: {result.slo_checks}"
+    )
+
+
+def test_a_blank_measurement_means_measure_it_yourself(monkeypatch):
+    """`""` is "nobody asked", NOT "unknown" -- the local path depends on it.
+
+    A run written before the field existed, and every in-process run, must still get a
+    real answer. Reading `""` as `unknown` would make the field a silent downgrade for
+    exactly the path that CAN measure.
+    """
+    from agentorg.agents import sre
+
+    asked = []
+
+    def _measures(state):
+        asked.append(state)
+        return "failing"
+
+    monkeypatch.setattr(github_ops, "ci_status", _measures)
+    monkeypatch.setattr(sre.llm, "structured", lambda *a, **k: None)
+
+    state = _state()
+    assert state.ci_status_measured == "", "the field should default blank"
+    result = sre.run(state)
+
+    assert asked, "a blank measurement did not fall back to measuring"
+    assert result.ci_status == "failing"
+    assert result.verdict == "no_go", (
+        "a failing CI must still produce no_go through the fallback path"
+    )
+
+
+def test_a_measured_unknown_is_carried_through_rather_than_re_measured(monkeypatch):
+    """`unknown` measured on the runner is a real answer, not a blank.
+
+    This is the falsy-value trap the `or` in sre.run could have walked into: if
+    `unknown` were treated as "no measurement", the container would re-measure and get
+    `unknown` anyway -- the same answer for the wrong reason, and the test would pass
+    while pinning nothing. So the raiser proves it is NOT re-measured.
+    """
+    from agentorg.agents import sre
+
+    def _must_not_be_called(state):
+        raise AssertionError("a measured `unknown` was discarded and re-measured")
+
+    monkeypatch.setattr(github_ops, "ci_status", _must_not_be_called)
+    monkeypatch.setattr(sre.llm, "structured", lambda *a, **k: None)
+
+    state = _state()
+    state.ci_status_measured = "unknown"
+    result = sre.run(state)
+
+    assert result.ci_status == "unknown"
+    assert result.verdict == "go", "unknown must still proceed; only failing is no_go"
+
+
+def test_the_field_is_optional_and_defaults_blank():
+    """An ADDITION to the frozen contract: every existing RunState must still load."""
+    state = RunState(ticket_id="7", ticket_text="x")
+    assert state.ci_status_measured == ""
+    # And a state serialised before the field existed must round-trip.
+    old = state.model_dump_json(exclude={"ci_status_measured"})
+    assert RunState.model_validate_json(old).ci_status_measured == ""

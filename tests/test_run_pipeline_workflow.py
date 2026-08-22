@@ -2113,3 +2113,47 @@ def test_the_recorded_refusal_reason_names_one_cause_not_two():
         f"the reason does not say the change did not ship, which is the fact a "
         f"reader of an issue most needs: {reason}"
     )
+
+
+def test_the_sre_stage_measures_ci_before_invoking_the_agent():
+    """CI must be measured on the RUNNER, which holds the token, not in the container.
+
+    `sre.run` needs a GitHub token to read check runs, and under REMOTE_AGENTS=true its
+    body executes inside an AgentCore runtime whose whole environment is `AGENT_ROLE`
+    and `DEMO_REPO`. So asking there returns `unknown` from `_use_local()` without an
+    API call -- measured on the verified clean run, whose checks had been green for 49
+    seconds. This job holds `DEMO_GITHUB_TOKEN`, so it measures and the container reads
+    the answer off the state.
+
+    Asserted over the AST, on ORDER, because "measures it" is not the requirement --
+    measuring after the call would leave the sent state blank and read exactly as
+    correct. A source-substring check would also pass on a comment saying so, which is
+    this repository's most repeatable false positive.
+    """
+    import ast
+
+    tree = ast.parse(STAGE_SCRIPT.read_text())
+    func = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "_stage_sre"), None)
+    assert func is not None, "_stage_sre not found; this test would pin nothing"
+
+    measure_line = call_line = None
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        source = ast.unparse(node)
+        if "github_ops.ci_status" in source and measure_line is None:
+            measure_line = node.lineno
+        if "call_agent" in source and "'sre'" in source.replace('"', "'"):
+            call_line = node.lineno
+
+    assert measure_line is not None, (
+        "_stage_sre never calls github_ops.ci_status, so the container measures it "
+        "instead -- and the container has no token, so the answer is always `unknown`"
+    )
+    assert call_line is not None, "_stage_sre does not invoke the sre agent at all"
+    assert measure_line < call_line, (
+        f"ci_status is measured at line {measure_line}, AFTER the agent is invoked at "
+        f"line {call_line}. The state sent to the container is still blank, so the "
+        f"measurement cannot reach the agent that needs it."
+    )

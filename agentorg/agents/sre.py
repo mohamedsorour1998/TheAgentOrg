@@ -150,9 +150,17 @@ def run(state: RunState) -> SREResult:
     `slo_checks`, `notes` and `estimated_cost_note` carry the model's advice with
     the measured CI check in front of it.
     """
-    # MEASURED FIRST, so nothing below can be mistaken for it. Never raises;
-    # returns exactly "passing", "failing" or "unknown".
-    ci = github_ops.ci_status(state)
+    # THE MEASUREMENT, PREFERRED FROM THE STATE. Never raises; always one of the
+    # three. See `RunState.ci_status_measured` for why it cannot always be taken here:
+    # under REMOTE_AGENTS=true this body runs inside a container with no GitHub token,
+    # so `ci_status` would answer "unknown" on its first line without asking GitHub --
+    # measured on the clean demo run, whose checks were green 49 seconds earlier.
+    #
+    # `or` is right rather than a falsy-value trap: the field is `""` exactly when
+    # nobody measured, and every real answer ("passing"/"failing"/"unknown") is
+    # truthy. So a blank means measure it, and "unknown" measured on the runner is
+    # carried through as the real answer it is.
+    ci = state.ci_status_measured or github_ops.ci_status(state)
 
     # `SREAdvice`, NOT `SREResult` -- see that class for the measurement. Asking for
     # the wide model here required two fields the prompt forbids, so every obedient

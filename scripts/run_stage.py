@@ -687,6 +687,24 @@ def _stage_develop(args: argparse.Namespace) -> int:
 def _stage_sre(args: argparse.Namespace) -> int:
     """SRE. The last agent, and the last thing that can stop a promotion."""
     state = _load(args.run_id)
+
+    # CI IS MEASURED HERE, ON THE RUNNER, AND CARRIED ON THE STATE.
+    #
+    # `sre.run` needs a GitHub token to read check runs, and under REMOTE_AGENTS=true
+    # its body executes inside an AgentCore container that deliberately has none --
+    # the five runtimes carry `AGENT_ROLE` and `DEMO_REPO` only. So asking there gets
+    # `unknown` from `_use_local()` on the first line, with no API call: measured on
+    # the verified clean run, which reported `CI unknown` while both check runs on that
+    # commit had been green for 49 seconds.
+    #
+    # This job DOES hold `DEMO_GITHUB_TOKEN`, so it measures and the container reads
+    # the answer off the state -- the same channel `RunState.poisoned` uses, for the
+    # same reason. `ci_status` never raises, so this cannot fail the stage.
+    #
+    # BEFORE the call, not after: the value has to be on the state that gets sent.
+    state.ci_status_measured = github_ops.ci_status(state)
+    print(f"ci_status={state.ci_status_measured}")
+
     state.sre = agent_client.call_agent("sre", state)
     _log(state, "sre", "sre", "reviewed", verdict=state.sre.verdict)
     # Both verdicts, for the same reason the security comment covers both: a `go`

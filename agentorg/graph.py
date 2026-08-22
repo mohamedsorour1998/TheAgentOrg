@@ -619,6 +619,13 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
         return state
 
     # 7. SRE ----------------------------------------------------------------
+    # Measured HERE, not inside the agent, for the reason `RunState.poisoned` is a
+    # field: under REMOTE_AGENTS=true `sre.run` executes in a container with no GitHub
+    # token, so it would answer `unknown` without asking. This process holds the token
+    # when there is one. Harmless on the local path -- `sre.run` prefers the field and
+    # measures only when it is blank, so the answer is identical either way, taken one
+    # call earlier.
+    state.ci_status_measured = github_ops.ci_status(state)
     state.sre = agent_client.call_agent("sre", state)
     _log(state, "sre", "sre", "reviewed", verdict=state.sre.verdict)
     # Before the no_go branch, for the same reason the security comment is before

@@ -132,8 +132,15 @@ surface — see the verified-runs section below.
 **FROZEN. You may ADD optional fields; never rename or remove one.** A rename
 breaks all five lanes at once and nobody notices until integration.
 
-Three fields were added in week 3, all optional, all defaulting to a falsy value:
-`SecurityResult.scan_provenance`, `LogEvent.scan_provenance`, `RunState.poisoned`.
+Fields added since the freeze, all optional, all defaulting to a falsy value:
+`SecurityResult.scan_provenance`, `LogEvent.scan_provenance`, `RunState.poisoned`,
+`RunState.model_provenance`, `RunState.trigger`, `RunState.ci_status_measured`.
+
+Three of those exist for the same structural reason — **a value measured on one machine
+and needed on another**. Over HTTP the state IS the payload, so a per-call argument the
+container must see has to travel as a field: `poisoned` (the caller's choice),
+`ci_status_measured` (the runner has a GitHub token, the container does not), and
+`model_provenance` (the model call happens over there).
 
 ### The vocabulary
 
@@ -1172,8 +1179,9 @@ The clean run was **auto-triggered by opening the issue** — run `32580985840`,
 `TRIGGER: issue`, no command typed. The poisoned run was hand-dispatched
 (`32581285927`) because `poisoned` is hardcoded `"false"` in the ingress transformer.
 
-**`CI unknown` on the clean half is the token, not a bug** — see the `Checks: read`
-note under the dispatch token. The change still merged; `unknown` yields `go`.
+**`CI unknown` on the clean half was a real defect, now fixed** — the SRE was asking
+GitHub from inside a container with no token. See `RunState.ci_status_measured`. The
+change still merged either way, because `unknown` yields `go`.
 
 **Issue #37 is a pre-fix artifact and is not evidence of anything.** Kept, closed by
 hand, with a comment explaining each symptom, because all four of that morning's
@@ -1412,32 +1420,44 @@ component hardest to justify.
 requests, `TheAgentOrg` for `actions:write`. Narrowed to either alone, the other
 half fails silently.
 
-**AND IT IS MISSING `Checks: read`, WHICH IS WHY THE SRE REPORTS `CI unknown` ON A
-GREEN BUILD.** Measured on the verified clean run: the SRE said `CI unknown` while both
-check runs on that exact commit were `completed/success`, finished **49 seconds before**
-the stage asked. The code is correct — `ci_status` reads the check-runs API precisely
-so it can tell "nothing ran" from "still running" — but `get_check_runs()` raised a 403
-and the broad handler returned `unknown`. Proof it is the token and not the code:
+**A FIRST DIAGNOSIS OF THIS BLAMED THE TOKEN AND WAS WRONG.** Recorded because the
+wrong answer was plausible, was written into three files, and the right one is one
+`curl` away. Measured on the clean run: the SRE reported `CI unknown` while both check
+runs on that exact commit were `completed/success`, finished **49 seconds before** the
+stage asked. The token was blamed for lacking a `Checks: read` scope. It answers:
 
 ```
-# with a token that HAS the scope, same branch, same commit
-ci_status -> passing
-totalCount: 2
-   test: status=completed conclusion='success'
-   GitGuardian Security Checks: status=completed conclusion='success'
+GET /repos/.../commits/<sha>/check-runs   -> HTTP 200  total_count: 2
+      test                        completed success
+      GitGuardian Security Checks completed success
+GET /repos/.../branches/<branch>          -> HTTP 200
 ```
 
-The verdict is fail-safe and defensible; `unknown` yields `go` and nothing shipped
-wrongly. **The missing REASON was the defect**, and it is the same class as a silent
-fixture fallback: a correct answer with no way to tell which question it answered. Each
-of the three causes now logs distinctly and the lookup failure is at **WARNING** with
-the exception named and `Checks: read` suggested. It was DEBUG, and it cost half an
-hour of looking at the wrong thing.
+**The real cause is structural.** `sre.run` calls `github_ops.ci_status(state)`, and
+under `REMOTE_AGENTS=true` that body executes INSIDE the AgentCore container. The five
+runtimes carry exactly `AGENT_ROLE` and `DEMO_REPO` — no token, deliberately — so
+`_use_local()` is True in there and `ci_status` returns `unknown` **on its first line,
+with no API call and no exception**. Nothing to log, nothing to catch, and a WARNING on
+the failure path would never have fired.
 
-**Adding `Checks: read` to `DEMO_GITHUB_TOKEN` is an operator action** — a secret's
-value cannot be read back, so nothing in this repository can verify or change it. Until
-it is added, `CI unknown` on the clean run is expected and the demo should say so rather
-than be surprised by it.
+Fixed the way `RunState.poisoned` was: `scripts/run_stage.py:_stage_sre` and
+`graph._walk` measure on the runner, which does hold `DEMO_GITHUB_TOKEN`, and carry the
+answer on `RunState.ci_status_measured`. `sre.run` reads the field and falls back to
+measuring when it is blank, so the in-process path is unchanged.
+
+Three things worth keeping:
+
+- **`""` means "nobody measured", NOT `unknown`.** Reading a blank as `unknown` would
+  silently downgrade the one path that CAN measure. And a measured `unknown` must be
+  carried through rather than re-measured — that is the falsy-value trap here, and it
+  would produce the same answer for the wrong reason with every test still green.
+- **Order is the requirement, not the call.** Measuring after `call_agent` leaves the
+  sent state blank and reads exactly like correct code. Pinned over the **AST** by
+  `test_the_sre_stage_measures_ci_before_invoking_the_agent`, because a substring check
+  would be satisfied by the comment explaining it.
+- **A container with no credential cannot answer a question that needs one**, and it
+  fails by returning the fail-safe value rather than by erroring. Any future agent-side
+  code reaching for a token has this shape.
 
 ### Live configuration
 
