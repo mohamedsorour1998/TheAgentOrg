@@ -37,6 +37,12 @@ dev = [
     # so this is the only lever that pins it there. Kept in step with the
     # [build-system] bound above: bump both together, deliberately.
     "setuptools>=61,<85",
+    # scripts/make_deck.py generates the hackathon deck. DEV-ONLY, deliberately:
+    # it is a presentation tool and has no business inside the agent container,
+    # where every extra dependency is another import that can fail at runtime on
+    # arm64. Nothing under agentorg/ imports it, and tests/test_packaging.py
+    # asserts what a non-editable install actually ships.
+    "python-pptx>=1.0,<2",
 ]
 
 [tool.setuptools.packages.find]

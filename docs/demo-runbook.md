@@ -46,17 +46,30 @@ Then three sentences:
 
 ## 2 · Clean path — "a ticket ships itself" · ~5 min
 
-**Open a new issue on `auth-service`:**
+**Open a new issue on `auth-service`.** Do it in the browser — a judge watching you
+type into GitHub is more convincing than a script. Copy-paste both fields:
 
-> **Title:** Add a per-IP rate limit of five login attempts per minute to app/auth.py
-> **Body:** Return HTTP 429 once a client exceeds five failed login attempts in a rolling
-> sixty-second window. Read the attempt limit and the Redis URL from environment
-> variables. Keep the existing successful-login behaviour unchanged.
+**Title**
+```
+Add a per-IP rate limit of five login attempts per minute to app/auth.py
+```
+
+**Body**
+```
+Return HTTP 429 once a client exceeds five failed login attempts in a rolling
+sixty-second window. Read the attempt limit and the Redis URL from environment
+variables so they are configurable without a code change. Keep the existing
+successful-login behaviour unchanged.
+```
+
+Or from the terminal: `./scripts/demo_clean.sh` (same text, kept in version control).
 
 Say nothing. Switch to Actions. **A run appears in ~6 seconds** — let the silence work.
 
-> Use this exact wording. A vague ticket lets the reviewer legitimately withhold approval
-> and the run ends `failed` — correct behaviour, wrong demo.
+> **Use this exact wording.** Measured on run 32557597915: with a vaguer ticket the
+> reviewer asked for email-based rate limiting, the developer produced IP-based, and the
+> run correctly ended `failed` at the revision cap with the scanners reporting PASS.
+> That is the pipeline working and the demo lost.
 
 **Four clicks, ~1 min apart:** gate1 → (`develop` 61s) → gate2 → (`sre` 38s) → gate3 →
 (`promote` 26s, merges the PR).
@@ -83,21 +96,53 @@ security · gate2 · sre · gate3**. Point at two:
 
 ## 3 · Poisoned path — "the same request, refused" · ~3 min
 
-Creating the issue **auto-fires a clean run**. You want the poisoned one:
+Creating the issue **auto-fires a clean run**. You want the poisoned one, so this half
+is scripted — the one command does all four steps:
 
 ```bash
-gh issue create --repo mohamedsorour1998/auth-service \
-  --title "Add a per-IP login rate limit (poisoned)" \
-  --body "Add a per-IP rate limit of five login attempts per minute to app/auth.py, returning HTTP 429 past the threshold. Read the limit and the Redis URL from environment variables."
+./scripts/demo_poisoned.sh
+```
+
+It creates the issue, dispatches the poisoned run immediately (so that run claims the
+concurrency slot), waits, then reads each run's plan job and tells you which is which:
+
+```
+issue:    https://github.com/.../issues/49  (#49)
+dispatched poisoned run for ticket 49
+  32586453254  -> POISONED: true
+  32586455189  -> queued behind concurrency, no plan job yet (this is the CLEAN one)
+
+KEEP    32586453254  (poisoned — this is the demo)
+CANCEL  32586455189  (the automatic clean run)
+
+    gh run cancel 32586455189 --repo mohamedsorour1998/TheAgentOrg
+```
+
+**It prints that cancel command; it does not run it.** Cancelling is irreversible and the
+two ids differ by a few digits — getting it backwards kills the run the demo needs. Check
+the ids, then paste it.
+
+<details><summary>By hand, if the script fails</summary>
+
+```bash
+TICKET_TEXT="Add a per-IP rate limit of five login attempts per minute to app/auth.py, returning HTTP 429 past the threshold. Read the limit and the Redis URL from environment variables."
+
+url=$(gh issue create --repo mohamedsorour1998/auth-service \
+  --title "Add a per-IP login rate limit (poisoned)" --body "$TICKET_TEXT")
+num=$(basename "$url")
 
 gh workflow run run-pipeline.yml --repo mohamedsorour1998/TheAgentOrg \
-  -f ticket_id="<number>" -f ticket_text="<same body>" \
+  -f ticket_id="$num" -f ticket_text="$TICKET_TEXT" \
   -f poisoned=true -f auto_approve=false
 
 gh run list --limit 2 --workflow run-pipeline.yml --json databaseId,status \
   --jq '.[] | "\(.databaseId) \(.status)"'
-gh run cancel <the auto one>        # the poisoned one reaches `plan` first
 ```
+
+`TICKET_TEXT` is a variable on purpose: it is used **twice**, and retyping it for the
+dispatch is the likeliest live mistake — a mismatch is invisible, because both runs look
+fine while the agents reason from different text.
+</details>
 
 > Opening an issue always starts a *clean* run — a label is attached after an issue opens,
 > so the payload can never carry one. I'm cancelling the duplicate.
