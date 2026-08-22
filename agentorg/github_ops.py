@@ -590,6 +590,164 @@ def ci_status(state: RunState) -> str:
     return "failing"
 
 
+# THE PRECONDITIONS FOR AN IRREVERSIBLE WRITE, checked here as well as enforced
+# by the job graph. `promote` is only reachable past gate3, so in the workflow
+# these are already true -- but a function that merges somebody else's pull
+# request must not depend on a caller's control flow for the one thing it must
+# never do, and `graph.py` and `scripts/run_stage.py` are two callers with two
+# orderings.
+_MERGE_REQUIRED_GATES = ("gate1", "gate2", "gate3")
+
+# A human decision that lets a run through. `overridden` counts, and that is not
+# leniency: `gates_cli resume --decision overridden` is the documented route a
+# human keeps for a known false positive, and it is the one capability a human is
+# meant to retain. Treating it as "not approved" would silently revoke it, and the
+# run would refuse to merge with three human decisions on file.
+_MERGE_PERMITTING_DECISIONS = frozenset({"approved", "overridden"})
+
+
+def _merge_refusal(state: RunState) -> str | None:
+    """Why this run must not be merged, or None if it may be.
+
+    Returns a SHORT reason suitable for a ref and a log summary. Every branch is
+    a fact about the RUN, not about GitHub -- GitHub's own refusals are handled at
+    the call site, because "we declined" and "GitHub declined" are different
+    events and a reader needs to know which. One is a policy the pipeline
+    enforced; the other is a conflict somebody has to go and resolve.
+
+    A MISSING result is a refusal, not a pass. `security is None` means the stage
+    did not run, and a stage that did not run cleared nothing -- the same
+    "did not run" versus "passed" distinction this whole project exists to keep
+    from collapsing, at the last write.
+    """
+    if state.security is None or state.security.verdict != "pass":
+        verdict = None if state.security is None else state.security.verdict
+        return f"security-verdict-{verdict}"
+    if state.sre is None or state.sre.verdict != "go":
+        verdict = None if state.sre is None else state.sre.verdict
+        return f"sre-verdict-{verdict}"
+
+    # READ the decisions, do not COUNT them. `gates.resume` sets
+    # status="rejected" for a refusal and NEVER un-sets it, so approving a run
+    # the graph already rejected appends the approval and leaves the rejection on
+    # file: a run can carry three -- or four -- decision rows one of which is a
+    # refusal. `len(decisions) >= 3` would pass that, and so would "is every gate
+    # approved?", because gate2 would appear in both sets.
+    #
+    # So the rejection is checked FIRST and independently: a refusal on file
+    # outranks a later approval for the same gate.
+    approved = {
+        d.gate for d in state.decisions
+        if d.decision in _MERGE_PERMITTING_DECISIONS
+    }
+    rejected = {d.gate for d in state.decisions if d.decision == "rejected"}
+    if rejected:
+        # `min`, not `sorted(...)[0]`: ruff's FURB192 fires on the latter and this
+        # repo carries no per-file ignores. Either way the choice of WHICH
+        # rejected gate to name is deterministic, which matters because the ref
+        # goes into a log row two callers write.
+        return f"gate-rejected-{min(rejected)}"
+    missing = [g for g in _MERGE_REQUIRED_GATES if g not in approved]
+    if missing:
+        return f"gate-not-approved-{missing[0]}"
+    return None
+
+
+def merge_pr(state: RunState) -> str:
+    """Merge the run's pull request. Returns a ref; NEVER raises.
+
+    The same hard requirement as `post_comment`, for the same reason: `promote`
+    calls this and then writes the run's ending, so an exception here would lose
+    that ending -- and `timeline._outcome` reads its banner off the LAST log row,
+    so losing the ending changes what a judge sees. A merge that did not happen
+    is a recorded fact.
+
+    Four ref shapes, and the distinction between the last two is the point:
+
+        https://…                     merged
+        local://<branch>              offline; no GitHub was reached
+        merge://refused/<reason>      WE declined -- a fact about the run
+        merge://failed/<type>         GITHUB declined, or was unreachable
+
+    "The run was not allowed to merge" and "the merge was attempted and did not
+    land" call for different actions from whoever reads the timeline. Collapsing
+    them would make a conflicted pull request look like a policy refusal.
+
+    THE PRECONDITIONS ARE CHECKED BEFORE THE OFFLINE BRANCH, deliberately.
+    Otherwise the demo's own fallback path -- `OFFLINE=true`, the one it takes on
+    stage if the runtimes misbehave -- would answer `local://` for a run that must
+    never merge, and the blocked beat's final line would read as a delivery.
+
+    Not wired into `promote` here: both promote sites belong to the pipeline
+    modules, which call this and write the `merged` log row.
+    """
+    refusal = _merge_refusal(state)
+    if refusal is not None:
+        logging.getLogger(__name__).warning(
+            "refusing to merge run %s: %s", state.run_id, refusal
+        )
+        return f"merge://refused/{refusal}"
+
+    branch = state.dev.branch if state.dev else ""
+    if _use_local():
+        # Offline the branch is already committed in OFFLINE_REPO and there is no
+        # PR to merge. Reported as delivered-locally rather than refused: nothing
+        # about the RUN prevented this merge, and calling it a refusal would make
+        # every local run -- and the whole suite -- look like a policy failure.
+        return f"local://{branch}"
+
+    if not branch:
+        # We do NOT ask. `head="owner:"` is not a filter that selects nothing, so
+        # a query built from an empty branch can come back with somebody else's
+        # pull request -- and the next thing this function does is MERGE what came
+        # back. Same refusal, and the same reasoning, as post_comment's.
+        return "merge://failed/no-branch-to-look-up"
+
+    try:
+        repo = _repo()
+        pulls = repo.get_pulls(state="open", head=f"{repo.owner.login}:{branch}")
+        if pulls.totalCount == 0:
+            return "merge://failed/no-open-pull-request"
+        pull = pulls[0]
+
+        # `mergeable` is None while GitHub is still computing it and False on a
+        # conflict. Only False is refused here: None means "not known yet", and
+        # the merge call itself is the authoritative answer -- GitHub refuses it
+        # if the branch really cannot merge, which lands in the
+        # `merged=False` check below. Neither case is worth FORCING; a conflict is
+        # a fact to report.
+        if pull.mergeable is False:
+            return "merge://failed/not-mergeable"
+
+        result = pull.merge(
+            commit_title=f"{state.ticket_id}: {state.dev.summary}",
+            commit_message=(
+                f"Merged by The Agent Org after three human approvals.\n\n"
+                f"run_id: {state.run_id}\n"
+                f"security: {state.security.verdict} "
+                f"(provenance: {state.security.scan_provenance or 'unknown'})\n"
+                f"ci: {state.sre.ci_status}\n"
+            ),
+            merge_method="squash",
+        )
+        # A 200 that did not merge is the reassuring non-answer. Trusting the
+        # absence of an exception would report a merge that did not happen --
+        # this project's signature failure shape, at the one write that cannot be
+        # taken back.
+        if not getattr(result, "merged", False):
+            return "merge://failed/github-declined"
+        return pull.html_url
+    except Exception as exc:
+        # Broad on purpose, and this is the clause the whole "never raises"
+        # contract rests on: the failure set spans PyGithub, the network, an
+        # expired token, a protected branch and the response shape. The inline
+        # exc_info is what satisfies BLE001 -- narrowing this would satisfy it
+        # too, with no logging, which is the worse option. The type name goes in
+        # the ref so the log row can say what went wrong.
+        logging.getLogger(__name__).debug("merge failed", exc_info=True)
+        return f"merge://failed/{type(exc).__name__}"
+
+
 # The five AgentCore runtimes this repo deploys, in the order the spec prints# them (docs/plan/mariam/week3.md:118-131). UNDERSCORED on purpose: these are
 # AgentCore RUNTIME names, a different namespace from the HYPHENATED ECR
 # REPOSITORY names (theagentorg-shared-<agent>-agent) recorded in
