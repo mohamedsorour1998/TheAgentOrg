@@ -58,7 +58,7 @@ import typing
 from collections.abc import Callable
 
 from . import gates, github_ops, log
-from .common import agent_client, config
+from .common import agent_client, config, llm
 from .state import (
     DevResult,
     HumanDecision,
@@ -436,11 +436,22 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
 
     state is built here rather than in _walk so the finally clause has something
     to save even if _walk raises on its first line.
+
+    WHICH PATH ANSWERED THE MODEL CALLS is reset before the walk and stamped in
+    the `finally`, which is the same argument as the save one step further: seven
+    `return` sites are seven chances to forget, and the run that raised is the one
+    whose provenance is most worth knowing. `llm.last_source()` returns None when
+    nothing called the model, and that is recorded as `""` rather than `"model"` --
+    a run that never asked must not claim the model answered. `"fixture"` never
+    downgrades to `"model"` inside `llm._record`, so any agent falling back labels
+    the whole run `fixture`.
     """
+    llm.reset_source()
     state = RunState(ticket_id=ticket_id, ticket_text=ticket_text)
     try:
         return _walk(state, poisoned=poisoned, auto_approve=auto_approve)
     finally:
+        state.model_provenance = llm.last_source() or ""
         gates.save(state)
 
 
@@ -630,6 +641,18 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
         _log(state, "system", "promote", "failed",
              summary=f"refused to promote: {refusal}")
         return state
+
+    # THE MERGE IS WHAT MAKES THE PROMOTION TRUE, so it happens first and its row
+    # goes down first. `github_ops.merge_pr` never raises and always returns a
+    # ref, the same contract `post_comment` carries and for the same reason: the
+    # next line records this run's ending, and a raise here would lose it.
+    #
+    # `promoted` MUST BE THE LAST ROW. `timeline._outcome` reads its banner off
+    # the last row's action, so logging `merged` after it would render a shipped
+    # run as `⇄ MERGED` and the ★ PROMOTED banner would never appear.
+    ref = github_ops.merge_pr(state)
+    _log(state, "system", "promote", "merged", summary=f"merged {ref}",
+         artifact_ref=ref)
 
     state.status = "promoted"
     _log(state, "system", "promote", "promoted", summary="change promoted")

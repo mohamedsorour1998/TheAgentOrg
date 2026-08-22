@@ -55,7 +55,8 @@ def _stage_module():
 
 def _args(**kw):
     base = {"run_id": "", "ticket_id": "", "ticket_text": "",
-            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1"}
+            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1",
+            "trigger": "manual"}
     base.update(kw)
     return argparse.Namespace(**base)
 

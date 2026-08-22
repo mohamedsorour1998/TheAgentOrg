@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from agentorg import gates, graph, log
+from agentorg import gates, github_ops, graph, log
 from agentorg.state import (
     Finding,
     HumanDecision,
@@ -49,7 +49,8 @@ def _stage_module():
 
 def _args(**kw):
     base = {"run_id": "", "ticket_id": "", "ticket_text": "",
-            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1"}
+            "poisoned": "false", "auto_approve": "false", "approver": "reviewer-1",
+            "trigger": "manual"}
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -447,3 +448,197 @@ def test_the_local_promote_step_refuses_a_rejection_it_was_handed(monkeypatch):
     refusal = graph.not_promotable(state)
     assert refusal, "graph.not_promotable passed a run carrying a gate1 rejection"
     assert "gate1" in refusal
+
+
+# --------------------------------------------------------------------------
+# THE THREE CROSS-LANE INTERFACES, wired at the sites this lane owns.
+#
+# `github_ops.merge_pr` (Lane C), `llm.last_source()` / `reset_source()`
+# (Lane C) and the `--trigger` flag (Lane D's workflow input) are each
+# consumed here. The functions belong to other lanes; the CALL SITES are
+# Lane B's, and a call site is exactly what a signature-only agreement
+# cannot verify.
+# --------------------------------------------------------------------------
+
+def test_both_promote_sites_MERGE_before_they_record_the_promotion(monkeypatch,
+                                                                  tmp_path):
+    """The merge is what makes the promotion true, and `promoted` must be LAST.
+
+    Both paths, in one test, driven off one stub -- because these two
+    implementations are the pair CLAUDE.md records drifting three times, and a
+    per-path test would let one of them keep the wrong order.
+    """
+    calls: list[str] = []
+
+    def _merge(state):
+        calls.append(state.run_id)
+        return "https://github.test/owner/repo/pull/42"
+
+    monkeypatch.setattr(github_ops, "merge_pr", _merge)
+
+    # The LOCAL path.
+    final = graph.run_pipeline("CLEAN-1", TICKET)
+    assert final.run_id in calls, (
+        f"graph.py promoted without calling github_ops.merge_pr; the run claims "
+        f"to have shipped a change nothing merged. merge_pr calls: {calls}"
+    )
+    local_actions = [e.action for e in log.read(final.run_id)]
+    assert local_actions.index("merged") < local_actions.index("promoted"), (
+        f"graph.py logged the merge AFTER the promotion, so timeline._outcome "
+        f"reads `merged` as the ending and ★ PROMOTED never renders: "
+        f"{local_actions}"
+    )
+    assert local_actions[-1] == "promoted", f"last row: {local_actions[-1]!r}"
+
+    # The CLOUD path.
+    module = _stage_module()
+    state = _promotable_state()
+    gates.save(state)
+    assert module.STAGES["promote"](_args(run_id=state.run_id)) == module.EXIT_OK
+
+    assert state.run_id in calls, (
+        f"run_stage._stage_promote promoted without calling merge_pr: {calls}"
+    )
+    cloud_actions = [e.action for e in log.read(state.run_id)]
+    assert cloud_actions.index("merged") < cloud_actions.index("promoted"), (
+        f"run_stage.py logged the merge AFTER the promotion: {cloud_actions}"
+    )
+    assert cloud_actions[-1] == "promoted", f"last row: {cloud_actions[-1]!r}"
+
+
+def test_a_REFUSED_promotion_does_not_merge(monkeypatch, tmp_path):
+    """The merge must be downstream of the guard, not beside it.
+
+    `merge_pr` re-checks its own preconditions and would refuse anyway -- which
+    is exactly why this needs asserting here: two independent refusals that both
+    happen to work look identical to one, right up until either is changed.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(github_ops, "merge_pr",
+                        lambda state: calls.append(state.run_id) or "x")
+
+    module = _stage_module()
+    state = _promotable_state()
+    state.security = SecurityResult(
+        verdict="block", findings=[_blocking_finding()],
+        blocking=[_blocking_finding()], explanation="key found",
+        scan_provenance="scanners")
+    gates.save(state)
+
+    module.STAGES["promote"](_args(run_id=state.run_id))
+
+    assert calls == [], (
+        f"a promotion refused for a `block` verdict still called merge_pr "
+        f"({calls}). The merge must be downstream of the guard."
+    )
+
+
+def test_the_local_run_records_WHICH_path_answered_the_model_calls():
+    """`RunState.model_provenance`, stamped in run_pipeline's `finally`.
+
+    The suite forces `LLM_DISABLED=True` (conftest guard 1), so every agent here
+    serves its fixture -- and `fixture` is therefore the CORRECT answer, not a
+    degraded one. Asserting `== "fixture"` rather than merely non-empty is what
+    makes this discriminating: a wiring that always wrote "model" would pass a
+    truthiness check while reporting the exact falsehood the field exists to
+    surface. On 2026-08-22 every model-calling agent in the deployed pipeline was
+    serving fixtures with every job green and nothing saying so.
+    """
+    from agentorg.common import llm
+
+    final = graph.run_pipeline("CLEAN-1", TICKET)
+    assert final.model_provenance == llm.SOURCE_FIXTURE, (
+        f"model_provenance is {final.model_provenance!r}; under the suite's "
+        f"LLM_DISABLED guard every agent serves a fixture, so it must read "
+        f"{llm.SOURCE_FIXTURE!r}"
+    )
+
+
+def test_the_cloud_plan_stage_records_the_model_provenance(tmp_path):
+    """The same field on the cloud path, where each stage is its own process."""
+    from agentorg.common import llm
+
+    module = _stage_module()
+    module.STAGES["plan"](_args(ticket_id="PROV-1", ticket_text=TICKET))
+
+    run_id = next(p.stem.removesuffix(".state") for p in tmp_path.glob("*.state.json"))
+    state = RunState.model_validate_json((tmp_path / f"{run_id}.state.json").read_text())
+    assert state.model_provenance == llm.SOURCE_FIXTURE, (
+        f"the cloud plan stage recorded model_provenance="
+        f"{state.model_provenance!r}, not {llm.SOURCE_FIXTURE!r}"
+    )
+
+
+def test_a_stage_that_never_called_the_model_does_not_claim_it_did(tmp_path):
+    """`llm.last_source()` is None for a gate stage, and None is NOT "model".
+
+    A gate job reaches no runtime at all. Recording `"model"` there would put the
+    strongest available claim about a run onto the one stage that cannot support
+    it -- and `promote` holds neither AWS credentials nor the GitHub seam, so the
+    same applies there.
+    """
+    module = _stage_module()
+    module.STAGES["plan"](_args(ticket_id="PROV-1", ticket_text=TICKET))
+    run_id = next(p.stem.removesuffix(".state") for p in tmp_path.glob("*.state.json"))
+
+    # A fresh process would have no record at all; simulate that directly.
+    module.llm.reset_source()
+    assert module.llm.last_source() is None, "the reset did not clear the record"
+
+    module.STAGES["gate1"](_args(run_id=run_id))
+
+    state = RunState.model_validate_json((tmp_path / f"{run_id}.state.json").read_text())
+    assert state.model_provenance != "model", (
+        f"a gate stage that made no model call recorded model_provenance="
+        f"{state.model_provenance!r}. It reaches no runtime; it cannot know that."
+    )
+
+
+def test_the_trigger_flag_is_parsed_and_recorded_on_the_run(tmp_path):
+    """`--trigger`, the flag Lane D's workflow already passes to `plan`.
+
+    THE DIFFERENT-VALUES ASSERTION IS THE ANTI-VACUITY CHECK: identical values
+    would make the field prove nothing, since a hardcoded default would satisfy
+    any single-value test. `manual` is also asserted as the DEFAULT, because a
+    hand dispatch that omits the flag must not read as issue-triggered.
+    """
+    module = _stage_module()
+    recorded = {}
+    for trigger in ("issue", "manual", "schedule"):
+        module.STAGES["plan"](_args(ticket_id=f"TRIG-{trigger}",
+                                    ticket_text=TICKET, trigger=trigger))
+        state = max(
+            (RunState.model_validate_json(p.read_text())
+             for p in tmp_path.glob("*.state.json")),
+            key=lambda s: s.ticket_id == f"TRIG-{trigger}")
+        recorded[trigger] = state.trigger
+
+    assert recorded == {"issue": "issue", "manual": "manual",
+                        "schedule": "schedule"}, (
+        f"the trigger values did not survive onto RunState.trigger: {recorded}. "
+        f"If they are all identical the field proves nothing about how a run "
+        f"started."
+    )
+
+
+def test_the_trigger_defaults_to_manual_when_the_flag_is_absent(tmp_path):
+    """A hand dispatch that omits `--trigger` must not read as issue-triggered.
+
+    Driven through `main()` with the flag genuinely absent from argv -- which is
+    what an operator running the script by hand does, and the only way to
+    exercise argparse's default rather than an explicitly-passed "manual". An
+    empty default would record `""`: "unknown" on the timeline, for the one case
+    that is completely well understood.
+    """
+    module = _stage_module()
+
+    rc = module.main(["plan", "--ticket-id", "TRIG-DEFAULT",
+                      "--ticket-text", TICKET])
+    assert rc == module.EXIT_OK, f"the plan stage exited {rc}"
+
+    state = next(RunState.model_validate_json(p.read_text())
+                 for p in tmp_path.glob("*.state.json"))
+    assert state.trigger == "manual", (
+        f"with no --trigger on argv the run recorded trigger={state.trigger!r}; "
+        f"the default must be `manual`, never empty and never `issue`"
+    )

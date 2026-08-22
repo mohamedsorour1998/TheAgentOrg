@@ -85,7 +85,7 @@ import sys
 import typing
 
 from agentorg import gates, github_ops, graph, log
-from agentorg.common import agent_client, config
+from agentorg.common import agent_client, config, llm
 from agentorg.state import HumanDecision, LogEvent, RunState
 
 # The exact strings accepted, and nothing else. Lower-cased before lookup so
@@ -274,18 +274,56 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     addition to it. `gates.pause` calls `save` itself, so calling both would
     write the state twice -- harmless on the local backend, a second PutItem on
     the other, and misleading either way about how many writers there are.
+
+    WHICH PATH ANSWERED THE MODEL CALLS is stamped here, at the one place every
+    stage passes through on its way out. `llm.last_source()` returns None when no
+    call was made in this process at all -- a gate stage, or `promote` -- and that
+    is recorded as `""` rather than as `"model"`: a stage that never asked the
+    model must not claim the model answered. `"fixture"` never downgrades to
+    `"model"` inside `llm._record`, so a run where ANY agent fell back reports
+    `fixture` for the whole run.
+
+    On the cloud path each stage is a separate PROCESS, so this reads only the
+    calls that stage made -- and a stage that served fixtures overwrites an
+    earlier stage's `model` with `fixture`, which is the honest direction. The
+    reverse would need the guard `llm._record` already carries.
     """
+    source = llm.last_source()
+    if source:
+        state.model_provenance = source
     ref = gates.pause(state, pausing_for) if pausing_for else gates.save(state)
     print(f"run_id={state.run_id}")
     print(f"status={state.status}")
     print(f"state={ref}")
+    print(f"_source={state.model_provenance or 'none'}")
 
 
 def _stage_plan(args: argparse.Namespace) -> int:
-    """PLAN. The only stage that creates a RunState rather than loading one."""
+    """PLAN. The only stage that creates a RunState rather than loading one.
+
+    `trigger` is recorded here, and only here, because this is the stage that
+    creates the run -- no later stage knows how it started. No Actions context
+    field can answer it: EventBridge dispatches through the same REST API
+    `gh workflow run` uses, so `github.event_name` reads `workflow_dispatch`
+    either way.
+    """
+    # BEFORE the first agent call. `llm._record` is module state, and on a laptop
+    # the same process can run several stages in a row -- without this a run would
+    # inherit the previous one's provenance, which is worse than reporting
+    # nothing because it looks like a measurement.
+    llm.reset_source()
+
     state = RunState(ticket_id=args.ticket_id, ticket_text=args.ticket_text,
-                     poisoned=flag(args.poisoned))
-    _log(state, "system", "plan", "opened", summary=f"run started for {state.ticket_id}")
+                     poisoned=flag(args.poisoned),
+                     # `getattr`, not `args.trigger`, and the default is the same
+                     # `manual` argparse uses. Only `plan` reads this flag, and
+                     # several existing tests build their own Namespace for the
+                     # stage functions -- requiring every caller to know about a
+                     # flag six of the seven stages ignore makes the parser's
+                     # shape a dependency of every test that drives a stage.
+                     trigger=getattr(args, "trigger", "") or "manual")
+    _log(state, "system", "plan", "opened",
+         summary=f"run started for {state.ticket_id} (trigger: {state.trigger})")
 
     state.plan = agent_client.call_agent("planner", state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
@@ -714,6 +752,18 @@ def _stage_promote(args: argparse.Namespace) -> int:
         _emit(state)
         return EXIT_NOT_PROMOTABLE
 
+    # THE MERGE IS WHAT MAKES THE PROMOTION TRUE, so it happens first and its row
+    # goes down first. `github_ops.merge_pr` never raises and always returns a
+    # ref, the same contract `post_comment` carries and for the same reason: the
+    # next line records this run's ending, and a raise here would lose it.
+    #
+    # `promoted` MUST BE THE LAST ROW. `timeline._outcome` reads its banner off
+    # the last row's action, so logging `merged` after it would render a shipped
+    # run as `⇄ MERGED` and ★ PROMOTED would never appear.
+    ref = github_ops.merge_pr(state)
+    _log(state, "system", "promote", "merged", summary=f"merged {ref}",
+         artifact_ref=ref)
+
     state.status = "promoted"
     _log(state, "system", "promote", "promoted", summary="change promoted")
     _emit(state)
@@ -791,6 +841,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auto-approve", default="false")
     parser.add_argument("--approver", default="",
                         help="who approved at the Environment, when known")
+    # HOW THIS RUN STARTED. A free string, not `choices`: a closed enum would
+    # REFUSE a future trigger source rather than record it, and an unrecognised
+    # trigger name is still better evidence than a rejected dispatch. Unlike
+    # `--poisoned` this does not go through `flag` -- it is not a boolean, and
+    # nothing branches on it, so an unexpected value costs a mislabelled field
+    # rather than the wrong pipeline.
+    parser.add_argument("--trigger", default="manual",
+                        help="how this run was started: manual, issue, ...")
     args = parser.parse_args(argv)
 
     if args.stage == "plan":
