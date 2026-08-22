@@ -41,6 +41,76 @@ from .model import create_model
 # and show the fixture with no explanation.
 _FENCE = re.compile(r"```(?:\w+)?\s*(.*?)```", re.DOTALL)
 
+# WHICH PATH ANSWERED THE MOST RECENT CALL: the model, or a fixture.
+#
+# Module-level rather than a return value because `text()` and `structured()`
+# already use None to mean "no usable answer", and widening either signature
+# would change four agents' call sites for a fact only the pipeline layer needs.
+#
+# Reset explicitly by the caller rather than at the top of every call. A run
+# makes several model calls -- five agents, plus the developer again on every
+# revision -- and the question the pipeline asks is about the RUN, not about the
+# last agent to speak. A per-call reset would make the last writer win, which is
+# precisely the reading the asymmetry in `_record` exists to prevent.
+_LAST_SOURCE: str | None = None
+
+# The two answers. Named rather than spelled at eight call sites, because a typo
+# in one of them would be a third value nothing reads -- and the field that
+# reports it is a plain `str`, so nothing would refuse it.
+SOURCE_MODEL = "model"
+SOURCE_FIXTURE = "fixture"
+
+
+def reset_source() -> None:
+    """Forget which path answered. Call once before a run, not between agents."""
+    global _LAST_SOURCE
+    _LAST_SOURCE = None
+
+
+def last_source() -> str | None:
+    """`"model"`, `"fixture"`, or None if no call has been made since the reset."""
+    return _LAST_SOURCE
+
+
+def _record(source: str) -> None:
+    """Record which path answered. `fixture` NEVER downgrades to `model`.
+
+    THE ASYMMETRY IS THE MECHANISM, not a tie-break. Five agents share this one
+    record, so a run where ANY of them fell back is not a model run. Without the
+    guard the last agent to answer decides the label, and one successful call
+    papers over four denials -- which is the exact shape of the defect this whole
+    field exists to surface: on 2026-08-22 every model-calling agent in the
+    deployed pipeline was serving fixtures, every job was green, and nothing said
+    so.
+
+    It is one-directional, not write-once: `model` still moves to `fixture`. A
+    latch on the first value would report the first agent's luck for the whole
+    run, which fails in the optimistic direction just as badly.
+    """
+    global _LAST_SOURCE
+    if _LAST_SOURCE == SOURCE_FIXTURE:
+        return
+    _LAST_SOURCE = source
+
+
+def record_fixture_fallback() -> None:
+    """Called by an agent that is about to load its fixture.
+
+    PUBLIC BECAUSE THE AGENTS NEED IT, and that is not redundant with the
+    recording `text()` does internally. Almost every test in this suite -- and
+    `tests/test_agent_fallbacks.py` in particular -- monkeypatches
+    `llm.structured` rather than `llm._complete`, so on that path none of this
+    module's own code runs and nothing would be recorded at all. The agent's
+    fallback branch is the one place the fact cannot be stubbed away, because it
+    IS the fact: the agent knows it is serving a fixture.
+
+    It is also what makes the label true for a reason `llm` cannot see. `text()`
+    returning a usable string is not the same event as the caller USING it: a
+    reply that fails the caller's own validation is a fixture run from the
+    caller's side, and the caller is the only one who knows.
+    """
+    _record(SOURCE_FIXTURE)
+
 
 def available() -> bool:
     """True when a model call is worth attempting. Cheap; makes no network call."""
@@ -89,14 +159,28 @@ def _complete(system_prompt: str, user_prompt: str) -> str:
 
 
 def text(system_prompt: str, user_prompt: str) -> str | None:
-    """Plain-text reply, or None if the model is unavailable or failed."""
+    """Plain-text reply, or None if the model is unavailable or failed.
+
+    EVERY None RETURN RECORDS `fixture`, and there are four of them. That is not
+    bookkeeping: each one sends the caller to its fixture, so each one is a
+    fixture run from the only viewpoint that matters. Missing any single branch
+    leaves `last_source()` reading None -- which renders as *unknown*, the answer
+    this field exists to replace.
+    """
     if not available():
+        _record(SOURCE_FIXTURE)
         return None
     try:
         reply = _complete(system_prompt, user_prompt)
     except Exception:
         # A model we expected to answer did not. The caller falls back to its
         # fixture either way, so warn rather than raise.
+        #
+        # THIS IS THE MEASURED PRODUCTION CASE. `bedrock:InvokeModel` was
+        # implicitDeny on the inference profile config.BEDROCK_MODEL names, so
+        # every call landed here, every agent served its fixture, and the only
+        # trace was this line inside a container log nobody reads during a demo.
+        _record(SOURCE_FIXTURE)
         logging.getLogger(__name__).warning(
             "model call failed; the caller will fall back to its fixture",
             exc_info=True,
@@ -108,23 +192,46 @@ def text(system_prompt: str, user_prompt: str) -> str | None:
         # nothing". Degrade like any other failure instead of raising into the
         # agent. This guard is also what makes the .strip() below unable to
         # raise -- keep the strip on this side of it.
+        _record(SOURCE_FIXTURE)
         logging.getLogger(__name__).warning(
             "model returned %s, not a string; the caller falls back to its fixture",
             type(reply).__name__,
         )
         return None
     reply = reply.strip()
-    return reply or None
+    if not reply:
+        # SPLIT OUT OF `return reply or None` DELIBERATELY. That one-liner reaches
+        # the success case and the empty case through the same statement, so a
+        # single `_record(SOURCE_MODEL)` above it would label a model that said
+        # nothing usable a model run -- while the caller loaded its fixture.
+        _record(SOURCE_FIXTURE)
+        return None
+    _record(SOURCE_MODEL)
+    return reply
 
 
 def structured[T: BaseModel](
     model_cls: type[T], system_prompt: str, user_prompt: str
 ) -> T | None:
-    """Reply parsed into model_cls, or None if unavailable/unparseable."""
+    """Reply parsed into model_cls, or None if unavailable/unparseable.
+
+    A reply that arrived and then failed to parse or validate records `fixture`,
+    OVERWRITING the `model` that `text()` just recorded on the way through. The
+    model spoke; the caller is still about to load its fixture, and the caller's
+    experience is what this field reports. Recording `model` here would assert
+    that the run used model output.
+    """
     raw = text(system_prompt, user_prompt)
     if raw is None:
+        # text() has already recorded the reason. Not re-recorded here, because
+        # that would be a second writer for one event.
         return None
     try:
         return model_cls.model_validate_json(extract_json(raw))
     except (ValidationError, ValueError):
+        # BOTH exception types matter and they arrive from different faults:
+        # unparseable text raises ValueError, well-formed JSON of the wrong shape
+        # raises ValidationError. Recording on only one branch would miss the
+        # other, and pydantic's is the one a chatty-but-valid model produces.
+        _record(SOURCE_FIXTURE)
         return None

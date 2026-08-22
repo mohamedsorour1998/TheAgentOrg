@@ -27,6 +27,16 @@ Do NOT write code. Keep every list non-empty."""
 
 
 def run(state: RunState) -> PlanResult:
-    """Plan the ticket. Returns the fixture plan if no model is available."""
+    """Plan the ticket. Returns the fixture plan if no model is available.
+
+    The fallback branch stamps `llm.record_fixture_fallback()`, and it has to be
+    HERE rather than left to `llm`: nearly every test in this suite substitutes
+    `llm.structured` itself, so on that path none of llm's internal recording
+    runs and the provenance would read *unknown* on the one path every offline
+    run takes. This branch is the fact -- it is where the fixture is loaded.
+    """
     result = llm.structured(PlanResult, SYSTEM_PROMPT, state.ticket_text)
-    return result if result is not None else fixtures_loader.plan()
+    if result is None:
+        llm.record_fixture_fallback()
+        return fixtures_loader.plan()
+    return result

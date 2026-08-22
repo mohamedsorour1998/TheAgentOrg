@@ -102,6 +102,15 @@ def run(state: RunState, poisoned: bool | None = None) -> DevResult:
         poisoned = state.poisoned
     dev = llm.structured(DevResult, SYSTEM_PROMPT, _prompt(state))
     if dev is None:
+        # Stamped HERE, in the fallback branch, for the reason planner.py's
+        # docstring gives: this suite substitutes `llm.structured`, so llm's own
+        # recording never runs on the path every offline run takes.
+        #
+        # Note what is deliberately NOT stamped: the poisoned safety net below.
+        # That path had a real model answer and a demo mechanism replaced one
+        # field of it, so it is a model run -- labelling it `fixture` would make
+        # every poisoned demo read as a model outage.
+        llm.record_fixture_fallback()
         dev = fixtures_loader.dev(poisoned=poisoned)
     if not dev.branch:
         dev.branch = f"agent-org/{state.ticket_id}"

@@ -82,8 +82,14 @@ def _ensure_actionable(result: ReviewResult) -> ReviewResult:
 
 
 def run(state: RunState) -> ReviewResult:
-    """Review the diff. Returns the fixture verdict if no model is available."""
+    """Review the diff. Returns the fixture verdict if no model is available.
+
+    `llm.record_fixture_fallback()` is stamped in the fallback branch, for the
+    reason planner.py's docstring gives: this suite substitutes `llm.structured`,
+    so llm's own recording never runs on the path every offline run takes.
+    """
     result = llm.structured(ReviewResult, SYSTEM_PROMPT, _prompt(state))
     if result is None:
+        llm.record_fixture_fallback()
         result = fixtures_loader.review()
     return _ensure_actionable(result)
