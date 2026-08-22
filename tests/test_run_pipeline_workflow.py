@@ -679,20 +679,23 @@ def test_the_github_seam_is_configured_from_a_secret_and_a_repo_variable():
     repo name here is a workflow that can only ever target one repository, and a
     literal token is a leaked credential.
     """
-    # The jobs that must configure the seam, named rather than derived. `promote`
-    # is excluded because it posts nothing -- it writes a status and a log row.
+    # EVERY job configures the seam, and `promote` is no longer an exception.
     #
-    # THIS LIST IS USED, not merely computed. An earlier version of this test built
-    # exactly this list, asserted it was non-empty, and then iterated `_jobs()`
-    # instead -- so it read as though it pinned WHICH jobs configure GitHub while
-    # actually pinning only that at least one did. That is the shape this lane keeps
-    # finding: protection that is really decoration. The `checked` counter below is
-    # what made the test non-vacuous, and it is kept for that reason, but the set
-    # equality here is what makes it say what it appears to say.
-    must_configure_github = {
-        name for name in _jobs()
-        if name not in ("promote",)
-    }
+    # It was exempted here with the reason "it posts nothing -- it writes a status
+    # and a log row", which was true when written and became false the moment
+    # promote started calling `github_ops.merge_pr`. The exemption then hid the
+    # exact defect this test exists to catch.
+    #
+    # MEASURED 2026-08-22, run 32558114927: all seven jobs green, `status=promoted`
+    # recorded, and NO pull request merged on the target repository. Without
+    # DEMO_REPO and GITHUB_TOKEN, `_use_local()` takes the offline branch and
+    # `merge_pr` returns `local://<branch>` -- a ref that reads like a success and
+    # merges nothing.
+    #
+    # An exemption list is a standing invitation to this failure: the entry outlives
+    # the reason for it, silently. If a future job genuinely needs no seam, prove it
+    # with an assertion about what that job does rather than by name.
+    must_configure_github = set(_jobs())
     assert must_configure_github, "no jobs found; this test would check nothing"
 
     configured = {

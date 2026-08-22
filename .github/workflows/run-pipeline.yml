@@ -548,6 +548,24 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    # THE GITHUB SEAM, WHICH THIS JOB DID NOT HAVE UNTIL IT STARTED MERGING.
+    #
+    # No AWS credentials -- past gate3 there is no agent left to invoke, and that
+    # part of the original reasoning still holds. But `promote` now calls
+    # `github_ops.merge_pr`, and `github_ops._use_local()` returns
+    # `OFFLINE or not (GITHUB_TOKEN and GITHUB_REPO)`. Without these two it takes
+    # the OFFLINE branch, and `merge_pr`'s offline path returns `local://<branch>`
+    # -- a ref that reads like a success and merges nothing.
+    #
+    # MEASURED 2026-08-22, run 32558114927: all seven jobs green, `status=promoted`
+    # written, and NO pull request merged on the target repository. The job log
+    # carried no merge line at all, because the code never reached the online
+    # branch. Exactly the failure shape this project exists to eliminate -- a green
+    # run whose central action did not happen -- reintroduced by adding a real
+    # write to the one job that had been deliberately credential-free.
+    env:
+      DEMO_REPO: ${{ vars.DEMO_REPO }}
+      GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
