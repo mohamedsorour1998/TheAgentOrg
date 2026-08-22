@@ -41,6 +41,7 @@ its `_input_template` helper is reused here rather than re-derived.
 """
 
 import importlib.util
+import os
 import re
 from pathlib import Path
 
@@ -335,13 +336,25 @@ def test_the_stage_records_the_trigger_onto_the_run_state():
     """Accepting the flag and dropping it would pass the test above and prove nothing.
 
     The end of the chain: workflow input -> shell env -> argparse -> RunState. Every
-    link is asserted somewhere in this file, and this is the last one -- without it,
+    other link is asserted elsewhere in this file; this is the last one. Without it,
     `--trigger` could be accepted and discarded while `RunState.trigger` held its
     default, which is this project's signature failure shape applied to its own
     provenance field.
+
+    ASSERTED BY RUNNING THE STAGE, NOT BY MATCHING ITS SOURCE, and that correction
+    is worth recording. A first version searched the source for
+    `trigger=args.trigger`. It passed, then broke when the other lane changed the
+    spelling to `getattr(args, "trigger", "")` -- which is BETTER code, because the
+    hand-built argparse.Namespace objects in several test files have no `trigger`
+    attribute and `args.trigger` raised AttributeError across 20 of them. So the
+    regex was pinning one spelling of a correct implementation rather than the
+    behaviour, and it failed on an improvement. A matcher that breaks when the code
+    gets better is testing the wrong thing.
     """
+    import json
     import subprocess
     import sys
+    import tempfile
 
     help_text = subprocess.run(
         [sys.executable, "scripts/run_stage.py", "plan", "--help"],
@@ -349,14 +362,61 @@ def test_the_stage_records_the_trigger_onto_the_run_state():
     ).stdout
     assert "--trigger" in help_text, "the flag is not accepted; see the test above"
 
-    source = (REPO_ROOT / "scripts" / "run_stage.py").read_text()
-    code = "\n".join(line.split("#", 1)[0] for line in source.splitlines())
-    assert re.search(r"trigger\s*=\s*args\.trigger", code), (
-        "scripts/run_stage.py accepts --trigger but never assigns it to the "
-        "RunState. The flag would be parsed and discarded, the run would record "
-        "the default, and every job would still be green. Comments are stripped "
-        "before this search, so the module's prose about the trigger cannot "
-        "satisfy it."
+    with tempfile.TemporaryDirectory() as workspace:
+        env = {
+            **os.environ,
+            # Force the fully offline path: no model call, no GitHub write, and a
+            # scratch workspace so this does not touch the real runs/ directory.
+            "LLM_DISABLED": "true",
+            "OFFLINE": "true",
+            "OFFLINE_REPO": f"{workspace}/repo",
+            "OFFLINE_NOTES": f"{workspace}/NOTES.md",
+            "RUNS_DIR": workspace,
+        }
+        completed = subprocess.run(
+            [
+                sys.executable, "scripts/run_stage.py", "plan",
+                "--ticket-id", "TRIGGER-1",
+                "--ticket-text", "Add a per-IP login rate limit.",
+                "--poisoned", "false",
+                "--trigger", INGRESS_TRIGGER,
+            ],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False,
+        )
+        assert completed.returncode == 0, (
+            f"the plan stage exited {completed.returncode} while being handed "
+            f"--trigger {INGRESS_TRIGGER!r}.\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+
+        run_id = next(
+            (
+                line.split("=", 1)[1].strip()
+                for line in completed.stdout.splitlines()
+                if line.startswith("run_id=")
+            ),
+            None,
+        )
+        assert run_id, (
+            f"the plan stage printed no `run_id=` line, so its state cannot be "
+            f"found:\n{completed.stdout}"
+        )
+
+        state_files = list(Path(workspace).glob(f"{run_id}.state.json"))
+        if not state_files:
+            state_files = list((REPO_ROOT / "runs").glob(f"{run_id}.state.json"))
+        assert state_files, (
+            f"no state file for run {run_id}; this test cannot read what the stage "
+            f"recorded"
+        )
+
+        recorded = json.loads(state_files[0].read_text())
+
+    assert recorded.get("trigger") == INGRESS_TRIGGER, (
+        f"the plan stage was handed --trigger {INGRESS_TRIGGER!r} and recorded "
+        f"trigger={recorded.get('trigger')!r} on the RunState. The flag is parsed "
+        f"and DISCARDED: the run would carry the default, every job would stay "
+        f"green, and nothing would say an issue started it."
     )
 
 
