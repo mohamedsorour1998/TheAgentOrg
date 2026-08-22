@@ -58,10 +58,16 @@ MAIN_TF = REPO_ROOT / "infra" / "Terraform" / "modules" / "ingress" / "main.tf"
 # GitHub App ingress.
 DISPATCHED_WORKFLOW = "run-pipeline.yml"
 
-# The four inputs run-pipeline.yml declares. Restated here rather than parsed out
-# of the workflow: this file is asserting that the DISPATCHER and the WORKFLOW
-# agree, and deriving both sides from one source would assert nothing.
-EXPECTED_INPUT_KEYS = {"ticket_id", "ticket_text", "poisoned", "auto_approve"}
+# The inputs run-pipeline.yml declares. Restated here rather than parsed out of
+# the workflow: this file is asserting that the DISPATCHER and the WORKFLOW agree,
+# and deriving both sides from one source would assert nothing.
+#
+# `trigger` added 2026-08-22. It is the only field that can say a run was started
+# by an opened issue: EventBridge dispatches through the same REST API
+# `gh workflow run` uses, so `github.event_name` reads `workflow_dispatch` for
+# both. Its value is asserted by tests/test_trigger_provenance.py, including that
+# it DIFFERS from the workflow's default -- identical values would prove nothing.
+EXPECTED_INPUT_KEYS = {"ticket_id", "ticket_text", "poisoned", "auto_approve", "trigger"}
 
 # The two values whose flip is silent. See the module docstring.
 SAFE_DEFAULTS = {"poisoned": "false", "auto_approve": "false"}

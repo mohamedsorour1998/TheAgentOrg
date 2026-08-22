@@ -777,7 +777,7 @@ def test_the_only_trigger_is_manual_dispatch():
     )
 
 
-def test_the_dispatch_inputs_are_exactly_the_four_the_ingress_will_send():
+def test_the_dispatch_inputs_are_exactly_the_five_the_ingress_will_send():
     """Named and typed, because EventBridge dispatches this workflow by API.
 
     `POST /repos/{owner}/{repo}/actions/workflows/run-pipeline.yml/dispatches`
@@ -785,11 +785,18 @@ def test_the_dispatch_inputs_are_exactly_the_four_the_ingress_will_send():
     every value arrives as a STRING. So the declared `type: boolean` is for the
     UI, and the parsing on the other side has to accept 'true'/'false' as text.
     test_the_flag_parser_* below is that half.
+
+    `trigger` added 2026-08-22, `type: string` and default `manual`. It is the
+    only field that can record that a run was started by an opened issue --
+    EventBridge dispatches through the same REST API `gh workflow run` uses, so
+    `github.event_name` reads `workflow_dispatch` either way. Its default must
+    differ from what the ingress sends; tests/test_trigger_provenance.py asserts
+    that, because identical values would make the field prove nothing.
     """
     inputs = _triggers()["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"ticket_id", "ticket_text", "poisoned", "auto_approve"}, (
-        f"dispatch inputs are {sorted(inputs)}"
-    )
+    assert set(inputs) == {
+        "ticket_id", "ticket_text", "poisoned", "auto_approve", "trigger",
+    }, f"dispatch inputs are {sorted(inputs)}"
     for name in ("ticket_id", "ticket_text"):
         assert inputs[name].get("type") == "string", (
             f"input {name} is type {inputs[name].get('type')!r}, expected string"

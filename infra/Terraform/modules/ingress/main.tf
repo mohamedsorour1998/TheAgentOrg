@@ -455,6 +455,18 @@ resource "aws_iam_role_policy" "dispatch" {
 # Environments. An issue is opened by anyone with access to the repository; a run
 # it starts must not approve itself.
 #
+# `trigger` is "issue", and it is the ONLY thing that can say so. EventBridge
+# dispatches this workflow through the same REST API `gh workflow run` uses, so
+# `github.event_name` reads `workflow_dispatch` for both -- MEASURED on run
+# 32542152671, started by opening issue #15 and still reporting
+# `event: workflow_dispatch`. No Actions context field distinguishes them, so the
+# provenance has to be SENT, and this is the only sender.
+#
+# It MUST differ from run-pipeline.yml's default of "manual". Identical values
+# would make the field prove nothing -- a run recording `manual` would be
+# indistinguishable from a run whose trigger was never set. Quoted, like every
+# other value here.
+#
 # The issue NUMBER becomes ticket_id and the TITLE becomes ticket_text. The body
 # is deliberately not used: it is unbounded, may hold anything, and goes straight
 # into an agent prompt.
@@ -484,7 +496,8 @@ resource "aws_cloudwatch_event_target" "run_pipeline" {
           "ticket_id": "<issue_number>",
           "ticket_text": "<issue_title>",
           "poisoned": "false",
-          "auto_approve": "false"
+          "auto_approve": "false",
+          "trigger": "issue"
         }
       }
     EOT

@@ -112,6 +112,33 @@ on:
         required: false
         type: boolean
         default: false
+      trigger:
+        # HOW THIS RUN STARTED, and `event:` cannot answer it. EventBridge
+        # dispatches this workflow through the same REST API `gh workflow run`
+        # uses, so an auto-started run and a hand-typed one both read
+        # `workflow_dispatch` and NO field distinguishes them. MEASURED on run
+        # 32542152671, which was started by opening issue #15 and still reported
+        # `event: workflow_dispatch`.
+        #
+        # `type: string`, not a choice list, because the value crosses the REST
+        # dispatch API as text and `scripts/run_stage.py` records it verbatim onto
+        # `RunState.trigger`. A closed enum here would reject a future source
+        # rather than record it, and an unrecognised trigger name is still better
+        # evidence than a silent `manual`.
+        #
+        # The ingress transformer sends "issue"; a hand dispatch leaves this
+        # default. So the value is trustworthy in the DIRECTION THAT MATTERS -- a
+        # run claiming `issue` was sent by the rule, because nothing else sends
+        # that string. It is not proof in the other direction: somebody can type
+        # `-f trigger=issue` by hand.
+        #
+        # The default MUST differ from what the ingress sends. Identical values
+        # would make the field prove nothing, and tests/test_trigger_provenance.py
+        # asserts the difference for exactly that reason.
+        description: "How this run started (the ingress sends 'issue')"
+        required: false
+        type: string
+        default: manual
 
 # One run at a time, and NEVER cancel one mid-flight: a cancelled run can leave a
 # pull request open, a block comment posted and a gate approved with nothing on
@@ -180,12 +207,18 @@ jobs:
           TICKET_ID: ${{ inputs.ticket_id }}
           TICKET_TEXT: ${{ inputs.ticket_text }}
           POISONED: ${{ inputs.poisoned }}
+          # HOW THIS RUN STARTED. Recorded onto RunState.trigger by
+          # scripts/run_stage.py, because no Actions context field can answer it:
+          # EventBridge dispatches through the same REST API `gh workflow run`
+          # uses, so `github.event_name` reads `workflow_dispatch` either way.
+          TRIGGER: ${{ inputs.trigger }}
         run: |
           set -euo pipefail
           python scripts/run_stage.py plan \
             --ticket-id "$TICKET_ID" \
             --ticket-text "$TICKET_TEXT" \
-            --poisoned "$POISONED" | tee stage.log
+            --poisoned "$POISONED" \
+            --trigger "$TRIGGER" | tee stage.log
           # `|| true` is what makes the guard below REACHABLE, and it is the whole
           # point of this line. MEASURED: under `set -euo pipefail`, a log with no
           # `run_id=` line makes grep exit 1 and kill the step immediately -- so
