@@ -152,7 +152,7 @@ So the two are split by design:
 | Write the diff | developer agent | advisory |
 | Critique the diff | reviewer agent | advisory — can request changes |
 | Explain the security risk in prose | security agent | advisory |
-| Judge deployment readiness | sre agent | advisory |
+| Judge deployment readiness | sre agent | **advisory** — the verdict itself is code, from real CI |
 | **Decide whether it ships** | **`compute_security_verdict()`** | **binding** |
 
 `compute_security_verdict()` lives in `agentorg/state.py`. It sorts findings by
@@ -180,6 +180,19 @@ The clean ticket is planned, developed, reviewed, scanned, SRE-checked and
 what separates a pipeline from a wall — a system that blocks everything is not a
 gate, it is an outage.
 
+**Each run is a complete record on the issue it came from.** The pull request body
+carries `Closes #<n>`, so GitHub links it in the issue's Development sidebar, and when
+the run ends the issue receives a verdict comment and closes — `completed` for a
+merged change, `not_planned` for a refused one. So the two halves are distinguishable
+from the issue list alone, without opening a workflow run:
+
+| | Clean | Poisoned |
+|---|---|---|
+| Issue | closed, `completed` | closed, `not_planned` |
+| Pull request | merged | left open, unmerged |
+| Security | `pass`, `provenance: scanners` | `block`, 2 findings, `provenance: scanners` |
+| Pipeline | seven jobs green | `develop` exits **3**, everything after skipped |
+
 > The credential in the poisoned ticket is `AKIAIOSFODNN7EXAMPLE`, AWS's own
 > published documentation placeholder. Nothing sensitive is in this repository.
 
@@ -193,9 +206,18 @@ five for no difference in content, and leave five Dockerfiles to drift apart.
 |---|---|---|
 | **planner** | the ticket text | tasks, acceptance criteria, target files |
 | **developer** | the plan, and the reviewer's last critique | a branch name and a unified diff |
-| **reviewer** | the diff | `approve` or `changes_requested`, with line comments |
+| **reviewer** | the diff, and the repo **as the diff would leave it** | `approve` or `changes_requested`, with line comments |
 | **security** | the diff | findings from three real scanners, and the binding verdict |
 | **sre** | the run, plus the target repo's real CI status | `go` or `no_go`, SLO checks |
+
+**All five read the target repository.** Each run shallow-clones it and every agent
+sees the same files, briefly cached so one run's agents agree with each other and a
+later run still picks up a merge. Before this, an agent reasoned about the repository
+from its *name*: asked to add rate limiting to a Python Flask app, the developer agent
+wrote Go — `sync.RWMutex`, `NewRateLimiter` — four revisions running, because nothing
+in its prompt said what the file it was patching contained. The reviewer gets the
+repository with the diff already applied, so it judges the result rather than applying
+a patch in its head.
 
 **Every agent degrades to a fixture rather than failing.** If a model call fails,
 the agent loads a validated sample from `fixtures/` and the pipeline completes. That
@@ -375,6 +397,7 @@ agentorg/
 ├── graph.py                  the pipeline as a single walk (the in-process path)
 ├── gates.py                  human gates: save · pause · resume · load
 ├── github_ops.py             the GitHub seam — API online, plain git offline
+├── repo_snapshot.py          the target repo, cloned once and read by all five agents
 ├── log.py, timeline.py       append-only decision log, and its renderer
 ├── gates_cli.py              approve or reject a gate from a terminal
 ├── approve_server.py         a minimal local approval screen over gates.resume
@@ -569,6 +592,12 @@ family of tickets.
 - **`STATE_BACKEND=dynamodb` is untested on the cloud path.** The table and IAM
   exist and the code reads through a backend-agnostic seam, but the cloud path runs
   on the `local` default with an artifact handoff between jobs.
+- **The SRE reports `CI unknown` and still says `go`.** GitHub answers `pending` with
+  zero checks when nothing has run, which reads as `unknown` rather than `passing` —
+  deliberately, since a green CI line for a repository that never ran a test would be
+  a fabricated fact. `unknown` proceeds and the honest value reaches the PR comment;
+  only `failing` produces `no_go`. Whether `unknown` should block a *merge* is
+  `merge_pr`'s decision, made there rather than smuggled into this verdict.
 - **All three gate Environments have `can_admins_bypass: true`.** A repository admin
   can push a gate through without a reviewer clicking, so the honest answer to "can
   a gate be skipped?" is yes, by an admin. An operator setting rather than a code
