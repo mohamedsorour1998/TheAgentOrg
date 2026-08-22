@@ -356,7 +356,7 @@ the string `"false"` as `True`.
 | `STATE_BACKEND` | same | `local` | Unknown values **raise at import** rather than falling back — a typo'd `dynamo` silently writing to disk would leave an operator believing a run is durable. |
 | `STATE_TABLE` | same | `theagentorg-runs` | The DynamoDB table. Same literal as the Terraform module's default — two places, one value. |
 | `SECURITY_BLOCK_THRESHOLD` | same | `high` | Passed straight to the block rule. **Validated at import** against `SEVERITY_ORDER` since 2026-08-22 — unvalidated, a typo raised `KeyError` inside the security agent mid-run. |
-| `MAX_REVISION_LOOPS` | same | `3` | Caps the developer↔reviewer loop. `int()`, so a non-numeric value raises at import. |
+| `MAX_REVISION_LOOPS` | same | `3` | Caps the developer↔reviewer loop. `int()`, so a non-numeric value raises at import. **`run-pipeline.yml` sets it PER RUN: `1` when `poisoned`, `3` otherwise** — a poisoned run cannot converge (the safety net re-adds the key every pass), while a clean run genuinely uses its retries. Set on `develop` only, the one job that runs the loop. |
 | `SCANNER_TIMEOUT_SECONDS` | same | `120` | Per-scanner-**invocation**, not whole-suite. A hung scanner is worse than a crashed one: on a projector it is indistinguishable from a freeze. |
 | `GITHUB_REPO` | **`DEMO_REPO`** | `""` | **The one name mismatch in the file.** Setting `GITHUB_REPO` in the environment has no effect. |
 | `GITHUB_TOKEN` | same | `""` | With `DEMO_REPO`, decides `_use_local()`. |
@@ -570,6 +570,47 @@ silently. See the verified-runs section for the measurement.
 normally executes **exactly once**. On a **poisoned** diff a live reviewer does not
 approve: the 2026-08-22 poisoned run ran all four passes (`review ×4` on PR #44) and
 security blocked it.
+
+### WHO CATCHES A REAL SECURITY ISSUE — the ordering, and why two catchers is right
+
+Asked during rehearsal and worth writing down, because the demo makes it look as
+though the reviewer beat the scanners to it. Read off `scripts/run_stage.py:599-627`:
+
+```
+while True:                       # the developer/reviewer loop
+    developer  -> a diff
+    reviewer   -> approve | changes_requested      <- ADVISORY, runs EVERY pass
+    break on approve, or on the revision cap
+open_pr
+security     -> pass | block                       <- BINDING, runs ONCE, after
+```
+
+So the reviewer does not catch it *first* in any meaningful sense — it runs **once per
+pass** while security runs **once, after the loop settles**. On a poisoned run that is
+four reviewer objections before security has been asked anything. Both refuse; only
+security's refusal stops the pipeline (`develop` exits 3, `gate2` never starts).
+
+**The answer to "if I have a real issue, who catches it?" is: both, on purpose, and
+they are not redundant.**
+
+| | reviewer | security |
+|---|---|---|
+| what it is | a model reading the diff | three real scanners + five lines of Python |
+| catches | intent, logic, plan mismatch, taste | credentials, known CVEs, injectable patterns |
+| authority | advisory — `graph.py` loops, does not stop | **binding** — `compute_security_verdict` |
+| can be wrong | yes, both directions | deterministic, same answer every time |
+| can be talked out of it | yes — it is a prompt | **no** — no model is involved |
+
+A model that can be persuaded, distracted or prompt-injected must not be the thing
+standing between a credential and `main`. That is the whole thesis of this repository,
+and it is why the reviewer catching the key first is a *bonus* rather than the
+mechanism: **the demo would still block with the reviewer removed entirely.** It would
+not block with the scanners removed.
+
+Corollary for a question a judge may ask — *what if the scanners miss something?* Then
+the reviewer is the only thing that saw it, its verdict is advisory, and the change can
+reach `main` past three human gates. That is an accepted limit, not a defended one: the
+gates are the last line, which is why they require a named reviewer.
 
 ### Two agent-level guards worth knowing
 
@@ -1169,7 +1210,7 @@ first run where **every stage of both halves reported `_source=model`**.
 | Issue comments | `plan`, `gate1`, `outcome` | `plan`, `gate1`, `outcome` |
 | PR | **#42 — MERGED** | **#44 — open, blocked** |
 | PR body | `Closes #41` | `Closes #43` |
-| PR comments | develop · review · security · gate2 · sre · gate3 | develop · review ×4 · security |
+| PR comments | develop · review · security · gate2 · sre · gate3 | develop · review ×2 · security |
 | Security | `PASS`, `provenance: scanners` | `BLOCK`, `provenance: scanners`, `app/auth.py:3` and `:4` |
 | Provenance | `_source=model` at plan, develop, sre, promote | `_source=model` at plan, develop |
 | Jobs | all seven green | `develop` **exit 3**, everything after skipped |
@@ -1182,6 +1223,14 @@ The clean run was **auto-triggered by opening the issue** — run `32580985840`,
 **`CI unknown` on the clean half was a real defect, now fixed** — the SRE was asking
 GitHub from inside a container with no token. See `RunState.ci_status_measured`. The
 change still merged either way, because `unknown` yields `go`.
+
+**The poisoned run now shows TWO review rounds, not four.** `MAX_REVISION_LOOPS` is `1`
+when `poisoned` — the run above was measured at the old value of 3. A poisoned run
+cannot converge, so the extra rounds added no evidence and read on a projector as a
+developer agent that could not follow instructions. It was in fact complying every
+pass: four DIFFERENT model summaries, with the safety net re-substituting the key each
+time. The block, the two findings and the line numbers are unchanged — the security
+verdict is computed once, after the loop, over a diff that always carries the key.
 
 **Issue #37 is a pre-fix artifact and is not evidence of anything.** Kept, closed by
 hand, with a comment explaining each symptom, because all four of that morning's

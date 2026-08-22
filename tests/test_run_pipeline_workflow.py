@@ -2157,3 +2157,85 @@ def test_the_sre_stage_measures_ci_before_invoking_the_agent():
         f"line {call_line}. The state sent to the container is still blank, so the "
         f"measurement cannot reach the agent that needs it."
     )
+
+
+# ── THE REVISION CAP IS ASYMMETRIC, AND THAT IS THE POINT ─────────────────────
+#
+# A poisoned run CANNOT converge. `developer.run` re-substitutes the reference diff
+# whenever the model's answer no longer carries the key on an added line, so the
+# developer removes the credential, the safety net puts it back, and the reviewer
+# objects again. MEASURED on PR #44: four rounds, four DIFFERENT model summaries -- so
+# the model was complying every time -- and the same rejection each round.
+#
+# A clean run genuinely uses its retries. MEASURED on run 32557597915: the reviewer
+# asked for email-based limiting, the developer produced IP-based, and the run ended
+# `failed` at the cap with security reporting PASS. One shared value cannot serve both,
+# which is why `poisoned` selects it.
+
+def test_only_the_develop_job_sets_the_revision_cap():
+    """The loop lives in `develop`; the value elsewhere would be decoration.
+
+    Asserted as an exact set rather than "develop has it", because a cap on `sre` or
+    `promote` would read as though it did something and change nothing.
+    """
+    carriers = {name for name, job in _jobs().items()
+                if "MAX_REVISION_LOOPS" in (job.get("env") or {})}
+    assert carriers == {"develop"}, (
+        f"the revision cap is set on {sorted(carriers)}; only `develop` runs the "
+        f"developer/reviewer loop, so anywhere else it is inert but looks meaningful"
+    )
+
+
+def test_the_poisoned_run_gets_a_smaller_cap_than_the_clean_run():
+    """THE test. Both branches must be present AND they must differ.
+
+    Two identical values would leave the expression, the comment and this test all
+    looking correct while the asymmetry -- the entire reason it exists -- was gone.
+    That is this repository's most repeated failure shape, so the values are parsed
+    out and compared rather than matched as a literal string.
+    """
+    expression = _job("develop")["env"]["MAX_REVISION_LOOPS"]
+
+    assert "inputs.poisoned" in expression, (
+        f"the cap does not depend on `poisoned`, so both halves of the demo share one "
+        f"value: {expression}"
+    )
+    # `'true'` as a STRING: workflow_dispatch inputs arrive as strings even when
+    # declared boolean, and the REST dispatch API rejects real JSON booleans inside
+    # `inputs`. With `== true` the expression is always false and every run gets the
+    # clean value -- silently, with the poisoned beat still blocking, so nothing fails.
+    assert "== 'true'" in expression or '== "true"' in expression, (
+        f"the cap compares `poisoned` against a boolean, not the string GitHub "
+        f"actually sends, so the condition is always false: {expression}"
+    )
+
+    numbers = [int(n) for n in re.findall(r"'(\d+)'", expression)]
+    assert len(numbers) == 2, (
+        f"expected two branch values in the cap expression, found {numbers}: "
+        f"{expression}"
+    )
+    poisoned_cap, clean_cap = numbers
+    assert poisoned_cap < clean_cap, (
+        f"the poisoned cap ({poisoned_cap}) is not smaller than the clean one "
+        f"({clean_cap}). Identical values would make this expression, its comment and "
+        f"this test all read as correct while doing nothing."
+    )
+    assert poisoned_cap >= 1, (
+        f"a cap of {poisoned_cap} would stop the loop before the reviewer ever ran, "
+        f"so the poisoned PR would carry no review comment at all"
+    )
+
+
+def test_the_cap_still_admits_at_least_one_reviewer_pass_on_a_clean_run():
+    """A clean run must be able to recover from a first-pass disagreement.
+
+    Pinned because the tempting simplification is one small value for both halves --
+    and measured, that ends the clean run `failed` with the scanners reporting PASS,
+    which is the demo's promoted beat gone.
+    """
+    expression = _job("develop")["env"]["MAX_REVISION_LOOPS"]
+    clean_cap = [int(n) for n in re.findall(r"'(\d+)'", expression)][-1]
+    assert clean_cap >= 2, (
+        f"the clean run's cap is {clean_cap}, so a reviewer withholding approval once "
+        f"ends the run `failed` -- measured on run 32557597915"
+    )

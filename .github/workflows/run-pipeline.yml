@@ -327,6 +327,33 @@ jobs:
       REMOTE_AGENTS: "true"
       DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
+      # ONE REVISION ON A POISONED RUN, THREE ON A CLEAN ONE, and the asymmetry is
+      # the point rather than a shortcut.
+      #
+      # A poisoned run CANNOT converge. `developer.run` re-substitutes the reference
+      # diff whenever the model's answer no longer carries the key on an added line
+      # (agentorg/agents/developer.py), so the developer removes the credential, the
+      # safety net puts it back, and the reviewer objects again. MEASURED on PR #44:
+      # four rounds, four DIFFERENT model summaries, the same rejection each time. The
+      # extra rounds add no evidence -- they cost minutes and read on a projector as a
+      # developer agent that cannot follow instructions, which is the opposite of what
+      # is happening.
+      #
+      # A clean run genuinely uses its retries. MEASURED on run 32557597915: the
+      # reviewer asked for email-based limiting, the developer produced IP-based, and
+      # the run ended `failed` at the cap with security reporting PASS. Capping the
+      # clean half at 1 would turn a recoverable disagreement into a failed demo, so
+      # `poisoned` selects the value.
+      #
+      # THE SECURITY VERDICT IS UNAFFECTED EITHER WAY. It is computed once, after this
+      # loop exits, over whatever diff the loop settled on -- and every pass of a
+      # poisoned run carries the key. Fewer rounds, same block, same two findings.
+      #
+      # `inputs.poisoned` is the STRING "true": workflow_dispatch inputs arrive as
+      # strings even when declared boolean, and the REST dispatch API rejects real JSON
+      # booleans inside `inputs`. Comparing against the string is deliberate -- with
+      # `== true` this expression is always false and every run silently gets 3.
+      MAX_REVISION_LOOPS: ${{ inputs.poisoned == 'true' && '1' || '3' }}
     steps:
       - uses: actions/checkout@v4
 
