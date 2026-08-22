@@ -6,7 +6,9 @@
 #   - one ECR repository each (arm64 images for AgentCore), keep-last-N lifecycle
 #   - one shared IAM runtime role trusted by bedrock-agentcore, allowed to:
 #       * write logs
-#       * invoke Bedrock foundation models (the LLM behind every agent)
+#       * invoke Bedrock models -- BOTH the cross-region inference profile the
+#         code names and the foundation models it routes to; see the
+#         BedrockInvoke statement, where granting only one was a silent denial
 #       * invoke other AgentCore runtimes (agent-to-agent calls in the graph)
 #       * pull images from ECR
 #
@@ -84,10 +86,49 @@ resource "aws_iam_role_policy" "runtime" {
         Resource = "*"
       },
       {
-        Sid      = "BedrockInvoke"
-        Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
-        Resource = ["arn:aws:bedrock:${data.aws_region.current.region}::foundation-model/*"]
+        # BOTH ARN SHAPES ARE REQUIRED, AND THAT IS NOT BELT-AND-BRACES.
+        #
+        # config.BEDROCK_MODEL defaults to `us.amazon.nova-2-lite-v1:0`. The `us.`
+        # prefix makes it a CROSS-REGION INFERENCE PROFILE, not a foundation
+        # model, and the two live at different ARN shapes:
+        #
+        #   arn:aws:bedrock:us-east-1:339712964409:inference-profile/us.amazon.nova-2-lite-v1:0
+        #   arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-2-lite-v1:0
+        #
+        # Invoking the profile needs InvokeModel on the PROFILE (the thing called)
+        # and on the FOUNDATION MODELS it routes to (the things that answer).
+        # Grant only one and the call is denied.
+        #
+        # MEASURED 2026-08-22 against the live account, with only the
+        # foundation-model ARN present:
+        #
+        #   simulate-principal-policy … inference-profile/us.amazon.nova-2-lite-v1:0
+        #   implicitDeny
+        #   simulate-principal-policy … foundation-model/amazon.nova-2-lite-v1:0
+        #   allowed
+        #
+        # The consequence was the worst available shape. `llm.text()` catches the
+        # denial by design, `structured()` returns None, and every model-calling
+        # agent falls back to its fixture -- so the deployed pipeline produced
+        # FIXTURE output while every job reported green, and the plan comment on
+        # the target repo matched fixtures/plan_result.json byte for byte.
+        # Nothing anywhere said the model had not answered. A whole week of
+        # "verified" cloud runs were fixture runs.
+        #
+        # Note the profile ARN carries an ACCOUNT and the foundation-model ARN
+        # does not. That asymmetry is AWS's, not a typo: inference profiles are
+        # account-scoped resources, foundation models are not.
+        #
+        # Pinned by tests/test_agentcore_iam.py, and re-checked against the live
+        # account by scripts/preflight.py check 1 -- a green apply proves only
+        # that the policy was written, not that it permits the call.
+        Sid    = "BedrockInvoke"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
+        Resource = [
+          "arn:aws:bedrock:${data.aws_region.current.region}::foundation-model/*",
+          "arn:aws:bedrock:${data.aws_region.current.region}:${var.account_id}:inference-profile/*",
+        ]
       },
       {
         # Agent-to-agent calls inside the graph.
