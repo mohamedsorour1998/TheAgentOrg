@@ -50,7 +50,23 @@ def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
 
 
 def _map_severity(severity: str | None) -> str:
-    """Map Trivy severity to our Finding severity vocabulary."""
+    """Map Trivy severity onto our vocabulary, FAILING CLOSED on the unknown.
+
+    The table itself is COMPLETE for trivy today -- UNKNOWN/LOW/MEDIUM/HIGH/
+    CRITICAL is trivy's whole vocabulary -- so unlike semgrep_tool's, whose
+    identical `or "low"` default was live and downgraded real CRITICAL findings
+    to severity 0, this default is latent. It is changed anyway because the trap
+    is the same shape one file over, and "the vocabulary is complete" is a claim
+    about the version installed today.
+
+    Note trivy's own UNKNOWN is a MAPPED key, not a fall-through: trivy uses it
+    for a CVE whose severity its data sources do not carry, which is a real
+    answer about a real finding and stays `low` as before. The default below is
+    for a value that is not in trivy's vocabulary at all -- a new severity name,
+    or an absent field arriving as `""` from
+    `report_text(vulnerability, "Severity", "")`. Those are not trivy saying
+    "unknown"; they are this table not recognising what trivy said.
+    """
 
     mapping = {
         "UNKNOWN": "low",
@@ -60,7 +76,7 @@ def _map_severity(severity: str | None) -> str:
         "CRITICAL": "critical",
     }
 
-    return mapping.get((severity or "").upper(), "low")
+    return mapping.get((severity or "").upper(), "high")
 
 
 def scan(dev: DevResult) -> list[Finding]:

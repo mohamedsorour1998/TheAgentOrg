@@ -50,15 +50,46 @@ def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
 
 
 def _map_severity(severity: str | None) -> str:
-    """Map Semgrep severity to our Finding severity vocabulary."""
+    """Map Semgrep severity onto our vocabulary, FAILING CLOSED on the unknown.
+
+    MEASURED 2026-08-22, when this table held only INFO/WARNING/ERROR and
+    defaulted to "low": semgrep 1.x also emits LOW/MEDIUM/HIGH/CRITICAL from
+    new-style rule metadata, and every one of those fell through to severity 0
+    against a block cutoff of 2 (`SEVERITY_ORDER["high"]`). A rule semgrep marked
+    CRITICAL could not block a change. Nothing caught it: no test read this
+    function, and scripts/scan_gate.py asserts only `any(f.tool == "semgrep")`,
+    which a `low` finding satisfies.
+
+    THE DEFAULT IS "high", NOT "low", AND THAT IS THE WHOLE POINT. An
+    unrecognised value means semgrep said something this table has not seen.
+    Defaulting low means a future severity name silently stops blocking;
+    defaulting high means it blocks loudly and somebody fixes the table. Only one
+    of those is safe to be wrong about, and this project's signature defect is
+    the other one.
+
+    THE DEFAULT ALSO CATCHES AN ABSENT FIELD, deliberately. `scan` reads this
+    through `report_text(extra, "severity", "")`, so a result whose `extra` omits
+    `severity` -- the shape of a truncated report -- arrives here as `""` and
+    takes the same fail-closed route. A report that does not say how bad a
+    finding is has not said it is harmless.
+
+    The mapping is not symmetric with trivy's and must not be "harmonised" into
+    one table: semgrep's ERROR is its top level and means `high`, while trivy
+    spells its top level CRITICAL. Both are listed here because semgrep emits
+    both vocabularies depending on how a rule declares its metadata.
+    """
 
     mapping = {
         "INFO": "low",
+        "LOW": "low",
         "WARNING": "medium",
+        "MEDIUM": "medium",
         "ERROR": "high",
+        "HIGH": "high",
+        "CRITICAL": "critical",
     }
 
-    return mapping.get((severity or "").upper(), "low")
+    return mapping.get((severity or "").upper(), "high")
 
 
 def scan(dev: DevResult) -> list[Finding]:
