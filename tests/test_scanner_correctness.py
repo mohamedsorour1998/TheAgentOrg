@@ -15,12 +15,67 @@ half of the diff. None of them involves a fault, so none would fit that file's
 harness, which puts deliberately broken binaries on PATH.
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from agentorg.security import semgrep_tool, trivy_tool
-from agentorg.state import SEVERITY_ORDER, compute_security_verdict
+from agentorg.state import SEVERITY_ORDER, DevResult, compute_security_verdict
 
 BLOCK_CUTOFF = SEVERITY_ORDER["high"]
+
+# A diff with nothing interesting in it. These tests are about how a report is
+# READ, not about detection, and a fake scanner ignores the content anyway -- but
+# the materialiser must have something to write, or a change to it surfaces here
+# as a confusing red.
+_HARMLESS_DIFF = "--- /dev/null\n+++ b/app/noop.py\n@@ -0,0 +1 @@\n+VALUE = 1\n"
+
+
+def _dev() -> DevResult:
+    return DevResult(
+        branch="feat/x",
+        diff=_HARMLESS_DIFF,
+        summary="s",
+        files_changed=["app/noop.py"],
+    )
+
+
+def _scanner_writing(bin_dir: Path, tool: str, report: str, monkeypatch) -> None:
+    """Put a fake `tool` on PATH that writes `report` and exits 0.
+
+    Deliberately the same shape as test_scanner_resilience.py's `_fake_scanner` +
+    `_write_report_script` pair, and the constraints that file measured apply
+    here too, because PATH is REPLACED rather than prepended:
+
+      * the script may use only shell BUILTINS -- there is no `cat`, no
+        `printf(1)`. A `cat > "$arg" <<EOF` heredoc creates the report file EMPTY
+        before failing to exec `cat`, which makes the wrapper raise
+        JSONDecodeError and return a scanner-error -- so a test asserting "a
+        malformed report blocks" passes while actually testing an empty file.
+        That is why every assertion below checks WHICH fault it got.
+      * argv is WALKED for the report path rather than indexed, so a wrapper that
+        reorders its flags is still honoured and one that stops asking for a
+        report at all fails loudly.
+
+    Replacing PATH also matters on a machine that HAS trivy -- a demo laptop,
+    CI's `scan` job -- where a prepend that failed would silently run the real
+    binary and the test would pin nothing.
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    path = bin_dir / tool
+    path.write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        f"    *{tool}-report.json) echo '{report}' > \"$arg\" ;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
 
 
 @pytest.mark.parametrize(
@@ -197,3 +252,147 @@ def test_the_low_severities_still_pass_end_to_end():
             f"the fail-closed tests and block the CLEAN demo run on our own "
             f"INFO-severity rule."
         )
+
+
+# ==========================================================================
+# A2 -- trivy's `or []` collapsed a wrong-typed Results field to an empty scan
+# BEFORE the shape guard that exists to reject it.
+# ==========================================================================
+
+# Falsy values of the wrong TYPE for `Results`, which trivy documents as a list.
+# Every one is what `or []` turns into a valid empty list; every one is what
+# `.get("Results")` plus an explicit None check hands to the shape guard instead.
+#
+# `None` is deliberately NOT here, and its absence is the point of the separate
+# test below: JSON `null` and a missing key are how trivy legitimately spells
+# "no targets", so those must stay a clean empty scan rather than becoming a
+# fault. A test that lumped them in would demand the fail-closed direction for
+# the one shape that is genuinely fine.
+_WRONG_TYPED_RESULTS = ["", 0, False, {}]
+
+
+@pytest.mark.parametrize("wrong_value", _WRONG_TYPED_RESULTS)
+def test_a_wrong_typed_results_field_is_a_FAULT_not_an_empty_scan(
+    wrong_value, tmp_path, monkeypatch
+):
+    """MEASURED: `data.get("Results") or []` collapsed every falsy wrong type to a
+    valid empty list BEFORE the shape guard, so a malformed trivy report produced
+    zero findings and a `pass` instead of a blocking fault.
+
+    Measured through the real `scan()`, on `{"Results": ""}`:
+
+        findings: []
+        verdict: ('pass', [])
+
+    Its sibling wrapper spells the same guard `.get("results", [])` and trips
+    correctly -- semgrep on the byte-equivalent malformed report returns
+    `[('semgrep-scanner-error', 'high')]`. Two spellings of one guard, one file
+    apart; one failed open.
+
+    DRIVEN THROUGH `scan()` RATHER THAN A PARSE HELPER, because there is no parse
+    helper -- trivy_tool inlines the report read in `scan`. The plan for this fix
+    named `_findings_from_report`, which does not exist in this wrapper.
+    """
+    _scanner_writing(
+        tmp_path / "bin", "trivy", f'{{"Results": {json.dumps(wrong_value)}}}',
+        monkeypatch,
+    )
+
+    findings = trivy_tool.scan(_dev())
+
+    assert findings, (
+        f"a Results field of {wrong_value!r} produced NO findings. It was treated "
+        f"as an empty scan, which reports `pass` over a report nobody read -- and "
+        f"compute_security_verdict([]) returns ('pass', []), so this is the "
+        f"silent pass."
+    )
+    assert [f.rule for f in findings] == ["trivy-scanner-error"], (
+        f"expected exactly one blocking trivy-scanner-error, got "
+        f"{[(f.rule, f.severity) for f in findings]}"
+    )
+
+    description = findings[0].description
+    assert "Results" in description, (
+        f"the fault must name the field it rejected, so an operator can tell a "
+        f"malformed report from a dead binary. Got {description!r}"
+    )
+    assert "not valid JSON" not in description, (
+        f"this report IS valid JSON. A parse error means the fake scanner wrote "
+        f"an empty file and the shape guard was never reached -- the exact way a "
+        f"`cat` heredoc faked results twice in this suite. Got {description!r}"
+    )
+
+    verdict, blocking = compute_security_verdict(findings, threshold="high")
+    assert verdict == "block", (
+        f"a malformed report must BLOCK; got {verdict!r}. The finding existing is "
+        f"not enough if its severity does not reach the threshold."
+    )
+    assert blocking == findings, "the fault must be the blocking finding"
+
+
+@pytest.mark.parametrize("report", ['{"Results": null}', "{}"])
+def test_an_absent_or_null_results_field_is_still_a_CLEAN_scan(
+    report, tmp_path, monkeypatch
+):
+    """The negative control, and it is what stops the fix overshooting.
+
+    `null` and a missing key are how trivy spells "no targets", which is trivy's
+    ordinary answer on both demo fixtures -- CLAUDE.md records trivy as the only
+    scanner contributing ZERO findings to either one. A fix that rejected every
+    non-list, `None` included, would turn the CLEAN half of the demo into
+    `blocking=1` on a healthy scanner, which takes the promote path down.
+
+    So this test is why the implementation is `.get("Results")` plus an explicit
+    `is None` check rather than a bare `isinstance(..., list)` rejection.
+    """
+    _scanner_writing(tmp_path / "bin", "trivy", report, monkeypatch)
+
+    findings = trivy_tool.scan(_dev())
+
+    assert findings == [], (
+        f"a Results field of {report} must be a clean empty scan, not a fault. "
+        f"Got {[(f.rule, f.severity) for f in findings]}. trivy reports no "
+        f"targets on both demo fixtures, so this is the shape the CLEAN run "
+        f"depends on."
+    )
+
+
+def test_the_two_wrappers_answer_the_same_malformed_shape_the_same_way(
+    tmp_path, monkeypatch
+):
+    """The asymmetry itself, asserted -- because that is what the defect WAS.
+
+    Neither wrapper was wrong about `Results` in isolation; they DISAGREED about
+    one shape, and the copy that drifted is by definition the one nobody noticed.
+    Measured before the fix on the byte-equivalent report `{"<results>": ""}`:
+
+        trivy   -> []                                  verdict pass
+        semgrep -> [('semgrep-scanner-error', 'high')]  verdict block
+
+    Pinning the pair means a future edit to either spelling has to break this
+    test to reintroduce a divergence, rather than only the wrapper it touched.
+    """
+    _scanner_writing(tmp_path / "bin-t", "trivy", '{"Results": ""}', monkeypatch)
+    trivy_findings = trivy_tool.scan(_dev())
+
+    _scanner_writing(tmp_path / "bin-s", "semgrep", '{"results": ""}', monkeypatch)
+    semgrep_findings = semgrep_tool.scan(_dev())
+
+    assert semgrep_findings, (
+        "semgrep produced no finding for a wrong-typed results field, so this "
+        "test's control is broken and it can no longer detect a divergence"
+    )
+    assert [f.rule for f in trivy_findings] == ["trivy-scanner-error"], (
+        f"trivy: {[(f.rule, f.severity) for f in trivy_findings]}"
+    )
+    assert [f.rule for f in semgrep_findings] == ["semgrep-scanner-error"], (
+        f"semgrep: {[(f.rule, f.severity) for f in semgrep_findings]}"
+    )
+
+    trivy_verdict = compute_security_verdict(trivy_findings, threshold="high")[0]
+    semgrep_verdict = compute_security_verdict(semgrep_findings, threshold="high")[0]
+    assert trivy_verdict == semgrep_verdict == "block", (
+        f"the two wrappers disagree about one malformed shape: trivy "
+        f"{trivy_verdict!r}, semgrep {semgrep_verdict!r}. That disagreement IS "
+        f"the defect -- one spelling of the guard fails open."
+    )

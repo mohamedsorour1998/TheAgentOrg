@@ -158,7 +158,31 @@ def scan(dev: DevResult) -> list[Finding]:
             )
         ]
 
-    targets = data.get("Results") or []
+    # `.get("Results")` then an explicit None check, NOT `or []`.
+    #
+    # MEASURED: `or []` collapses every falsy wrong type -- "", 0, False, {} -- to
+    # a valid empty list BEFORE the shape guard below, so a malformed report
+    # produced zero findings and a `pass` verdict instead of a blocking fault.
+    # Through the real `scan()` on `{"Results": ""}`:
+    #
+    #     findings: []
+    #     verdict: ('pass', [])
+    #
+    # semgrep_tool spells the same guard `.get("results", [])` and trips
+    # correctly -- on the byte-equivalent report it returns
+    # [('semgrep-scanner-error', 'high')]. This was the copy that drifted, and the
+    # two spellings look equivalent at a glance, which is why it survived: `or []`
+    # reads as a None-safe default and is one for a well-typed report.
+    #
+    # `None` stays a CLEAN empty scan, and that is why this is an explicit
+    # `is None` rather than handing every non-list to the guard. JSON `null` and a
+    # missing key are how trivy spells "no targets", which is trivy's ordinary
+    # answer on BOTH demo fixtures -- it is the one scanner contributing zero
+    # findings to either. Rejecting None too would put `blocking=1` on the clean
+    # run from a perfectly healthy scanner and take the promote path down.
+    targets = data.get("Results")
+    if targets is None:
+        targets = []
     if not isinstance(targets, list) or not all(
         isinstance(target, dict) for target in targets
     ):
