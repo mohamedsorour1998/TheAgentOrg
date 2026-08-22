@@ -196,16 +196,37 @@ jobs:
             echo "::notice::no changes; infrastructure matches configuration"
           fi
 
-      # Keeping the binary plan is what would let a future apply run exactly
-      # what was reviewed. Not consumed yet -- the apply job re-plans -- and
-      # said plainly rather than implying this artifact is load-bearing.
+      # ONLY THE HUMAN-READABLE PLAN. The binary `tfplan` is NOT uploaded, and
+      # that is a security fix, not tidying.
+      #
+      # A binary plan file embeds a full copy of Terraform state, and this state
+      # contains `aws_secretsmanager_secret_version.dispatch_token` -- the module
+      # reads that secret at plan time because an API_KEY connection needs the
+      # token's value as a configuration value. So every `tfplan-*` artifact
+      # carried a live `github_pat_` with `actions:write` on this repository and
+      # contents/issues/pull-requests on the target repo.
+      #
+      # MEASURED 2026-08-22 by unpacking artifact 9466368657: `tfplan` is itself a
+      # zip, and three of its entries -- tfplan, tfstate, tfstate-prev -- each
+      # matched `github_pat_[A-Za-z0-9_]{20,}` exactly once. A raw grep of the
+      # outer file finds nothing, which is why this survived review. Ten unexpired
+      # artifacts held it; all ten were deleted and the token rotated.
+      #
+      # THIS EXPOSURE IS NOT THE ONE THE MODULE'S COMMENTS ALREADY ACCEPT. That
+      # one is S3 state, which needs AWS credentials to read. This one needed only
+      # a GitHub account against a PUBLIC repository -- a different audience
+      # entirely, and not a tradeoff anybody signed off on.
+      #
+      # `plan.txt` is safe and is what a reviewer actually reads: Terraform prints
+      # `value = (sensitive value)` there, and the same scan over it found zero
+      # matches. The apply job re-plans rather than consuming this artifact, so
+      # nothing downstream needed the binary -- the comment that used to sit here
+      # said as much while uploading it anyway.
       - name: Upload plan
         uses: actions/upload-artifact@v4
         with:
           name: tfplan-${{ github.run_id }}
-          path: |
-            ${{ env.TF_DIR }}/tfplan
-            ${{ env.TF_DIR }}/plan.txt
+          path: ${{ env.TF_DIR }}/plan.txt
           retention-days: 5
 
       - name: Comment plan on PR

@@ -1653,3 +1653,58 @@ def test_the_scanners_are_installed_before_the_app_is_copied():
         "the scanner install must come before WORKDIR /app and before the source "
         "COPY, or every source edit re-downloads the three scanners"
     )
+
+
+# ── the binary Terraform plan must never be uploaded ──────────────────────────
+#
+# A binary `tfplan` embeds a full copy of Terraform state, and this project's
+# state holds `aws_secretsmanager_secret_version.dispatch_token` -- the ingress
+# module reads that secret at PLAN time, because an API_KEY connection needs the
+# token's value as a configuration value. So every uploaded `tfplan-*` artifact
+# carried a live `github_pat_` with actions:write on this repository.
+#
+# MEASURED 2026-08-22, unpacking artifact 9466368657: the outer `tfplan` is itself
+# a zip, and three of its entries -- tfplan, tfstate, tfstate-prev -- each matched
+# `github_pat_[A-Za-z0-9_]{20,}` exactly once. A raw grep of the outer file finds
+# NOTHING, which is why this survived review. Ten unexpired artifacts held it.
+#
+# This is a DIFFERENT exposure from the S3-state one the module's own comments
+# accept: that needs AWS credentials, this needed only a GitHub account against a
+# public repository.
+
+
+def test_the_terraform_workflow_uploads_no_binary_plan():
+    """`plan.txt` is safe; `tfplan` is a state dump wearing a plan's name."""
+    for job_name, job in (_doc(TERRAFORM).get("jobs") or {}).items():
+        for step in job.get("steps") or []:
+            if "upload-artifact" not in str(step.get("uses", "")):
+                continue
+            paths = str((step.get("with") or {}).get("path", ""))
+            assert "tfplan" not in paths.replace("tfplan-", ""), (
+                f"job {job_name!r} uploads a binary Terraform plan: path={paths!r}. "
+                f"A binary plan embeds full state, and this state carries the "
+                f"dispatch token's value -- so the artifact is a live "
+                f"github_pat_ downloadable by anyone with read access to this "
+                f"PUBLIC repository. Upload plan.txt only; the apply job re-plans "
+                f"and never consumed the binary."
+            )
+
+
+def test_the_human_readable_plan_is_still_uploaded():
+    """The complement, so the fix above cannot become 'upload nothing'.
+
+    Without this, deleting the whole step would satisfy the assertion above while
+    removing the artifact a reviewer actually reads.
+    """
+    uploaded = [
+        str((step.get("with") or {}).get("path", ""))
+        for job in (_doc(TERRAFORM).get("jobs") or {}).values()
+        for step in (job.get("steps") or [])
+        if "upload-artifact" in str(step.get("uses", ""))
+    ]
+    assert uploaded, "terraform.yml uploads no artifact at all"
+    assert any("plan.txt" in p for p in uploaded), (
+        f"no upload step names plan.txt; uploaded paths were {uploaded}. Terraform "
+        f"writes `value = (sensitive value)` there, so it is the safe half and the "
+        f"one a human reviews."
+    )
