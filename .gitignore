@@ -31,3 +31,10 @@ dist/
 
 .claude/
 .superpowers/
+# The team's personal photographs. The SQUARE crops under docs/pitch/photos/square/ are
+# committed because the deck embeds them and it must build on anyone's machine; the
+# originals are not ours to redistribute and are large.
+docs/pitch/photos/*.jpeg
+docs/pitch/photos/*.png
+docs/pitch/photos/*.jpg
+!docs/pitch/photos/square/

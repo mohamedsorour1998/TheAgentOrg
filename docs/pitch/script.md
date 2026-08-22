@@ -1,20 +1,20 @@
 # Presentation script — pre-final evaluation
 
 **Tue 25 Aug 2026, 3:00–3:30 PM · Microsoft Teams · recorded, cameras on**
-Deck: `TheAgentOrg-prefinal.pptx` — 13 slides. Regenerate with
+Deck: `TheAgentOrg-prefinal.pptx` — 15 slides. Regenerate with
 `.venv-main/bin/python scripts/make_deck.py`.
 
 ## The clock
 
 | | minutes |
 |---|---|
-| Slides 1–5 — the problem, and what we built | 0:00 → 5:00 |
-| Slides 6–7 — architecture | 5:00 → 7:30 |
-| Slides 8–10 — progress and what it is worth | 7:30 → 10:30 |
-| Slide 11 — roadmap | 10:30 → 11:30 |
-| Slide 12 — hand over to the demo | 11:30 → 12:00 |
+| Slides 1–3 — title, agenda, the team | 0:00 → 1:30 |
+| Slides 4–7 — the problem, and what we built | 1:30 → 6:00 |
+| Slides 8–9 — architecture | 6:00 → 8:00 |
+| Slides 10–12 — progress, and what it is worth | 8:00 → 10:30 |
+| Slide 13 — roadmap · slide 14 — hand over | 10:30 → 12:00 |
 | **Live demo** — clean, then poisoned (`docs/demo-runbook.md`) | 12:00 → 20:00 |
-| Questions, slide 13 on screen | 20:00 → 30:00 |
+| Questions, slide 15 on screen | 20:00 → 30:00 |
 
 **Why 12 minutes of slides and not 20.** The demo is ~8 minutes measured. A 20-minute
 deck plus that demo is 28 of a 30-minute slot — before Teams join, screen share, or one
@@ -27,7 +27,7 @@ presented as the team's. Split the slides between you however you rehearse best;
 natural division is on the section boundaries in the table above. Whoever is not
 speaking stays on camera and unmuted-ready for questions.
 
-**Animations are click-advanced.** Eleven of thirteen slides reveal their lines one click
+**Animations are click-advanced.** Thirteen of fifteen slides reveal their lines one click
 at a time. The pauses are the pacing — do not rush the clicker.
 
 ---
@@ -41,7 +41,33 @@ Do not read the subtitle aloud; it is on screen. Go straight to slide 2.
 
 ---
 
-## Slide 2 — The problem · 60s
+## Slide 2 — Agenda · 20s
+
+**SAY:** "Twenty minutes, five parts. Who we are, the problem and what we built,
+the architecture, where we are today, and the roadmap — then we'll show you the thing
+running."
+
+Do not read the five lines out. The slide does that; you are only signposting.
+
+---
+
+## Slide 3 — Meet the team · 45s
+
+**SHOW:** five photographs, names, roles.
+
+**SAY:** "Quickly, who built this. I'm Mohamed Sorour, senior DevOps at Vezeeta.
+Mariam is an associate solution engineer at RENOSYSTEMS. Habiba is a junior DevOps
+engineer, and Reem and Aya are junior testing engineers.
+
+*(click)* Three of us trained together at Digilians — this is the first thing we've built
+as one team."
+
+Let each person nod or wave on camera as you name them. It is 45 seconds that makes the
+rest of the pitch land as a team's work rather than a slide deck's.
+
+---
+
+## Slide 4 — The problem · 60s
 
 **SHOW:** three lines, then `10 of 10` in coral.
 
@@ -60,7 +86,7 @@ real-*shaped* key, which is what makes the scanners genuinely detect it.
 
 ---
 
-## Slide 3 — And nobody noticed · 45s
+## Slide 5 — And nobody noticed · 45s
 
 **This is the emotional beat of the pitch. Let the first line sit for a moment.**
 
@@ -76,7 +102,7 @@ anything actually checked it'."
 
 ---
 
-## Slide 4 — The solution · 75s
+## Slide 6 — The solution · 75s
 
 **SHOW:** the five-stage strip, then three lines.
 
@@ -93,7 +119,7 @@ arithmetic — not judgement."
 
 ---
 
-## Slide 5 — The safety check · 75s
+## Slide 7 — The safety check · 75s
 
 **The most important slide. Slow down.**
 
@@ -117,7 +143,7 @@ problem a scanner can't see, explaining a finding in language a human can act on
 
 ---
 
-## Slide 6 — Architecture · 80s
+## Slide 8 — Architecture · 80s
 
 **SHOW:** five numbered steps, then the infrastructure line.
 
@@ -141,7 +167,7 @@ anywhere — every step authenticates for the moment it needs."
 
 ---
 
-## Slide 7 — The humans are not a formality · 45s
+## Slide 9 — The humans are not a formality · 45s
 
 **SAY:** "One thing worth being precise about, because it's easy to claim a human is in
 the loop when they aren't.
@@ -159,7 +185,7 @@ structural."
 
 ---
 
-## Slide 8 — Progress · 60s
+## Slide 10 — Progress · 60s
 
 **SAY:** "Where we are today. The full pipeline runs in the cloud on every ticket — not
 on a developer's machine.
@@ -177,7 +203,7 @@ to merged in about five minutes."
 
 ---
 
-## Slide 9 — The same request, twice · 60s
+## Slide 11 — The same request, twice · 60s
 
 **SHOW:** SHIPPED in sage, REFUSED in coral, side by side.
 
@@ -195,7 +221,7 @@ only difference is the change itself."
 
 ---
 
-## Slide 10 — What this is worth · 45s
+## Slide 12 — What this is worth · 45s
 
 **SAY:** "Why this matters beyond the demo.
 
@@ -210,7 +236,7 @@ has to adopt a new tool to get this."
 
 ---
 
-## Slide 11 — Roadmap · 60s
+## Slide 13 — Roadmap · 60s
 
 **SAY:** "Four things between here and the final phase.
 
@@ -229,7 +255,7 @@ known limitation than discover one on stage."
 
 ---
 
-## Slide 12 — Hand over · 20s
+## Slide 14 — Hand over · 20s
 
 **SAY:** "So — two tickets, the same feature request. One ships itself, one is refused.
 Let us show you."
@@ -238,7 +264,7 @@ Let us show you."
 
 ---
 
-## Slide 13 — Close
+## Slide 15 — Close
 
 Return to this slide after the demo, before questions.
 
@@ -255,4 +281,4 @@ that should not have shipped, did not. Thank you — we're happy to take questio
 - [ ] Two browser tabs: the target repo's Issues, and the pipeline's Actions
 - [ ] Backup video ready **on Aug 24**, not the 25th — insurance recorded the morning of
       the event is not insurance
-- [ ] Rehearsed once against a clock: twelve minutes for slides 1–12
+- [ ] Rehearsed once against a clock: twelve minutes for slides 1–14

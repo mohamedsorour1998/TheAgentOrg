@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<!--
+  A LIVE PREVIEW OF THE DECK'S DESIGN, not the deck itself.
+
+  OWNER: Sorour. Serve it with:
+
+      .venv-main/bin/python -m http.server 8412 --directory docs/pitch/preview
+
+  ...and open http://localhost:8412/. Reload after any change.
+
+  WHY THIS EXISTS. The deck is a generated .pptx, and the loop "edit make_deck.py ->
+  regenerate -> open PowerPoint -> squint" is far too slow to design in. This renders the
+  same palette, type scale and slide geometry as HTML at the same 16:9 ratio, so a colour
+  or a spacing decision takes one reload instead of a rebuild.
+
+  IT IS A DESIGN MIRROR, NOT A SOURCE OF TRUTH. scripts/make_deck.py builds the file that
+  gets presented. Anything agreed here has to be carried across by hand -- the palette
+  block at the top of this file and the one in make_deck.py are the two places a colour
+  lives, and they must be changed together.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Agent Org — deck preview</title>
+<style>
+  /* ── the palette. Change here, then mirror into scripts/make_deck.py ────────── */
+  :root {
+    --void:   #0A0C10;   /* the page behind the slides */
+    --slate:  #14181F;   /* the slide surface: near-black, a hint of blue */
+    --raised: #1C2230;   /* cards and panels that sit above the surface */
+    --line:   #2A3242;   /* hairlines and borders */
+    --ink:    #E8EDF4;   /* primary text */
+    --dim:    #8A94A6;   /* secondary text */
+    --cyan:   #4FD1C5;   /* structure: kickers, rules, the pipeline */
+    --amber:  #F0A93B;   /* caution, used once */
+    --rose:   #FF6B6B;   /* the failure state */
+    --mint:   #4ADE80;   /* the success state */
+    --mono: ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: -apple-system, "Helvetica Neue", Inter, system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--void); color: var(--ink); font-family: var(--sans);
+    padding: 40px 20px 80px; -webkit-font-smoothing: antialiased;
+  }
+  header { max-width: 1120px; margin: 0 auto 28px; }
+  header h1 { font-size: 15px; letter-spacing: .14em; color: var(--cyan); font-weight: 700; }
+  header p  { font-size: 13px; color: var(--dim); margin-top: 6px; }
+
+  /* 16:9 at the deck's real ratio, so what fits here fits there. */
+  .slide {
+    width: 1120px; height: 630px; margin: 0 auto 30px; position: relative;
+    background: var(--slate); border: 1px solid var(--line); border-radius: 6px;
+    overflow: hidden; padding: 62px 92px;
+  }
+  .slide::before {                     /* the left band, the deck's one ornament */
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 6px; background: var(--cyan);
+  }
+  .slide.rose::before { background: var(--rose); }
+  .slide.mint::before { background: var(--mint); }
+  .slide.plain::before { display: none; }
+
+  .num { position: absolute; right: 34px; bottom: 26px; font-size: 12px; color: var(--dim); }
+
+  .kicker { font-size: 12px; letter-spacing: .16em; color: var(--cyan); font-weight: 700; }
+  h2 { font-size: 40px; line-height: 1.1; margin-top: 16px; letter-spacing: -.015em; }
+  h2.big { font-size: 54px; }
+  .rule { width: 76px; height: 3px; background: var(--cyan); margin: 22px 0 30px; }
+  .rule.rose { background: var(--rose); }
+  ul { list-style: none; padding: 0; }
+  li { font-size: 21px; line-height: 1.45; color: var(--ink); margin-bottom: 18px; }
+  .lead { font-size: 22px; color: var(--dim); line-height: 1.5; }
+  .note { font-size: 18px; color: var(--cyan); line-height: 1.5; margin-top: 26px; }
+
+  .stat { font-size: 44px; font-weight: 700; letter-spacing: -.02em; }
+  .stat.rose { color: var(--rose); }
+  .stat-label { font-size: 15px; color: var(--dim); margin-top: 8px; line-height: 1.4; }
+
+  /* ── the team grid: five members, photo above each ─────────────────────────── */
+  .team { display: grid; grid-template-columns: repeat(5, 1fr); gap: 22px; margin-top: 34px; }
+  .member { text-align: center; }
+  .photo {
+    width: 100%; aspect-ratio: 1; border-radius: 50%;
+    background: var(--raised); border: 2px solid var(--line);
+    display: grid; place-items: center; overflow: hidden; margin-bottom: 16px;
+  }
+  .photo img { width: 100%; height: 100%; object-fit: cover; }
+  .photo .initials { font-size: 30px; font-weight: 700; color: var(--cyan); font-family: var(--mono); }
+  .member .name { font-size: 16px; font-weight: 700; line-height: 1.25; }
+  .member .role { font-size: 13px; color: var(--dim); margin-top: 6px; line-height: 1.35; }
+  .member .org  { font-size: 12px; color: var(--cyan); margin-top: 5px; font-family: var(--mono); letter-spacing: .04em; }
+
+  /* the five-stage pipeline strip */
+  .flow { display: flex; gap: 12px; margin: 30px 0 12px; }
+  .stage {
+    flex: 1; border: 1px solid var(--cyan); border-radius: 4px; padding: 13px 0 11px;
+    text-align: center; background: rgba(79,209,197,.06);
+  }
+  .stage b { display: block; font-size: 14px; font-weight: 700; letter-spacing: .1em; color: var(--cyan); }
+  /* The agent's real name, in mono: it is an identifier in the system, not a label. */
+  .stage i { display: block; font-size: 12px; font-style: normal; color: var(--dim);
+             font-family: var(--mono); margin-top: 5px; letter-spacing: .02em; }
+  .approvals { display: flex; gap: 12px; font-size: 11px; color: var(--dim); letter-spacing: .05em; }
+  .approvals span { flex: 1; text-align: center; }
+
+  /* the numbered architecture list */
+  .steps { margin-top: 28px; }
+  .step { display: grid; grid-template-columns: 40px 1fr 1fr; gap: 18px; align-items: baseline; margin-bottom: 17px; }
+  .step .i { font-size: 18px; font-weight: 700; color: var(--cyan); font-family: var(--mono); }
+  .step .t { font-size: 19px; font-weight: 600; }
+  .step .d { font-size: 16px; color: var(--dim); }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; }
+  .verdict { font-size: 25px; font-weight: 700; letter-spacing: .04em; margin-bottom: 16px; }
+  .verdict.mint { color: var(--mint); }
+  .verdict.rose { color: var(--rose); }
+  .verdict + p { font-size: 18px; line-height: 1.55; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>THE AGENT ORG — DECK PREVIEW</h1>
+  <p>Dark scheme, 16:9 at deck geometry. This is a design mirror — the presented file is
+     built by <code>scripts/make_deck.py</code>. Agenda is 2, the team is 3.</p>
+</header>
+
+<!-- 1 · title -->
+<div class="slide">
+  <h2 class="big" style="margin-top:120px">THE AGENT ORG</h2>
+  <div class="rule" style="width:120px"></div>
+  <p class="lead">AI agents that ship code the way an engineering team does —<br>
+     with a safety check they cannot argue with.</p>
+  <p style="position:absolute;bottom:70px;font-size:14px;color:var(--dim)">
+     RosettaTeam &nbsp;·&nbsp; DevOps Hackathon, pre-final evaluation &nbsp;·&nbsp; 25 August 2026</p>
+  <div class="num">1</div>
+</div>
+
+<!-- 2 · AGENDA -->
+<div class="slide plain">
+  <div class="kicker">AGENDA</div>
+  <h2>Twenty minutes, five parts</h2>
+  <div class="rule"></div>
+  <div class="steps" style="margin-top:34px">
+    <div class="step"><div class="i">01</div><div class="t">The team</div><div class="d">who built it</div></div>
+    <div class="step"><div class="i">02</div><div class="t">The problem, and our solution</div><div class="d">why an AI pipeline needs a gate it cannot argue with</div></div>
+    <div class="step"><div class="i">03</div><div class="t">Architecture</div><div class="d">how a ticket becomes a merged change</div></div>
+    <div class="step"><div class="i">04</div><div class="t">Progress to date</div><div class="d">what runs today, and what we measured</div></div>
+    <div class="step"><div class="i">05</div><div class="t">Roadmap, then a live demo</div><div class="d">two tickets: one ships, one is refused</div></div>
+  </div>
+  <div class="num">2</div>
+</div>
+
+<!-- 3 · MEET THE TEAM (after the agenda) -->
+<div class="slide plain">
+  <div class="kicker">MEET THE TEAM</div>
+  <h2>RosettaTeam</h2>
+  <div class="rule"></div>
+  <div class="team">
+    <div class="member">
+      <div class="photo"><img src="../photos/square/sorour.jpg" alt="Mohamed Sorour"></div>
+      <div class="name">Mohamed Sorour</div>
+      <div class="role">Senior DevOps Engineer</div>
+      <div class="org">VEZEETA</div>
+    </div>
+    <div class="member">
+      <div class="photo"><img src="../photos/square/mariam.jpg" alt="Mariam Abdelkader"></div>
+      <div class="name">Mariam Abdelkader</div>
+      <div class="role">Associate Solution Engineer</div>
+      <div class="org">RENOSYSTEMS</div>
+    </div>
+    <div class="member">
+      <div class="photo"><img src="../photos/square/habiba.jpg" alt="Habiba Megahed"></div>
+      <div class="name">Habiba Megahed</div>
+      <div class="role">Junior DevOps Engineer</div>
+      <div class="org">DIGILIANS ALUM</div>
+    </div>
+    <div class="member">
+      <div class="photo"><img src="../photos/square/reem.jpg" alt="Reem Shkeep"></div>
+      <div class="name">Reem Shkeep</div>
+      <div class="role">Junior Testing Engineer</div>
+      <div class="org">DIGILIANS ALUM</div>
+    </div>
+    <div class="member">
+      <div class="photo"><img src="../photos/square/aya.jpg" alt="Aya Ebrahim"></div>
+      <div class="name">Aya Ebrahim</div>
+      <div class="role">Junior Testing Engineer</div>
+      <div class="org">DIGILIANS ALUM</div>
+    </div>
+  </div>
+  <p style="position:absolute;bottom:52px;font-size:15px;color:var(--dim)">
+     Three of us trained together at <span style="color:var(--cyan)">Digilians</span> —
+     this is the first thing we have built as one team.</p>
+  <div class="num">3</div>
+</div>
+
+<!-- 4 · the problem -->
+<div class="slide plain">
+  <div class="kicker">THE PROBLEM</div>
+  <h2>AI writes code faster than anyone<br>can review it</h2>
+  <div class="rule"></div>
+  <ul>
+    <li>Teams are already letting AI agents open pull requests.</li>
+    <li>Review is the bottleneck — so the temptation is to trust and merge.</li>
+    <li>We built that unchecked pipeline first, on purpose, to see what happens.</li>
+  </ul>
+  <div style="position:absolute;bottom:70px">
+    <div class="stat rose">10 of 10</div>
+    <div class="stat-label">changes carrying hardcoded cloud credentials were merged</div>
+  </div>
+  <div class="num">4</div>
+</div>
+
+<!-- 5 · nobody noticed -->
+<div class="slide rose">
+  <h2 class="big" style="margin-top:80px">And nobody noticed.</h2>
+  <div class="rule rose"></div>
+  <ul>
+    <li>Every job passed. Every dashboard was green.</li>
+    <li>The credential reached the main branch and the pipeline reported success.</li>
+    <li>A check that never ran looks exactly like a check that passed.</li>
+  </ul>
+  <div class="num">5</div>
+</div>
+
+<!-- 6 · the solution -->
+<div class="slide plain">
+  <div class="kicker">THE SOLUTION</div>
+  <h2>So we gave the agents an organisation</h2>
+  <div class="rule"></div>
+  <p class="lead" style="font-size:20px">A ticket walks the same path it would in a real team.</p>
+  <div class="flow">
+    <div class="stage"><b>PLAN</b><i>planner</i></div>
+    <div class="stage"><b>BUILD</b><i>developer</i></div>
+    <div class="stage"><b>REVIEW</b><i>reviewer</i></div>
+    <div class="stage"><b>SCAN</b><i>security</i></div>
+    <div class="stage"><b>RELEASE</b><i>sre</i></div>
+  </div>
+  <div class="approvals">
+    <span></span><span>&#9650; human approval</span><span></span>
+    <span>&#9650; human approval</span><span>&#9650; human approval</span>
+  </div>
+  <ul style="margin-top:34px">
+    <li>Five specialist agents: they plan, write, critique, scan and sign off.</li>
+    <li>Three points where a named human must approve before anything moves.</li>
+  </ul>
+  <div class="num">6</div>
+</div>
+
+<!-- 7 · the gate -->
+<div class="slide">
+  <div class="kicker">THE SOLUTION</div>
+  <h2>The safety check cannot be persuaded</h2>
+  <div class="rule"></div>
+  <ul>
+    <li>Real scanners read the change and report what they find.</li>
+    <li>A fixed severity threshold decides: at or above it, the change stops.</li>
+    <li>That decision is arithmetic. There is nothing in it to convince.</li>
+  </ul>
+  <p class="note">We tried talking it out of a block. The reply insisted the change was safe
+     and the scanners were wrong — and the change stayed blocked, because those words were
+     never part of the decision.</p>
+  <div class="num">7</div>
+</div>
+
+<!-- 8 · architecture -->
+<div class="slide plain">
+  <div class="kicker">ARCHITECTURE</div>
+  <h2>Cloud-native, start to finish</h2>
+  <div class="rule"></div>
+  <div class="steps">
+    <div class="step"><div class="i">1</div><div class="t">A ticket is opened</div><div class="d">a GitHub issue — the only trigger</div></div>
+    <div class="step"><div class="i">2</div><div class="t">Signed and verified</div><div class="d">authenticated before anything runs</div></div>
+    <div class="step"><div class="i">3</div><div class="t">Routed to the pipeline</div><div class="d">an event bus, with a dead-letter queue</div></div>
+    <div class="step"><div class="i">4</div><div class="t">Five agents, five runtimes</div><div class="d">each isolated, all from one build</div></div>
+    <div class="step"><div class="i">5</div><div class="t">Three approval gates</div><div class="d">the run pauses until a human clicks</div></div>
+  </div>
+  <p style="position:absolute;bottom:64px;font-size:15px;color:var(--cyan)">
+     20 infrastructure resources, all defined as code &nbsp;·&nbsp; no long-lived cloud credentials anywhere</p>
+  <div class="num">8</div>
+</div>
+
+<!-- 11 · the comparison (the money slide) -->
+<div class="slide plain">
+  <div class="kicker">PROGRESS</div>
+  <h2>The same request, twice</h2>
+  <div class="rule"></div>
+  <p class="lead" style="font-size:20px;margin-bottom:38px">One ticket is clean. One carries a
+     hardcoded credential. Nothing else differs.</p>
+  <div class="two">
+    <div>
+      <div class="verdict mint">SHIPPED</div>
+      <p>Planned, written, reviewed, scanned,<br>approved three times, merged.<br>The ticket closed itself.</p>
+    </div>
+    <div>
+      <div class="verdict rose">REFUSED</div>
+      <p>Two credentials found in the change.<br>Stopped before anyone could approve it,<br>and the ticket says why.</p>
+    </div>
+  </div>
+  <div class="num">11</div>
+</div>
+
+</body>
+</html>

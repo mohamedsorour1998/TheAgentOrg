@@ -14,11 +14,14 @@ IT COVERS THE FOUR SECTIONS THE ORGANISER ASKED FOR
 From Hesham Khalil's invitation, and `_REQUIRED` below asserts each one is present as a
 slide kicker so a rewrite cannot silently drop one:
 
-    1. Overview of the idea (problem and proposed solution)  -> slides 2-5
-    2. High-level architecture                               -> slides 6-7
-    3. Progress to date (what has been completed)            -> slides 8-9
-    4. High-level future plan (roadmap to the final phase)   -> slide 11
-    + a live demonstration                                   -> slide 12 hands over
+    1. Overview of the idea (problem and proposed solution)  -> slides 4-7
+    2. High-level architecture                               -> slides 8-9
+    3. Progress to date (what has been completed)            -> slides 10-12
+    4. High-level future plan (roadmap to the final phase)   -> slide 13
+    + a live demonstration                                   -> slide 14 hands over
+
+Slide 2 is an agenda and slide 3 is the team -- both requested, and the agenda earns its
+place by telling a judge up front that all four required sections are coming.
 
 IT IS A PITCH, NOT A PROJECT REPORT
 ===================================
@@ -49,16 +52,29 @@ or spins, which read as a school project and pull the eye away from the words.
 
 THE PALETTE
 ===========
-Ink on warm paper, one deep teal for structure, and two signal colours used sparingly.
-The previous version was dark navy with amber, which looked like a terminal; a light
-deck survives a Teams screen share, where the viewer's own brightness is unknown and a
-dark slide turns into a grey smear.
+DARK, and agreed in a browser before any of it reached this file. `docs/pitch/preview/`
+renders the same geometry as HTML, so a colour decision took one reload instead of a
+regenerate-and-open-PowerPoint cycle. Its CSS custom properties and the constants below
+are the two places a colour lives; they must change together, or the thing on screen
+stops being the thing that was signed off.
 
-  PAPER  the background, very slightly warm -- pure white glares
-  INK    near-black, not black: softer at a distance
-  TEAL   every structural mark: rules, kickers, the pipeline cards
-  CORAL  the failure state, on two slides and nowhere else
-  SAGE   the success state, likewise
+  VOID/SLATE  near-black surfaces, a hint of blue. Not flat grey, which reads as dead
+  INK/DIM     off-white primary, muted secondary -- never pure white, which glares
+  CYAN        every structural mark: kickers, rules, the pipeline, agent names
+  ROSE/MINT   refused and shipped, used on the two slides that need them
+
+Dark because the delivery medium is a Teams screen share, where the viewer's own
+brightness is unknown, and because it reads as instrumentation rather than as a
+corporate template.
+
+PHOTOGRAPHS ARE PRE-CROPPED SQUARE
+==================================
+`docs/pitch/photos/square/` holds 640x640 JPEGs. CSS could crop on the fly with
+`object-fit: cover`, but PowerPoint has no equivalent -- a non-square image in a square
+frame is STRETCHED, and a stretched face is the one defect an audience notices instantly.
+So the crop happens once, on disk, and both renderers show the same thing. Portraits are
+biased toward the upper third, because a centre crop on a tall photograph cuts the top of
+the head off.
 """
 
 from __future__ import annotations
@@ -71,6 +87,7 @@ import sys
 from lxml import etree
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
@@ -88,13 +105,24 @@ TRIGGER_SECONDS = 6      # issue created 16:45:09 -> run created 16:45:15
 _REQUIRED = ("THE PROBLEM", "THE SOLUTION", "ARCHITECTURE", "PROGRESS", "WHAT IS NEXT")
 
 # ── palette ───────────────────────────────────────────────────────────────────
-PAPER = RGBColor(0xFA, 0xF8, 0xF5)
-INK = RGBColor(0x1A, 0x1F, 0x2B)
-GREY = RGBColor(0x6B, 0x74, 0x85)
-TEAL = RGBColor(0x0F, 0x6E, 0x6E)
-CORAL = RGBColor(0xC8, 0x4B, 0x3A)
-SAGE = RGBColor(0x2F, 0x7D, 0x5C)
+# PORTED VERBATIM FROM THE APPROVED PREVIEW, docs/pitch/preview/index.html. These hex
+# values and that file's CSS custom properties are the two places a colour lives, and
+# they must change together -- the preview is how the design was agreed, so a drift
+# between them means the thing on screen is not the thing that was signed off.
+#
+# Dark, because a Teams screen share is the delivery medium: the viewer's brightness is
+# unknown, and this reads as instrumentation rather than as a corporate template.
+VOID = RGBColor(0x0A, 0x0C, 0x10)     # deepest black, for the statement slides
+SLATE = RGBColor(0x14, 0x18, 0x1F)    # the standard slide surface -- near-black, a hint of blue
+RAISED = RGBColor(0x1C, 0x22, 0x30)   # cards and panels sitting above the surface
+LINE = RGBColor(0x2A, 0x32, 0x42)     # hairlines
+INK = RGBColor(0xE8, 0xED, 0xF4)      # primary text: off-white, never pure white
+DIM = RGBColor(0x8A, 0x94, 0xA6)      # secondary text
+CYAN = RGBColor(0x4F, 0xD1, 0xC5)     # ALL structure: kickers, rules, the pipeline
+ROSE = RGBColor(0xFF, 0x6B, 0x6B)     # the failure state
+MINT = RGBColor(0x4A, 0xDE, 0x80)     # the success state
 SANS = "Helvetica Neue"
+MONO = "Menlo"                        # agent names and identifiers: they are code, not labels
 
 P_NS = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
 SLIDE_W = Inches(13.333)
@@ -188,7 +216,7 @@ def _blank(prs, *, band=None):
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     background = slide.shapes.add_shape(1, 0, 0, SLIDE_W, SLIDE_H)
     background.fill.solid()
-    background.fill.fore_color.rgb = PAPER
+    background.fill.fore_color.rgb = SLATE
     background.line.fill.background()
     background.shadow.inherit = False
     if band is not None:
@@ -219,7 +247,7 @@ def _text(slide, text, *, left, top, width, height=None, size=20, color=INK,
     return box
 
 
-def _rule(slide, *, top, left=MARGIN, width=RULE_WIDTH, color=TEAL):
+def _rule(slide, *, top, left=MARGIN, width=RULE_WIDTH, color=CYAN):
     """A short accent rule under a heading. Cheap, and it makes a slide look designed."""
     bar = slide.shapes.add_shape(1, left, top, width, Emu(38100))  # ~0.04"
     bar.fill.solid()
@@ -233,7 +261,7 @@ def _heading(slide, text, *, kicker=None, size=40, top=None):
     """The standard slide head: optional kicker, title, accent rule."""
     if kicker:
         _text(slide, kicker.upper(), left=MARGIN, top=Inches(0.72), width=BODY_WIDTH,
-              height=Inches(0.32), size=12, color=TEAL, bold=True, spacing=1.0)
+              height=Inches(0.32), size=12, color=CYAN, bold=True, spacing=1.0)
     y = top or Inches(1.18)
     _text(slide, text, left=MARGIN, top=y, width=BODY_WIDTH, size=size, color=INK,
           bold=True, spacing=1.06)
@@ -249,7 +277,7 @@ def _footer(slide, number):
     always warns is one nobody reads.
     """
     _text(slide, str(number), left=Inches(12.3), top=Inches(6.86), width=Inches(0.6),
-          height=Inches(0.32), size=11, color=GREY, align=PP_ALIGN.RIGHT)
+          height=Inches(0.32), size=11, color=DIM, align=PP_ALIGN.RIGHT)
 
 
 def _bullets(slide, items, *, top, size=20, gap=0.9, left=None, width=None, color=INK):
@@ -268,25 +296,136 @@ def _stat(slide, value, label, *, left, top, value_color=INK, width=STAT_WIDTH):
     big = _text(slide, value, left=left, top=top, width=width, height=Inches(0.95),
                 size=42, color=value_color, bold=True, spacing=1.0)
     small = _text(slide, label, left=left, top=top + Inches(0.88), width=width,
-                  height=Inches(0.85), size=15, color=GREY, spacing=1.25)
+                  height=Inches(0.85), size=15, color=DIM, spacing=1.25)
     return [big, small]
 
 
 # ── the slides ────────────────────────────────────────────────────────────────
 
 def slide_title(prs):
-    slide = _blank(prs, band=TEAL)
+    slide = _blank(prs, band=CYAN)
     _text(slide, "THE AGENT ORG", left=MARGIN, top=Inches(2.25), width=BODY_WIDTH,
           size=64, color=INK, bold=True, spacing=1.0)
     _rule(slide, top=Inches(3.42), width=Inches(2.6))
     _text(slide, "AI agents that ship code the way an engineering team does —\n"
                  "with a safety check they cannot argue with.",
-          left=MARGIN, top=Inches(3.82), width=Inches(10.4), size=24, color=GREY)
+          left=MARGIN, top=Inches(3.82), width=Inches(10.4), size=24, color=DIM)
     _text(slide, "RosettaTeam   ·   DevOps Hackathon, pre-final evaluation\n"
                  "25 August 2026",
-          left=MARGIN, top=Inches(5.75), width=BODY_WIDTH, size=15, color=GREY)
+          left=MARGIN, top=Inches(5.75), width=BODY_WIDTH, size=15, color=DIM)
     _transition(slide, kind="fade")
     _footer(slide, 1)
+
+
+def slide_agenda(prs):
+    """Slide 2. Tells a judge every section they asked for is coming.
+
+    It earns its place for one reason: without it, a judge spends the first five minutes
+    wondering whether we are going to cover the four topics the invitation named. With
+    it, they can stop tracking that and listen.
+    """
+    slide = _blank(prs)
+    _heading(slide, "Twenty minutes, five parts", kicker="agenda", size=40)
+    heads = []
+    y = Inches(2.6)
+    for index, (title, detail) in enumerate([
+        ("The team", "who built it"),
+        ("The problem, and our solution",
+         "why an AI pipeline needs a gate it cannot argue with"),
+        ("Architecture", "how a ticket becomes a merged change"),
+        ("Progress to date", "what runs today, and what we measured"),
+        ("Roadmap, then a live demo", "two tickets: one ships, one is refused"),
+    ], start=1):
+        _text(slide, f"{index:02d}", left=MARGIN, top=y, width=Inches(0.7),
+              height=Inches(0.5), size=17, color=CYAN, bold=True, font=MONO)
+        heads.append(_text(slide, title, left=Inches(2.0), top=y, width=Inches(4.6),
+                           height=Inches(0.5), size=20, color=INK, bold=True))
+        _text(slide, detail, left=Inches(6.7), top=y, width=Inches(5.5),
+              height=Inches(0.5), size=16, color=DIM)
+        y += Inches(0.82)
+    _transition(slide)
+    _animate(slide, [s.shape_id for s in heads])
+    _footer(slide, 2)
+
+
+# The team, in speaking order. `photo` is a stem under docs/pitch/photos/square/, and
+# `org` is deliberately blank-able: three of us have no employer to name here, and
+# inventing one would be worse than the gap.
+TEAM = [
+    ("Mohamed Sorour", "Senior DevOps Engineer", "VEZEETA", "sorour"),
+    ("Mariam Abdelkader", "Associate Solution Engineer", "RENOSYSTEMS", "mariam"),
+    ("Habiba Megahed", "Junior DevOps Engineer", "DIGILIANS ALUM", "habiba"),
+    ("Reem Shkeep", "Junior Testing Engineer", "DIGILIANS ALUM", "reem"),
+    ("Aya Ebrahim", "Junior Testing Engineer", "DIGILIANS ALUM", "aya"),
+]
+
+
+def slide_team(prs):
+    """Slide 3. Five members, a circular photograph above each.
+
+    THE PHOTOGRAPHS ARE MASKED TO CIRCLES by setting `auto_shape_type = OVAL` on the
+    picture, which writes `<a:prstGeom prst="ellipse">` into the drawing -- verified in
+    the saved XML rather than assumed. A square photo in an oval frame is cropped by
+    PowerPoint itself, so the sources are already square (see the module docstring) and
+    nothing is stretched.
+
+    A missing file degrades to initials rather than raising: the deck must still build
+    for anyone who has not copied the photographs onto their machine.
+    """
+    slide = _blank(prs)
+    _heading(slide, "RosettaTeam", kicker="meet the team", size=40)
+
+    photos = pathlib.Path(__file__).resolve().parent.parent / "docs/pitch/photos/square"
+    column = Inches(2.28)
+    diameter = Inches(1.62)
+    x = MARGIN
+    shapes = []
+    for name, role, org, stem in TEAM:
+        centre = x + (column - diameter) / 2 - Inches(0.12)
+        image = photos / f"{stem}.jpg"
+        if image.exists():
+            picture = slide.shapes.add_picture(str(image), centre, Inches(2.62),
+                                               diameter, diameter)
+            picture.auto_shape_type = MSO_SHAPE.OVAL
+            picture.line.color.rgb = LINE
+            picture.line.width = Pt(1.5)
+            shapes.append(picture)
+        else:
+            ring = slide.shapes.add_shape(MSO_SHAPE.OVAL, centre, Inches(2.62),
+                                          diameter, diameter)
+            ring.fill.solid()
+            ring.fill.fore_color.rgb = RAISED
+            ring.line.color.rgb = LINE
+            ring.shadow.inherit = False
+            para = ring.text_frame.paragraphs[0]
+            para.alignment = PP_ALIGN.CENTER
+            run = para.add_run()
+            run.text = "".join(word[0] for word in name.split()[:2])
+            run.font.size = Pt(26)
+            run.font.bold = True
+            run.font.color.rgb = CYAN
+            run.font.name = MONO
+            shapes.append(ring)
+
+        _text(slide, name, left=x - Inches(0.16), top=Inches(4.48),
+              width=column, height=Inches(0.62), size=16, color=INK, bold=True,
+              align=PP_ALIGN.CENTER, spacing=1.15)
+        _text(slide, role, left=x - Inches(0.16), top=Inches(5.08),
+              width=column, height=Inches(0.66), size=13, color=DIM,
+              align=PP_ALIGN.CENTER, spacing=1.2)
+        if org.strip():
+            _text(slide, org, left=x - Inches(0.16), top=Inches(5.74),
+                  width=column, height=Inches(0.34), size=11, color=CYAN,
+                  align=PP_ALIGN.CENTER, font=MONO)
+        x += column
+
+    _text(slide, "Three of us trained together at Digilians — this is the first thing "
+                 "we have built as one team.",
+          left=MARGIN, top=Inches(6.52), width=Inches(11.0), height=Inches(0.45),
+          size=16, color=DIM)
+    _transition(slide)
+    _animate(slide, [s.shape_id for s in shapes])
+    _footer(slide, 3)
 
 
 def slide_problem(prs):
@@ -300,17 +439,17 @@ def slide_problem(prs):
     ], top=Inches(3.4), size=21, gap=0.72)
     stat = _stat(slide, "10 of 10",
                  "changes carrying hardcoded cloud credentials\nwere merged",
-                 left=MARGIN, top=Inches(5.6), value_color=CORAL, width=Inches(4.0))
+                 left=MARGIN, top=Inches(5.6), value_color=ROSE, width=Inches(4.0))
     _transition(slide)
     _animate(slide, [s.shape_id for s in body] + [s.shape_id for s in stat])
-    _footer(slide, 2)
+    _footer(slide, 4)
 
 
 def slide_insight(prs):
-    slide = _blank(prs, band=CORAL)
+    slide = _blank(prs, band=ROSE)
     _text(slide, "And nobody noticed.", left=MARGIN, top=Inches(2.0),
           width=BODY_WIDTH, size=52, color=INK, bold=True, spacing=1.0)
-    _rule(slide, top=Inches(3.15), width=Inches(2.0), color=CORAL)
+    _rule(slide, top=Inches(3.15), width=Inches(2.0), color=ROSE)
     lines = _bullets(slide, [
         "Every job passed. Every dashboard was green.",
         "The credential reached the main branch and the pipeline reported success.",
@@ -318,7 +457,7 @@ def slide_insight(prs):
     ], top=Inches(3.6), size=23, gap=0.95, color=INK)
     _transition(slide, kind="fade")
     _animate(slide, [s.shape_id for s in lines])
-    _footer(slide, 3)
+    _footer(slide, 5)
 
 
 def slide_solution(prs):
@@ -327,29 +466,48 @@ def slide_solution(prs):
              kicker="the solution", size=38)
     _text(slide, "A ticket walks the same path it would in a real team.",
           left=MARGIN, top=Inches(2.5), width=BODY_WIDTH, height=Inches(0.5),
-          size=20, color=GREY)
+          size=20, color=DIM)
 
+    # THE AGENT'S REAL NAME UNDER EACH STAGE. These are the runtime identifiers from
+    # agentorg/github_ops.py:959, not labels invented for a slide -- a judge who later
+    # reads the repository finds the same five words, and in mono because that is what
+    # they are: identifiers.
     x = MARGIN
-    for name in ("PLAN", "BUILD", "REVIEW", "SCAN", "RELEASE"):
-        card = slide.shapes.add_shape(1, x, Inches(3.15), Inches(1.95), Inches(0.86))
+    for stage, agent in (("PLAN", "planner"), ("BUILD", "developer"),
+                         ("REVIEW", "reviewer"), ("SCAN", "security"),
+                         ("RELEASE", "sre")):
+        card = slide.shapes.add_shape(1, x, Inches(3.15), Inches(1.95), Inches(0.98))
         card.fill.solid()
-        card.fill.fore_color.rgb = PAPER
-        card.line.color.rgb = TEAL
+        card.fill.fore_color.rgb = RAISED
+        card.line.color.rgb = CYAN
         card.line.width = Pt(1.25)
         card.shadow.inherit = False
-        para = card.text_frame.paragraphs[0]
-        para.alignment = PP_ALIGN.CENTER
-        run = para.add_run()
-        run.text = name
-        run.font.size = Pt(15)
+        frame = card.text_frame
+        frame.word_wrap = True
+        head = frame.paragraphs[0]
+        head.alignment = PP_ALIGN.CENTER
+        run = head.add_run()
+        run.text = stage
+        run.font.size = Pt(14)
         run.font.bold = True
-        run.font.color.rgb = TEAL
+        run.font.color.rgb = CYAN
         run.font.name = SANS
+        sub = frame.add_paragraph()
+        sub.alignment = PP_ALIGN.CENTER
+        run = sub.add_run()
+        run.text = agent
+        run.font.size = Pt(11)
+        run.font.color.rgb = DIM
+        run.font.name = MONO
         x += Inches(2.28)
 
-    _text(slide, "human approval              human approval              human approval",
-          left=MARGIN, top=Inches(4.15), width=Inches(11.2), height=Inches(0.36),
-          size=12, color=GREY)
+    # Aligned under gates 1, 2 and 3 -- after BUILD/REVIEW, after SCAN, and before
+    # RELEASE. The previous version spaced the three labels evenly, which put them under
+    # the wrong stages and quietly misdescribed where a human actually intervenes.
+    for offset in (Inches(2.28), Inches(6.84), Inches(9.12)):
+        _text(slide, "▲ human approval", left=MARGIN + offset - Inches(0.16),
+              top=Inches(4.24), width=Inches(2.28), height=Inches(0.34),
+              size=11, color=CYAN, align=PP_ALIGN.CENTER, font=MONO)
 
     rest = _bullets(slide, [
         "Five specialist agents: they plan, write, critique, scan and sign off.",
@@ -358,11 +516,11 @@ def slide_solution(prs):
     ], top=Inches(4.95), size=20, gap=0.7)
     _transition(slide)
     _animate(slide, [s.shape_id for s in rest])
-    _footer(slide, 4)
+    _footer(slide, 6)
 
 
 def slide_gate(prs):
-    slide = _blank(prs, band=TEAL)
+    slide = _blank(prs, band=CYAN)
     _heading(slide, "The safety check cannot be persuaded",
              kicker="the solution", size=38)
     body = _bullets(slide, [
@@ -375,10 +533,10 @@ def slide_gate(prs):
         "the scanners were wrong — and the change stayed blocked, because those words "
         "were never part of the decision.",
         left=MARGIN, top=Inches(5.4), width=Inches(10.7), height=Inches(1.1),
-        size=19, color=TEAL)
+        size=19, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in body] + [proof.shape_id])
-    _footer(slide, 5)
+    _footer(slide, 7)
 
 
 def slide_architecture(prs):
@@ -396,20 +554,20 @@ def slide_architecture(prs):
     y = Inches(2.5)
     for index, (title, detail) in enumerate(steps, start=1):
         _text(slide, f"{index}", left=MARGIN, top=y, width=Inches(0.5),
-              height=Inches(0.5), size=19, color=TEAL, bold=True)
+              height=Inches(0.5), size=19, color=CYAN, bold=True)
         heads.append(_text(slide, title, left=Inches(1.75), top=y, width=Inches(4.4),
                            height=Inches(0.5), size=19, color=INK, bold=True))
         _text(slide, detail, left=Inches(6.3), top=y, width=Inches(5.9),
-              height=Inches(0.5), size=17, color=GREY)
+              height=Inches(0.5), size=17, color=DIM)
         y += Inches(0.78)
 
     _text(slide, f"{TF_RESOURCES} infrastructure resources, all defined as code   ·   "
                  "no long-lived cloud credentials anywhere",
           left=MARGIN, top=Inches(6.55), width=Inches(11.2), height=Inches(0.4),
-          size=15, color=TEAL)
+          size=15, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in heads])
-    _footer(slide, 6)
+    _footer(slide, 8)
 
 
 def slide_gates_detail(prs):
@@ -425,10 +583,10 @@ def slide_gates_detail(prs):
         "When the safety check stops a change, the stages after it are never created. "
         "There is no branch to take and no flag to flip — the refusal is structural.",
         left=MARGIN, top=Inches(5.5), width=Inches(10.7), height=Inches(1.0),
-        size=19, color=TEAL)
+        size=19, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in body] + [note.shape_id])
-    _footer(slide, 7)
+    _footer(slide, 9)
 
 
 def slide_progress(prs):
@@ -448,7 +606,7 @@ def slide_progress(prs):
                    left=Inches(8.0), top=Inches(4.5))
     _transition(slide)
     _animate(slide, [s.shape_id for s in left] + [s.shape_id for s in stats])
-    _footer(slide, 8)
+    _footer(slide, 10)
 
 
 def slide_evidence(prs):
@@ -457,10 +615,10 @@ def slide_evidence(prs):
     _text(slide, "One ticket is clean. One carries a hardcoded credential. "
                  "Nothing else differs.",
           left=MARGIN, top=Inches(2.45), width=Inches(11.0), height=Inches(0.5),
-          size=20, color=GREY)
+          size=20, color=DIM)
 
     good = _text(slide, "SHIPPED", left=MARGIN, top=Inches(3.3), width=Inches(5.0),
-                 height=Inches(0.58), size=26, color=SAGE, bold=True)
+                 height=Inches(0.58), size=26, color=MINT, bold=True)
     good_body = _text(slide,
         "Planned, written, reviewed, scanned,\n"
         "approved three times, merged.\n"
@@ -469,7 +627,7 @@ def slide_evidence(prs):
         size=18, color=INK)
 
     bad = _text(slide, "REFUSED", left=Inches(7.2), top=Inches(3.3), width=Inches(4.9),
-                height=Inches(0.58), size=26, color=CORAL, bold=True)
+                height=Inches(0.58), size=26, color=ROSE, bold=True)
     bad_body = _text(slide,
         "Two credentials found in the change.\n"
         "Stopped before anyone could approve it,\n"
@@ -481,15 +639,15 @@ def slide_evidence(prs):
         f"About {POISONED_MINUTES} minutes to refuse. Nothing merged, and the reason is "
         "on the ticket in plain English.",
         left=MARGIN, top=Inches(6.35), width=Inches(11.0), height=Inches(0.5),
-        size=18, color=GREY)
+        size=18, color=DIM)
     _transition(slide)
     _animate(slide, [good.shape_id, good_body.shape_id, bad.shape_id, bad_body.shape_id,
                      close.shape_id])
-    _footer(slide, 9)
+    _footer(slide, 11)
 
 
 def slide_why_it_matters(prs):
-    slide = _blank(prs, band=SAGE)
+    slide = _blank(prs, band=MINT)
     _heading(slide, "What this is worth", kicker="progress", size=40)
     body = _bullets(slide, [
         "Review capacity stops being the limit on how fast a team can ship.",
@@ -499,7 +657,7 @@ def slide_why_it_matters(prs):
     ], top=Inches(2.85), size=21, gap=0.88)
     _transition(slide, kind="fade")
     _animate(slide, [s.shape_id for s in body])
-    _footer(slide, 10)
+    _footer(slide, 12)
 
 
 def slide_roadmap(prs):
@@ -515,26 +673,26 @@ def slide_roadmap(prs):
         "Every item is a gap we have already written down. We would rather show you a "
         "known limitation than discover one on stage.",
         left=MARGIN, top=Inches(6.5), width=Inches(11.0), height=Inches(0.5),
-        size=17, color=TEAL)
+        size=17, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in items] + [note.shape_id])
-    _footer(slide, 11)
+    _footer(slide, 13)
 
 
 def slide_demo(prs):
-    slide = _blank(prs, band=TEAL)
+    slide = _blank(prs, band=CYAN)
     _text(slide, "Let us show you.", left=MARGIN, top=Inches(2.35), width=BODY_WIDTH,
           size=52, color=INK, bold=True, spacing=1.0)
     _rule(slide, top=Inches(3.5), width=Inches(2.0))
     _text(slide, "Two tickets. The same feature request.\n"
                  "One ships itself. One is refused.",
-          left=MARGIN, top=Inches(3.9), width=Inches(10.4), size=26, color=GREY)
+          left=MARGIN, top=Inches(3.9), width=Inches(10.4), size=26, color=DIM)
     _transition(slide, kind="fade")
-    _footer(slide, 12)
+    _footer(slide, 14)
 
 
 def slide_close(prs):
-    slide = _blank(prs, band=TEAL)
+    slide = _blank(prs, band=CYAN)
     _heading(slide, "Thank you", size=44)
     close = _text(slide,
         "Agents did the work.\n"
@@ -544,14 +702,14 @@ def slide_close(prs):
         spacing=1.55)
     team = _text(slide, "RosettaTeam   ·   questions welcome",
                  left=MARGIN, top=Inches(5.85), width=Inches(11.0), height=Inches(0.5),
-                 size=17, color=GREY)
+                 size=17, color=DIM)
     _transition(slide, kind="fade")
     _animate(slide, [close.shape_id, team.shape_id])
-    _footer(slide, 13)
+    _footer(slide, 15)
 
 
 SLIDES = [
-    slide_title, slide_problem, slide_insight, slide_solution, slide_gate,
+    slide_title, slide_agenda, slide_team, slide_problem, slide_insight, slide_solution, slide_gate,
     slide_architecture, slide_gates_detail, slide_progress, slide_evidence,
     slide_why_it_matters, slide_roadmap, slide_demo, slide_close,
 ]
