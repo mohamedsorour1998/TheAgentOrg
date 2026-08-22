@@ -1080,6 +1080,85 @@ whole project exists to prevent.** Same for "denied" versus "not ready yet".
 
 ## Verified runs — what the cloud path has actually done
 
+### 2026-08-22, after the model was unblocked — READ THIS FIRST
+
+**Until this date every agent in the deployed pipeline had been answering from its
+fixture.** Three independent IAM defects on one statement, each hiding the next:
+
+| # | Defect | How it was found |
+|---|---|---|
+| 1 | `Resource` named `foundation-model/*` only, but `BEDROCK_MODEL` is an `inference-profile/` ARN | `simulate-principal-policy` |
+| 2 | `Action` named `InvokeModel`, but `strands.Agent` calls **`ConverseStream`** | the container log named the operation |
+| 3 | `Resource` scoped to `us-east-1`, but the profile routes to **us-east-2 and us-west-2 as well** | `get-inference-profile` |
+
+Fixing each one exposed the next, because until then every call failed at the
+earlier check. **The lesson: simulate the action the SDK actually calls, and read
+the container log rather than trusting the simulation of an action you assumed.**
+
+The proof it is fixed is not a green job — it is that the planner's output stopped
+matching the fixture. Asked for a health-check endpoint it returned six tasks about
+`/healthz`, build SHA and uptime; the fixture is a Redis rate-limiter, always.
+
+**Poisoned run `32556734837`** — `plan → gate1` (clicked) `→ develop`, blocked:
+
+```
+_source=model                       ← the agents genuinely called Bedrock
+status=blocked
+blocked: 2 blocking findings
+  gitleaks critical app/auth.py:3 aws-access-key-id
+  gitleaks critical app/auth.py:4 aws-secret-access-key
+exit code 3
+```
+
+All three rejection recorders `skipped`. The security comment's explanation is now
+model-written prose naming both rules, both lines and the consequence.
+
+**Clean run `32558580388`** — **all seven jobs green**, three gates each paused for a
+click, `status=promoted`, and **PR #24 merged on auth-service**. Security read
+`PASS — 0 blocking finding(s) of 0 total`, `provenance: scanners`.
+
+**Automatic trigger** — opening issue #25 started run `32558837968` with nobody
+typing a command:
+
+```
+Lambda:  accepted delivery 5c2c005c-9df8-11f1-9e48-0b1f5909ad6f (issues)
+plan job:  TICKET_ID: 25
+           TICKET_TEXT: Add structured request logging to the auth service
+           TRIGGER: issue        ← the field no Actions data could provide
+           _source=model
+```
+
+### Two defects the demo run itself exposed
+
+**The provenance could not cross the remote seam.** The first post-fix run printed
+`_source=none` beside a plan comment that was unmistakably model-written. Under
+`REMOTE_AGENTS=true` the model call happens in the container and
+`llm.last_source()` on the runner never sees it — so the field was blank on exactly
+the path it exists to describe. `source` now travels on the 200 envelope, the way
+`RunState.poisoned` travels on the state.
+
+**`promote` merged nothing while reporting success.** Run `32558114927`: seven jobs
+green, `status=promoted`, and no PR merged. `promote` held no `DEMO_REPO` or
+`GITHUB_TOKEN` — correct when it only wrote a status, wrong once it called
+`merge_pr`, whose offline path returns `local://<branch>`: a ref that reads like a
+success. The test that should have caught it **exempted `promote` by name**, with
+the stale reason in a comment. That exemption list is gone.
+
+### A real reviewer now withholds approval, and that is not a bug
+
+Clean run `32557597915` ended `status=failed`, exit 4, with `PASS` from security.
+Four model-written review rounds: the reviewer asked for **email-based** rate
+limiting, the developer kept producing **IP-based**, and the cap expired. The
+scanners cleared the diff; nobody approved it. Before the model was unblocked this
+path was unreachable, because `fixtures/review_result.json` always approves.
+
+**Consequence for the demo:** the clean beat's ticket text must be specific enough
+for the developer to satisfy. `"Add a per-IP rate limit of five login attempts per
+minute to app/auth.py, returning HTTP 429 past the threshold. Read the limit and the
+Redis URL from environment variables."` reaches `promote`. A vaguer ticket may
+legitimately end `failed`.
+
+
 Recorded because "deployed" and "verified" were separate facts for most of a week,
 and several claims in this file were once written while only the first was true.
 
@@ -1157,9 +1236,9 @@ half fails silently.
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 10** — re-read 2026-08-22 with `list-agent-runtimes`; this file said v9
-until then. All five carry the **same** version: a split would mean a partial
-deploy, where some agents run new code and some old and no stage's output says
+**version 12** — re-read 2026-08-22 with `list-agent-runtimes`. All five carry the
+**same** version: a split would mean a partial deploy, where some agents run new code
+and some old and no stage's output says
 which, so `scripts/preflight.py` check 2 fails on a version mismatch as well as on
 a non-READY status.
 

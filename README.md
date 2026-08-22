@@ -603,6 +603,13 @@ issue starting a run with nobody typing a command.
 - `agentorg/approve_server.py` has **no authentication** and binds `127.0.0.1`
   only. It is a local convenience over `gates.resume`, superseded by GitHub
   Environments, and must never be exposed off-host.
+- **A vague ticket may legitimately end `failed` rather than promoted.** The
+  reviewer is a real model and it withholds approval when the diff does not match
+  what it asked for. Measured 2026-08-22: asked to rate-limit password resets *per
+  email address*, the developer produced *per-IP* limiting four times, the revision
+  cap expired, and the run ended `failed` with the scanners reporting `PASS`. That
+  is the pipeline working — nobody approved the change — but it means a demo ticket
+  needs to be specific enough for the developer to satisfy.
 
 **Deliberate, and previously listed as limitations:**
 
