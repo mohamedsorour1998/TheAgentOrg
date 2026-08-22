@@ -354,3 +354,122 @@ def test_the_developers_poisoned_safety_net_is_not_a_fixture_fallback(monkeypatc
         f"mechanism; labelling that a fixture run would make every poisoned "
         f"demo look like a model outage."
     )
+
+
+# ── the provenance must cross the REMOTE seam, which is where it failed ────────
+#
+# MEASURED 2026-08-22 on the deployed pipeline. The plan job printed
+# `_source=none` while the plan comment on the target repo carried six tasks
+# naming files no fixture contains -- so the model had plainly answered and the
+# provenance feature reported nothing, on precisely the path it exists to
+# describe.
+#
+# The cause: under REMOTE_AGENTS=true the model call happens INSIDE the container,
+# and `llm.last_source()` on the runner never sees it. Same shape as
+# RunState.poisoned -- a fact the container must communicate rather than one the
+# caller can observe.
+
+
+def test_the_container_reports_which_path_answered():
+    """server.py must put `source` on the 200 envelope.
+
+    Without it the runner has no way to know, and the field it fills is a
+    confident-looking empty string.
+    """
+    import inspect
+
+    from agentorg.agents import server
+
+    source = inspect.getsource(server.Handler.do_POST)
+    assert '"source"' in source, (
+        "the 200 envelope carries no `source` key. Under REMOTE_AGENTS=true the "
+        "model call happens in this container and llm.last_source() on the runner "
+        "is always None, so the provenance field records nothing on the deployed "
+        "path -- measured as `_source=none` beside a plan comment that was "
+        "unmistakably model-written."
+    )
+    assert "reset_source" in source, (
+        "the handler does not reset the source before running the agent. "
+        "AgentCore reuses warm containers, so one early model success would label "
+        "every later fixture answer a model answer."
+    )
+
+
+def test_the_client_records_the_container_reported_source(monkeypatch):
+    """And the runner must read it back, or the round trip is decorative."""
+    from agentorg.common import agent_client, config
+    from agentorg.state import PlanResult, RunState
+
+    plan = PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["f"])
+    envelope = {
+        "agent": "planner",
+        "result": plan.model_dump(mode="json"),
+        "source": "model",
+    }
+
+    monkeypatch.setattr(config, "REMOTE_AGENTS", True)
+    monkeypatch.setattr(agent_client, "_remote_state", lambda r, s, k: s)
+    monkeypatch.setattr(agent_client, "_invoke", lambda role, state: envelope)
+
+    llm.reset_source()
+    result = agent_client.call_agent(
+        "planner", RunState(ticket_id="T-1", ticket_text="x")
+    )
+    assert isinstance(result, PlanResult)
+    assert llm.last_source() == "model", (
+        f"the container reported source='model' and the runner recorded "
+        f"{llm.last_source()!r}. The fact crossed the wire and was dropped, which "
+        f"leaves RunState.model_provenance empty on every remote run."
+    )
+
+
+def test_an_older_container_without_the_key_is_unknown_not_a_model_run(monkeypatch):
+    """Backward compatibility, and it must fail toward unknown.
+
+    A container deployed before this change omits `source`. Reading that absence
+    as a model run would be the exact false claim this whole feature exists to
+    prevent -- and it is the more flattering of the two possible guesses, which is
+    why it needs its own test.
+    """
+    from agentorg.common import agent_client, config
+    from agentorg.state import PlanResult, RunState
+
+    plan = PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["f"])
+    envelope = {"agent": "planner", "result": plan.model_dump(mode="json")}
+
+    monkeypatch.setattr(config, "REMOTE_AGENTS", True)
+    monkeypatch.setattr(agent_client, "_remote_state", lambda r, s, k: s)
+    monkeypatch.setattr(agent_client, "_invoke", lambda role, state: envelope)
+
+    llm.reset_source()
+    agent_client.call_agent("planner", RunState(ticket_id="T-1", ticket_text="x"))
+    assert llm.last_source() is None, (
+        f"an envelope with no `source` key recorded {llm.last_source()!r}. An "
+        f"older container cannot report its provenance, and the honest answer is "
+        f"unknown -- never 'model'."
+    )
+
+
+def test_a_garbage_source_value_is_ignored_rather_than_recorded(monkeypatch):
+    """The envelope is remote input. An unrecognised value is not a provenance."""
+    from agentorg.common import agent_client, config
+    from agentorg.state import PlanResult, RunState
+
+    plan = PlanResult(tasks=["t"], acceptance_criteria=["a"], target_files=["f"])
+    envelope = {
+        "agent": "planner",
+        "result": plan.model_dump(mode="json"),
+        "source": "definitely-a-model-trust-me",
+    }
+
+    monkeypatch.setattr(config, "REMOTE_AGENTS", True)
+    monkeypatch.setattr(agent_client, "_remote_state", lambda r, s, k: s)
+    monkeypatch.setattr(agent_client, "_invoke", lambda role, state: envelope)
+
+    llm.reset_source()
+    agent_client.call_agent("planner", RunState(ticket_id="T-1", ticket_text="x"))
+    assert llm.last_source() is None, (
+        f"an unrecognised source value was recorded as {llm.last_source()!r}. Only "
+        f"the two known values may be, or a container can assert any provenance it "
+        f"likes into the run's record."
+    )

@@ -46,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from pydantic import ValidationError
 
+from ..common import llm
 from ..state import RunState
 from . import developer, planner, reviewer, security, sre
 
@@ -161,15 +162,40 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             role = agent_role()
+            # RESET BEFORE THE CALL, so `source` below describes THIS invocation
+            # rather than whatever the previous one on this warm container did.
+            # AgentCore reuses containers, so without the reset a single early
+            # model success would label every later fixture answer a model answer.
+            llm.reset_source()
             result = AGENTS[role].run(state)
         except Exception as exc:
             logging.getLogger(__name__).exception("agent invocation failed")
             self._send(500, {"error": type(exc).__name__, "detail": str(exc)})
             return
 
+        # `source` IS THE PROVENANCE, AND IT HAS TO TRAVEL, for exactly the reason
+        # `RunState.poisoned` is a field rather than a kwarg: the fact exists only
+        # inside this container.
+        #
+        # MEASURED 2026-08-22 before this was here. The deployed pipeline printed
+        # `_source=none` while the plan comment on the target repo was
+        # unmistakably model-written -- six tasks naming files no fixture contains.
+        # `llm.last_source()` on the RUNNER is always None under
+        # REMOTE_AGENTS=true, because the model call happens here and the runner
+        # never touches its own `llm` module. So the provenance feature reported
+        # nothing precisely on the path it was built to describe.
+        #
+        # An extra key on the envelope is backward compatible: a runner reading an
+        # older container's response finds it absent and records "" -- unknown --
+        # which is the honest answer for a container that could not tell it.
+        #
         # mode="json" so datetimes and enums serialise; model_dump() alone
         # returns objects json.dumps cannot encode.
-        self._send(200, {"agent": role, "result": result.model_dump(mode="json")})
+        self._send(200, {
+            "agent": role,
+            "result": result.model_dump(mode="json"),
+            "source": llm.last_source() or "",
+        })
 
 
 def main() -> None:

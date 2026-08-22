@@ -79,7 +79,7 @@ from pydantic import BaseModel
 
 from ..agents.server import AGENTS
 from ..state import RunState
-from . import config
+from . import config, llm
 
 # Bounds on the two calls this module makes. botocore's defaults are
 # connect_timeout=60, read_timeout=60 with legacy retries; those are wrong in
@@ -525,4 +525,23 @@ def call_agent(role: str, state: RunState, **kwargs) -> BaseModel:
         "invoking %s on AgentCore runtime %s", role, _runtime_name(role)
     )
     payload_state = _remote_state(role, state, kwargs)
-    return _validate(role, _invoke(role, payload_state))
+    envelope = _invoke(role, payload_state)
+
+    # THE CONTAINER'S PROVENANCE, RECORDED LOCALLY, because the model call happened
+    # over there and `llm.last_source()` on this side would otherwise always be
+    # None -- which is exactly what the deployed pipeline printed (`_source=none`)
+    # while posting a plan comment no fixture could have produced.
+    #
+    # Recorded BEFORE _validate, so a container that answered honestly and then
+    # failed validation still tells us which path it took. That is the case where
+    # the provenance matters most: an unusable answer from a real model call and an
+    # unusable answer from a broken fixture load want different fixes.
+    #
+    # An older container omits the key. `.get(...)` yields None, `_record` is
+    # skipped, and the run's provenance stays "" -- unknown, which is the honest
+    # answer about a container that could not report.
+    source = envelope.get("source") if isinstance(envelope, dict) else None
+    if source in (llm.SOURCE_MODEL, llm.SOURCE_FIXTURE):
+        llm._record(source)
+
+    return _validate(role, envelope)
