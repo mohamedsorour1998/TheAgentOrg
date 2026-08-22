@@ -38,3 +38,7 @@ docs/pitch/photos/*.jpeg
 docs/pitch/photos/*.png
 docs/pitch/photos/*.jpg
 !docs/pitch/photos/square/
+
+# PowerPoint's lock file, created while a deck is open in the app. Committed once by
+# accident; it is a transient artifact of an editor, not a deliverable.
+~$*.pptx
