@@ -1080,6 +1080,51 @@ whole project exists to prevent.** Same for "denied" versus "not ready yet".
 
 ## Verified runs — what the cloud path has actually done
 
+### The demo pair, as it will be run — verified at runtime version 13
+
+Two scenarios, each from a fresh issue, both re-run after the prompt fix below.
+
+| | Clean | Poisoned |
+|---|---|---|
+| Issue | #28 | #33 |
+| Issue comments | `plan`, `gate1` | `plan`, `gate1` |
+| PR | **#29 — MERGED** | **#34 — open, blocked** |
+| PR comments | develop · review · security · gate2 · sre · gate3 | develop · review ×4 · security |
+| Security | `PASS`, `provenance: scanners` | `BLOCK`, `provenance: scanners`, `app/auth.py:3` and `:4` |
+| Jobs | all seven green | `develop` exit 3, everything after skipped |
+
+**Dispatching the poisoned run races the auto-trigger.** Creating an issue fires a
+CLEAN run within seconds, and `poisoned` is hardcoded `"false"` in the ingress
+transformer by design — a label attaches after the issue opens, so the payload's
+labels are reliably empty. So the poisoned run must be hand-dispatched, and if the
+auto-run wins the concurrency slot first it posts its own plan to the same issue.
+**That is what produced three plan comments on one issue during rehearsal** — three
+separate runs against ticket 21, twelve minutes apart, each correctly posting once.
+Not a loop. Either dispatch poisoned immediately after creating the issue, or accept
+the extra plan comment.
+
+### THE DEVELOPER WAS WRITING GO FOR A FLASK APP
+
+The clean run failed twice at the revision cap before this was found, with the
+scanners reporting `PASS` each time. Reading the reviewer's objections showed why:
+`sync.RWMutex`, `NewRateLimiter`, "standardize Redis key formatting in GetKey".
+
+Neither prompt said what the target was. `developer._prompt` names target FILES but
+never their contents, and `target_repo/` is excluded from the image
+(`.dockerignore:48`), so the agent could not look. It guessed, and every revision
+inherited the guess.
+
+The reviewer's half cost as much. Its prompt already said "ONLY for real correctness
+or safety problems… not style nitpicks", and it still blocked on a different storage
+choice, a missing `Retry-After` header, absent cleanup timers, and configurability
+nobody asked for. "Real correctness problem" is not an operational standard. Both
+prompts now name the stack, and the reviewer's names what blocks and what belongs in
+`comments` instead.
+
+**An agent asked to edit a file it cannot read, with nothing saying what language
+that file is in, is being set up to fail.** This was not prompt-tuning for a nicer
+demo.
+
 ### 2026-08-22, after the model was unblocked — READ THIS FIRST
 
 **Until this date every agent in the deployed pipeline had been answering from its
