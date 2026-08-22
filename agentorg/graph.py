@@ -45,6 +45,7 @@ Run it:
 from __future__ import annotations
 
 import os
+import typing
 from collections.abc import Callable
 
 from . import gates, github_ops, log
@@ -314,6 +315,104 @@ def _decide(state: RunState, gate: str, ask: Callable[[RunState, str], HumanDeci
     return not stopping
 
 
+# The three gates a run must carry an approval for before it may promote. Same
+# names as `HumanDecision.gate`'s Literal.
+REQUIRED_GATES = ("gate1", "gate2", "gate3")
+
+# A run in one of these has ENDED. DERIVED from the frozen contract's own Literal
+# rather than written out, so a status added to `RunState` is terminal here the
+# moment it exists -- a hardcoded copy would treat a new ending as "running" and
+# let the promote step overwrite it. `scripts/run_stage.py` derives the same set
+# the same way for its own boundary, and `approve_server.py:126` states it as a
+# literal for a third.
+_TERMINAL_STATUSES = frozenset(
+    typing.get_args(typing.get_type_hints(RunState)["status"])
+) - {"running"}
+
+# The decisions that count as "a human let this through". `overridden` is here
+# DELIBERATELY: it is the one capability a human is meant to keep --
+# approve_server's docstring names `gates_cli resume ... --decision overridden`
+# as the shell-only route for accepting a risk the unauthenticated screen
+# refuses to click through -- and a guard that rejected it would delete that
+# route while looking like it tightened something.
+_APPROVING_DECISIONS = frozenset({"approved", "overridden"})
+
+
+def not_promotable(state: RunState) -> str:
+    """Why this run must NOT be promoted, or `""` if it may be.
+
+    Both promote sites call this: step 8 below, and `scripts/run_stage.py`'s
+    `_stage_promote`. ONE predicate with two callers rather than two hand-written
+    checks, because CLAUDE.md records THREE mutations that survived 793 tests for
+    exactly one reason -- `run_stage.py` inherited this file's COMMENT about a
+    hazard without inheriting its TEST. A shared predicate cannot drift that way,
+    and a test of either caller exercises the same rule.
+
+    WHY THIS EXISTS WHEN THE STRUCTURE ALREADY PREVENTS IT. It does not prevent
+    it; it makes it unreachable, which is a different thing. Here, a block
+    `return`s at step 5 so step 8 is never reached. In the cloud, `promote`
+    declares `needs: gate3` and a blocked run never reaches gate3. Both are
+    CONTROL FLOW -- one an early return, the other an `if:` in a YAML file with no
+    compiler and no test that can execute it. `run-pipeline.yml`'s three rejection
+    recorders exist because that second kind of guard was dropped in a one-line
+    edit once already (run 32509257195), and the failure was SILENT on every
+    surface anyone reads: the state file simply said the wrong thing. So the rule
+    is stated a second time where Python runs it.
+
+    THE DECISIONS ARE READ, NOT COUNTED, and that is the load-bearing half.
+    `gates.resume` sets `status="rejected"` for a rejection and NEVER un-sets it
+    (gates.py:206-208) while still appending any later approval -- so a run can
+    carry three decision rows one of which is a refusal, and `len(decisions) >= 3`
+    would call that promotable. `tests/test_approve_server.py:266-289` pins that
+    gap ON PURPOSE, because closing it inside `gates.resume` would revoke the
+    `overridden` escape hatch. So the read happens at the promote sites, which are
+    unattended: nobody is at a keyboard when a promote job runs.
+
+    A MISSING RESULT IS A REFUSAL, NOT A PASS. `state.security is None` means
+    nothing ever evaluated the block rule on this change, and that must not read
+    the same as `verdict == "pass"` -- "did not run" versus "passed" is the defect
+    this whole project exists to prevent.
+
+    A TERMINAL STATUS IS ALSO A REFUSAL, and it is checked first because it is the
+    only condition here that can be true while every other one is satisfied. A run
+    can read `status="blocked"` while carrying a `pass` verdict, a `go` and three
+    approvals: `gates.resume` writes `status` independently of the results, so the
+    two can disagree, and MEASURED before this check existed `not_promotable`
+    returned `""` for exactly that state. `run_stage._stage_promote` checks
+    terminality itself as well, BEFORE calling this, because it needs to return a
+    different exit code for it -- "this run had already ended" and "this run has
+    not earned a promotion" are different facts. This check is what makes the
+    predicate honest for the caller that does not make that distinction.
+    """
+    if state.status in _TERMINAL_STATUSES:
+        return (f"this run already ended as status={state.status!r}; promoting "
+                f"would overwrite an outcome an earlier stage decided")
+    if state.security is None:
+        return ("no security verdict on this run: nothing evaluated the block "
+                "rule on this change, which is not the same as it passing")
+    if state.security.verdict != "pass":
+        return (f"the security verdict is {state.security.verdict!r}, not 'pass' "
+                f"({len(state.security.blocking)} blocking finding(s))")
+    if state.sre is None:
+        return "no SRE verdict on this run: the sre stage never recorded one"
+    if state.sre.verdict != "go":
+        return f"the SRE verdict is {state.sre.verdict!r}, not 'go'"
+
+    # READ every decision. One refusal refuses, whatever was appended after it.
+    refused = sorted(d.gate for d in state.decisions if d.decision == "rejected")
+    if refused:
+        return (f"a human rejected {', '.join(refused)}, and gates.resume never "
+                f"un-sets a rejection, so a later approval does not undo it")
+
+    approved = {d.gate for d in state.decisions
+                if d.decision in _APPROVING_DECISIONS}
+    missing = [gate for gate in REQUIRED_GATES if gate not in approved]
+    if missing:
+        return (f"no approval recorded for {', '.join(missing)}: promoting would "
+                f"claim a human decided something nobody was asked")
+    return ""
+
+
 def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
                  auto_approve: bool = True) -> RunState:
     """Walk one ticket through the whole pipeline. Returns the final RunState.
@@ -494,6 +593,19 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     # 8. GATE 3 + PROMOTE ---------------------------------------------------
     if not _decide(state, "gate3", ask):
         return state
+
+    # THE PROMOTION IS CHECKED, NOT ASSUMED. Every stop above `return`s, so this
+    # line is unreachable on any run that should not promote -- and that is
+    # control flow, not a guard. See `not_promotable` for why the rule is stated
+    # a second time where a test can execute it, and for why the decisions are
+    # READ rather than counted.
+    refusal = not_promotable(state)
+    if refusal:
+        state.status = "failed"
+        _log(state, "system", "promote", "failed",
+             summary=f"refused to promote: {refusal}")
+        return state
+
     state.status = "promoted"
     _log(state, "system", "promote", "promoted", summary="change promoted")
     return state

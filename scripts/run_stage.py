@@ -151,6 +151,25 @@ EXIT_BLOCKED = 3
 EXIT_REJECTED = 4
 EXIT_ALREADY_FINAL = 5
 
+# EXIT_NOT_PROMOTABLE is the fifth, and the reasoning in the block above decides
+# what it may NOT be. A promote stage that refused an unpromotable run did not
+# evaluate the block rule (EXIT_BLOCKED would claim it did, and on a run whose
+# security verdict is already `block` that code would be almost right and
+# therefore worse -- it would report the block as though this stage found it),
+# was not refused by a human (EXIT_REJECTED is the precise lie the recorder
+# guard exists to prevent), and did not crash.
+#
+# It is NOT EXIT_ALREADY_FINAL either, and that distinction is the whole reason
+# a fifth code exists. `EXIT_ALREADY_FINAL` means "this run had already ENDED and
+# I declined to overwrite its ending" -- a terminal status, nothing left to
+# decide. The refusals below include a run that is still `running`: security
+# passed, no gate was rejected, and gate3 simply has no approval recorded yet.
+# That run has not ended, and reporting it as already-final would be the same
+# conflation this project exists to prevent -- "denied" read as "not ready yet".
+# So a terminal state DOES return EXIT_ALREADY_FINAL (reusing it exactly as its
+# own comment block reasons), and an unfinished but unpromotable one returns this.
+EXIT_NOT_PROMOTABLE = 6
+
 
 def flag(raw: str) -> bool:
     """Parse a workflow_dispatch boolean, which arrives as a STRING.
@@ -579,8 +598,64 @@ def _stage_sre(args: argparse.Namespace) -> int:
 
 
 def _stage_promote(args: argparse.Namespace) -> int:
-    """PROMOTE. Reached only past gate3, so there is nothing left to decide."""
+    """PROMOTE. Past gate3 -- and it CHECKS that rather than assuming it.
+
+    An earlier version of this function was three lines: load, set
+    `status="promoted"`, log. It wrote PROMOTED over whatever it had loaded, with
+    no check at all. The job graph makes that unreachable today -- `promote`
+    declares `needs: gate3` and a blocked run never reaches gate3 -- but that is
+    CONTROL FLOW IN A YAML FILE, with no compiler and no test that can execute
+    it. This workflow already carries three rejection recorder jobs for exactly
+    that reason: the equivalent guard was dropped in a one-line edit once (run
+    32509257195) and the resulting failure was silent on every surface anyone
+    reads. `graph.py` is a second caller of the same promote step.
+
+    The rule itself is `graph.not_promotable`, shared with that second caller
+    rather than restated here -- see its docstring for why the gate decisions are
+    READ rather than counted, and why `overridden` counts as an approval.
+    """
     state = _load(args.run_id)
+
+    # A run that has ALREADY ENDED gets EXIT_ALREADY_FINAL, reusing that code
+    # exactly as its own comment block reasons: this stage was asked to overwrite
+    # an outcome some earlier stage decided, and it declined. An unpromotable run
+    # that has NOT ended is a different fact and gets its own code -- see
+    # EXIT_NOT_PROMOTABLE. Checked first, because `blocked` and `rejected` are
+    # both terminal AND unpromotable, and the terminal reading is the more
+    # specific one.
+    if state.status in _TERMINAL_STATUSES:
+        _log(state, "system", "promote", "opened", verdict=state.status,
+             summary=(f"promote declined: this run already ended as "
+                      f"status={state.status}. Writing 'promoted' over that "
+                      f"would erase the outcome an earlier stage decided."))
+        # The run's real ending, RE-STATED AS THE LAST ROW, for the reason
+        # `_stage_gate_rejected` records at length: `timeline._outcome` reads its
+        # banner off the action of the LAST row and never off `RunState.status`,
+        # so the explanatory row above would otherwise downgrade a ⛔ BLOCKED
+        # banner to `… INCOMPLETE` while the state file still said blocked. A
+        # guard whose own record destroys the evidence it protects is worse than
+        # no guard, because it looks like it worked.
+        _log(state, "system", "promote", _OUTCOME_ACTIONS[state.status],
+             verdict=state.status,
+             summary=f"run remains status={state.status}; promote changed nothing")
+        print(f"::error::refusing to promote: this run already ended as "
+              f"status={state.status}.")
+        _emit(state)
+        return EXIT_ALREADY_FINAL
+
+    refusal = graph.not_promotable(state)
+    if refusal:
+        # `failed` rather than `rejected`: no human refused this promotion, the
+        # preconditions for it simply are not met. "failed" is also what the
+        # revision-cap and SRE no_go endings write, and it is the honest word --
+        # this run ended without shipping and without the block rule stopping it.
+        state.status = "failed"
+        _log(state, "system", "promote", "failed",
+             summary=f"refused to promote: {refusal}")
+        print(f"::error::refusing to promote: {refusal}")
+        _emit(state)
+        return EXIT_NOT_PROMOTABLE
+
     state.status = "promoted"
     _log(state, "system", "promote", "promoted", summary="change promoted")
     _emit(state)
