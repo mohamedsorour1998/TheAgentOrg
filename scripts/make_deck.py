@@ -15,10 +15,11 @@ From Hesham Khalil's invitation, and `_REQUIRED` below asserts each one is prese
 slide kicker so a rewrite cannot silently drop one:
 
     1. Overview of the idea (problem and proposed solution)  -> slides 4-7
-    2. High-level architecture                               -> slides 8-9
-    3. Progress to date (what has been completed)            -> slides 10-12
-    4. High-level future plan (roadmap to the final phase)   -> slide 13
-    + a live demonstration                                   -> slide 14 hands over
+    2. High-level architecture                               -> slides 8-10
+       slide 8 is the DIAGRAM -- what runs where, as a picture
+    3. Progress to date (what has been completed)            -> slides 11-13
+    4. High-level future plan (roadmap to the final phase)   -> slide 14
+    + a live demonstration                                   -> slide 15 hands over
 
 Slide 2 is an agenda and slide 3 is the team -- both requested, and the agenda earns its
 place by telling a judge up front that all four required sections are coming.
@@ -121,6 +122,9 @@ DIM = RGBColor(0x8A, 0x94, 0xA6)      # secondary text
 CYAN = RGBColor(0x4F, 0xD1, 0xC5)     # ALL structure: kickers, rules, the pipeline
 ROSE = RGBColor(0xFF, 0x6B, 0x6B)     # the failure state
 MINT = RGBColor(0x4A, 0xDE, 0x80)     # the success state
+AMBER = RGBColor(0xF0, 0xA9, 0x3B)    # the human gates on the architecture diagram, and
+                                      # nowhere else -- they are neither a success nor a
+                                      # failure, they are a person deciding
 SANS = "Helvetica Neue"
 MONO = "Menlo"                        # agent names and identifiers: they are code, not labels
 
@@ -134,6 +138,8 @@ MARGIN = Inches(1.1)
 BODY_WIDTH = Inches(11.1)
 RULE_WIDTH = Inches(1.6)
 STAT_WIDTH = Inches(3.4)      # the default width of a big-number block
+ARROW_WIDTH = Inches(0.9)     # a connector arrow between diagram zones
+ARROW_PAD = Inches(0.25)      # how far a connector's label may overhang its arrow
 
 
 def _transition(slide, *, kind: str = "wipe", direction: str = "l") -> None:
@@ -539,6 +545,176 @@ def slide_gate(prs):
     _footer(slide, 7)
 
 
+def _zone(slide, label, *, left, top, width, height):
+    """A dashed container marking one side of the boundary, with a label on its edge.
+
+    Three of these carry the whole diagram: GitHub, AWS, and the agent runtimes. The
+    boundary is the point -- "what runs where" is the most common question about this
+    system, and a dashed box answers it faster than any sentence.
+
+    The label sits ON the border with a slide-coloured backing box, which is how a
+    hand-drawn diagram marks a region. There is no PowerPoint primitive for it; two
+    shapes stacked is the whole trick.
+    """
+    frame = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    frame.fill.background()
+    frame.line.color.rgb = LINE
+    frame.line.width = Pt(1)
+    frame.line.dash_style = 2      # MSO_LINE_DASH_STYLE.DASH
+    frame.shadow.inherit = False
+    frame.adjustments[0] = 0.03
+
+    # A backing patch so the border appears to break behind the text, rather than
+    # running through it.
+    patch = slide.shapes.add_shape(1, left + Inches(0.18), top - Inches(0.11),
+                                   Inches(0.06) * len(label) + Inches(0.28), Inches(0.22))
+    patch.fill.solid()
+    patch.fill.fore_color.rgb = SLATE
+    patch.line.fill.background()
+    patch.shadow.inherit = False
+
+    _text(slide, label.upper(), left=left + Inches(0.22), top=top - Inches(0.14),
+          width=Inches(3.2), height=Inches(0.26), size=9, color=DIM, bold=True)
+    return frame
+
+
+def _node(slide, title, subtitle, *, left, top, width, accent=None, small=False):
+    """One box in the diagram. Returns it so it can be animated.
+
+    `accent` recolours the border and title: CYAN for the pipeline itself, AMBER for a
+    human gate. Everything else is a plain raised card, so the eye lands on the two
+    things that matter.
+    """
+    height = Inches(0.46) if small else Inches(0.62)
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
+    box.fill.solid()
+    box.fill.fore_color.rgb = RAISED
+    box.line.color.rgb = accent or LINE
+    box.line.width = Pt(1.25)
+    box.shadow.inherit = False
+    box.adjustments[0] = 0.08
+
+    frame = box.text_frame
+    frame.word_wrap = True
+    frame.margin_left = frame.margin_right = Inches(0.09)
+    frame.margin_top = frame.margin_bottom = Inches(0.03)
+
+    head = frame.paragraphs[0]
+    head.alignment = PP_ALIGN.LEFT
+    run = head.add_run()
+    run.text = title
+    run.font.size = Pt(11 if small else 12)
+    run.font.bold = True
+    run.font.color.rgb = accent or INK
+    run.font.name = MONO if small else SANS
+
+    if subtitle:
+        sub = frame.add_paragraph()
+        sub.alignment = PP_ALIGN.LEFT
+        run = sub.add_run()
+        run.text = subtitle
+        run.font.size = Pt(9)
+        run.font.color.rgb = DIM
+        run.font.name = SANS
+    return box
+
+
+def _connector(slide, glyph, label, *, left, top, width=ARROW_WIDTH,
+               pad=ARROW_PAD):
+    """An arrow between two zones, with a mono label under it."""
+    # The heights are explicit and tight because these two sit 0.26in apart: the 1in
+    # default, or even 0.3in on the glyph, overlaps the label and the layout audit says so.
+    _text(slide, glyph, left=left, top=top, width=width, height=Inches(0.3),
+          size=17, color=CYAN, align=PP_ALIGN.CENTER)
+    # `pad` widens the label box either side so a short arrow can still centre a long
+    # word. It must be 0 where the arrow sits in a narrow gap between two zones --
+    # otherwise the label reaches into the zone and collides with a box inside it.
+    _text(slide, label, left=left - pad, top=top + Inches(0.42),
+          width=width + pad * 2, height=Inches(0.22), size=9, color=DIM,
+          align=PP_ALIGN.CENTER, font=MONO)
+
+
+def slide_diagram(prs):
+    """Slide 8. The architecture as a PICTURE, which the numbered walk cannot be.
+
+    Asked for directly, and it was the right call: the list on the next slide describes
+    the sequence but never shows the SHAPE -- two repositories, what AWS owns, five
+    isolated agents, and three gates that belong to GitHub rather than to our code.
+
+    Everything on it is real. The repository names, the five agent names and the service
+    names are the ones in the code, so a judge who opens the project afterwards finds the
+    same words.
+    """
+    slide = _blank(prs)
+    _heading(slide, "What runs where", kicker="architecture", size=40)
+
+    top = Inches(2.28)
+    shapes = []
+
+    # ── GitHub: both repositories, and the three gates that live there ──────────
+    _zone(slide, "GitHub", left=MARGIN, top=top, width=Inches(3.5), height=Inches(4.24))
+    shapes.append(_node(slide, "auth-service", "the target repo · a ticket is opened here",
+                        left=MARGIN + Inches(0.22), top=top + Inches(0.34),
+                        width=Inches(3.06)))
+    shapes.append(_node(slide, "TheAgentOrg", "the pipeline · seven jobs",
+                        left=MARGIN + Inches(0.22), top=top + Inches(1.08),
+                        width=Inches(3.06), accent=CYAN))
+    for index, label in enumerate(("▲  GATE 1 · plan approved",
+                                   "▲  GATE 2 · change approved",
+                                   "▲  GATE 3 · release approved")):
+        shapes.append(_node(slide, label, "",
+                            left=MARGIN + Inches(0.22),
+                            top=top + Inches(1.98 + 0.66 * index),
+                            width=Inches(3.06), accent=AMBER, small=True))
+
+    # ── AWS ────────────────────────────────────────────────────────────────────
+    aws_left = MARGIN + Inches(4.35)
+    _zone(slide, "AWS", left=aws_left, top=top, width=Inches(3.1), height=Inches(2.72))
+    for index, (name, note) in enumerate((
+        ("Lambda", "verifies the signature first"),
+        ("EventBridge", "routes it · dead-letter queue"),
+        ("Bedrock", "the model the agents call"),
+    )):
+        shapes.append(_node(slide, name, note, left=aws_left + Inches(0.22),
+                            top=top + Inches(0.34 + 0.76 * index), width=Inches(2.66)))
+
+    # ── the five agents ────────────────────────────────────────────────────────
+    agents_left = MARGIN + Inches(8.0)
+    _zone(slide, "AgentCore · 5 runtimes", left=agents_left, top=top,
+          width=Inches(2.95), height=Inches(4.24))
+    for index, (agent, does) in enumerate((
+        ("planner", "breaks the ticket down"),
+        ("developer", "writes the change"),
+        ("reviewer", "critiques it"),
+        ("security", "three real scanners"),
+        ("sre", "release readiness"),
+    )):
+        shapes.append(_node(slide, agent, does, left=agents_left + Inches(0.2),
+                            top=top + Inches(0.34 + 0.7 * index), width=Inches(2.55),
+                            accent=CYAN if agent == "security" else None, small=True))
+    _text(slide, "one image · five tags\ndiffering only by role",
+          left=agents_left + Inches(0.2), top=top + Inches(3.86), width=Inches(2.55),
+          height=Inches(0.5), size=10, color=DIM)
+
+    # ── the three hops between the zones ───────────────────────────────────────
+    _connector(slide, "→", "webhook", left=MARGIN + Inches(3.58), top=top + Inches(0.44))
+    _connector(slide, "←", "dispatch", left=MARGIN + Inches(3.58), top=top + Inches(1.18))
+    # pad=0: this arrow lives in the 0.5in gap between AWS and the agents, so a widened
+    # label would overlap the reviewer box at x=9.30. Measured.
+    _connector(slide, "→", "invoke", left=MARGIN + Inches(7.42), top=top + Inches(1.18),
+               width=Inches(0.66), pad=Emu(0))
+
+    _text(slide, "No laptop anywhere in that path   ·   no long-lived cloud credentials"
+                 "   ·   the three gates are GitHub's, not ours to bypass",
+          left=MARGIN, top=Inches(6.78), width=Inches(11.2), height=Inches(0.4),
+          size=14, color=CYAN)
+    _transition(slide)
+    # Animated by ZONE rather than by box: fifteen clicks would be unpresentable, and the
+    # three zones are the actual argument -- GitHub, AWS, the agents.
+    _animate(slide, [shapes[0].shape_id, shapes[5].shape_id, shapes[8].shape_id])
+    _footer(slide, 8)
+
+
 def slide_architecture(prs):
     slide = _blank(prs)
     _heading(slide, "Cloud-native, start to finish", kicker="architecture", size=38)
@@ -567,7 +743,7 @@ def slide_architecture(prs):
           size=15, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in heads])
-    _footer(slide, 8)
+    _footer(slide, 9)
 
 
 def slide_gates_detail(prs):
@@ -586,7 +762,7 @@ def slide_gates_detail(prs):
         size=19, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in body] + [note.shape_id])
-    _footer(slide, 9)
+    _footer(slide, 10)
 
 
 def slide_progress(prs):
@@ -606,7 +782,7 @@ def slide_progress(prs):
                    left=Inches(8.0), top=Inches(4.5))
     _transition(slide)
     _animate(slide, [s.shape_id for s in left] + [s.shape_id for s in stats])
-    _footer(slide, 10)
+    _footer(slide, 11)
 
 
 def slide_evidence(prs):
@@ -643,7 +819,7 @@ def slide_evidence(prs):
     _transition(slide)
     _animate(slide, [good.shape_id, good_body.shape_id, bad.shape_id, bad_body.shape_id,
                      close.shape_id])
-    _footer(slide, 11)
+    _footer(slide, 12)
 
 
 def slide_why_it_matters(prs):
@@ -657,7 +833,7 @@ def slide_why_it_matters(prs):
     ], top=Inches(2.85), size=21, gap=0.88)
     _transition(slide, kind="fade")
     _animate(slide, [s.shape_id for s in body])
-    _footer(slide, 12)
+    _footer(slide, 13)
 
 
 def slide_roadmap(prs):
@@ -676,7 +852,7 @@ def slide_roadmap(prs):
         size=17, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in items] + [note.shape_id])
-    _footer(slide, 13)
+    _footer(slide, 14)
 
 
 def slide_demo(prs):
@@ -688,7 +864,7 @@ def slide_demo(prs):
                  "One ships itself. One is refused.",
           left=MARGIN, top=Inches(3.9), width=Inches(10.4), size=26, color=DIM)
     _transition(slide, kind="fade")
-    _footer(slide, 14)
+    _footer(slide, 15)
 
 
 def slide_close(prs):
@@ -705,12 +881,12 @@ def slide_close(prs):
                  size=17, color=DIM)
     _transition(slide, kind="fade")
     _animate(slide, [close.shape_id, team.shape_id])
-    _footer(slide, 15)
+    _footer(slide, 16)
 
 
 SLIDES = [
     slide_title, slide_agenda, slide_team, slide_problem, slide_insight, slide_solution, slide_gate,
-    slide_architecture, slide_gates_detail, slide_progress, slide_evidence,
+    slide_diagram, slide_architecture, slide_gates_detail, slide_progress, slide_evidence,
     slide_why_it_matters, slide_roadmap, slide_demo, slide_close,
 ]
 

@@ -4,14 +4,14 @@
 
 | file | what it is |
 |---|---|
-| `TheAgentOrg-prefinal.pptx` | the deck — 15 slides, 16:9, transitions and click-advanced animations |
+| `TheAgentOrg-prefinal.pptx` | the deck — 16 slides, 16:9, transitions and click-advanced animations |
 | `script.md` | the rehearsal script: per slide, what is shown, the words to say, and the follow-up answers |
 | `../demo-runbook.md` | the live demo, step by step — the operator handout |
 | `../handout-<name>.md` | one per engineer: their lane, their numbers, their questions |
 
 ## Present from the .pptx
 
-Open in PowerPoint. Thirteen of the fifteen slides advance their lines **one click at a
+Open in PowerPoint. Fourteen of the sixteen slides advance their lines **one click at a
 time** — the pauses are the pacing, so do not rush the clicker.
 
 **It is a pitch, and it is the team's.** No slide is headed with one person's name, there
@@ -29,9 +29,9 @@ The deck is generated, not hand-built, so a typo is a one-line fix:
 That prints a self-check and exits non-zero if the motion did not reach the file:
 
 ```
-docs/pitch/TheAgentOrg-prefinal.pptx  (376 KB)
-  slides:      15
-  animated:    13
+docs/pitch/TheAgentOrg-prefinal.pptx  (379 KB)
+  slides:      16
+  animated:    14
   layout:      clean
   sections:    all four covered
   transitions: all
@@ -61,11 +61,11 @@ in particular moves whenever anyone adds a test.
 |---|---|
 | Slides 1–3 — title, agenda, the team | 0:00 → 1:30 |
 | Slides 4–7 — problem, and what we built | 1:30 → 6:00 |
-| Slides 8–9 — architecture | 6:00 → 8:00 |
-| Slides 10–12 — progress, and what it is worth | 8:00 → 10:30 |
-| Slide 13 — roadmap · slide 14 — hand over | 10:30 → 12:00 |
+| Slides 8–10 — architecture (8 is the diagram) | 6:00 → 8:40 |
+| Slides 11–13 — progress, and what it is worth | 8:40 → 11:00 |
+| Slide 14 — roadmap · slide 15 — hand over | 11:00 → 12:00 |
 | Live demo, both paths | 12:00 → 20:00 |
-| Questions, slide 15 on screen | 20:00 → 30:00 |
+| Questions, slide 16 on screen | 20:00 → 30:00 |
 
 Twelve minutes of slides, not twenty: the demo is ~8 minutes measured, and 20 + 8 is 28 of
 a 30-minute slot before Teams join, screen share, or a single question. If asked, say so

@@ -1626,7 +1626,7 @@ than carrying a second copy.
 ## The presentation — `scripts/make_deck.py`
 
 The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-prefinal.pptx`,
-15 slides, real transitions and click-advanced animations. One command, and it
+16 slides, real transitions and click-advanced animations. One command, and it
 self-checks:
 
 ```bash
@@ -1634,9 +1634,9 @@ self-checks:
 ```
 
 ```
-docs/pitch/TheAgentOrg-prefinal.pptx  (376 KB)
-  slides:      15
-  animated:    13
+docs/pitch/TheAgentOrg-prefinal.pptx  (379 KB)
+  slides:      16
+  animated:    14
   layout:      clean
   sections:    all four covered
   transitions: all
@@ -1689,7 +1689,7 @@ defect:
 **downward** into whatever sits below it. Compare boxes only when they overlap
 **horizontally**: two columns side by side share a vertical band by design, and flagging
 those made the audit cry wolf on every stat slide. Give single-line boxes an explicit
-`height`, or the 1in default hangs past the slide edge and all fifteen slides report a
+`height`, or the 1in default hangs past the slide edge and every slide reports a
 false positive.
 
 ### Design in the browser first

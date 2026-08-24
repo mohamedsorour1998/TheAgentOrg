@@ -104,6 +104,38 @@
   .approvals { display: flex; gap: 12px; font-size: 11px; color: var(--dim); letter-spacing: .05em; }
   .approvals span { flex: 1; text-align: center; }
 
+
+  /* ── the architecture diagram (slide 8) ────────────────────────────────────────
+     THREE ZONES, because the single most common question about this system is "what
+     runs where". Left: the two GitHub repositories. Middle: what AWS owns. Right: the
+     five agents. Drawn as boxes rather than described in prose, so a judge can see the
+     boundary the whole design turns on. */
+  .arch { position: relative; margin-top: 26px; height: 400px; }
+  .zone {
+    position: absolute; border: 1px dashed var(--line); border-radius: 6px;
+    padding: 30px 16px 16px;
+  }
+  .zone > .ztitle {
+    position: absolute; top: -10px; left: 14px; background: var(--slate);
+    padding: 0 8px; font-size: 10px; letter-spacing: .14em; color: var(--dim);
+    font-weight: 700;
+  }
+  .box {
+    background: var(--raised); border: 1px solid var(--line); border-radius: 4px;
+    padding: 9px 12px; margin-bottom: 9px;
+  }
+  .box .bt { font-size: 14px; font-weight: 700; line-height: 1.25; }
+  .box .bs { font-size: 11px; color: var(--dim); margin-top: 3px; font-family: var(--mono); }
+  .box.accent { border-color: var(--cyan); }
+  .box.accent .bt { color: var(--cyan); }
+  .box.gate { border-color: var(--amber); background: rgba(240,169,59,.08); }
+  .box.gate .bt { color: var(--amber); font-size: 12px; }
+  .box.agent { padding: 7px 11px; margin-bottom: 7px; }
+  .box.agent .bt { font-size: 12px; font-family: var(--mono); color: var(--cyan); font-weight: 400; }
+  .box.agent .bs { display: inline; margin-left: 6px; font-family: var(--sans); }
+  .arrow { position: absolute; color: var(--cyan); font-size: 17px; }
+  .alabel { position: absolute; font-size: 10px; color: var(--dim); font-family: var(--mono); }
+
   /* the numbered architecture list */
   .steps { margin-top: 28px; }
   .step { display: grid; grid-template-columns: 40px 1fr 1fr; gap: 18px; align-items: baseline; margin-bottom: 17px; }
@@ -264,7 +296,84 @@
   <div class="num">7</div>
 </div>
 
-<!-- 8 · architecture -->
+<!-- 8 · ARCHITECTURE DIAGRAM (the new one) -->
+<div class="slide plain">
+  <div class="kicker">ARCHITECTURE</div>
+  <h2>What runs where</h2>
+  <div class="rule"></div>
+
+  <div class="arch">
+    <!-- GitHub: the two repositories -->
+    <div class="zone" style="left:0; top:6px; width:300px; height:372px">
+      <div class="ztitle">GITHUB</div>
+      <div class="box">
+        <div class="bt">auth-service</div>
+        <div class="bs">the target repo · not ours</div>
+      </div>
+      <div style="font-size:11px;color:var(--dim);margin:0 0 9px 4px">
+        a ticket is opened here &nbsp;→
+      </div>
+      <div class="box accent">
+        <div class="bt">TheAgentOrg</div>
+        <div class="bs">the pipeline · 7 jobs</div>
+      </div>
+      <div class="box gate" style="margin-top:12px">
+        <div class="bt">▲ GATE 1 · plan approved</div>
+      </div>
+      <div class="box gate">
+        <div class="bt">▲ GATE 2 · change approved</div>
+      </div>
+      <div class="box gate">
+        <div class="bt">▲ GATE 3 · release approved</div>
+      </div>
+    </div>
+
+    <!-- AWS -->
+    <div class="zone" style="left:352px; top:6px; width:270px; height:238px">
+      <div class="ztitle">AWS</div>
+      <div class="box">
+        <div class="bt">Lambda</div>
+        <div class="bs">verifies the signature</div>
+      </div>
+      <div class="box">
+        <div class="bt">EventBridge</div>
+        <div class="bs">routes it · DLQ on failure</div>
+      </div>
+      <div class="box">
+        <div class="bt">Bedrock</div>
+        <div class="bs">the model the agents call</div>
+      </div>
+    </div>
+
+    <!-- the five agents -->
+    <div class="zone" style="left:674px; top:6px; width:262px; height:372px">
+      <div class="ztitle">AGENTCORE · 5 RUNTIMES</div>
+      <div class="box agent"><span class="bt">planner</span><span class="bs">breaks it down</span></div>
+      <div class="box agent"><span class="bt">developer</span><span class="bs">writes the change</span></div>
+      <div class="box agent"><span class="bt">reviewer</span><span class="bs">critiques it</span></div>
+      <div class="box agent"><span class="bt">security</span><span class="bs">3 real scanners</span></div>
+      <div class="box agent"><span class="bt">sre</span><span class="bs">release readiness</span></div>
+      <div style="margin-top:14px;font-size:11px;color:var(--dim);line-height:1.5">
+        one image · five tags<br>differing only by role
+      </div>
+    </div>
+
+    <!-- connectors -->
+    <div class="arrow" style="left:310px; top:26px">→</div>
+    <div class="alabel" style="left:302px; top:50px; width:56px; text-align:center">webhook</div>
+    <div class="arrow" style="left:310px; top:150px; transform:rotate(180deg)">→</div>
+    <div class="alabel" style="left:296px; top:174px; width:70px; text-align:center">dispatch</div>
+    <div class="arrow" style="left:632px; top:150px">→</div>
+    <div class="alabel" style="left:624px; top:174px; width:56px; text-align:center">invoke</div>
+  </div>
+
+  <p style="position:absolute;bottom:52px;font-size:15px;color:var(--cyan)">
+     No laptop anywhere in that path &nbsp;·&nbsp; no long-lived cloud credentials &nbsp;·&nbsp;
+     the three gates are GitHub's, not ours to bypass</p>
+  <div class="num">8</div>
+</div>
+
+<!-- 9 · architecture, the numbered walk -->
 <div class="slide plain">
   <div class="kicker">ARCHITECTURE</div>
   <h2>Cloud-native, start to finish</h2>
@@ -278,10 +387,10 @@
   </div>
   <p style="position:absolute;bottom:64px;font-size:15px;color:var(--cyan)">
      20 infrastructure resources, all defined as code &nbsp;·&nbsp; no long-lived cloud credentials anywhere</p>
-  <div class="num">8</div>
+  <div class="num">9</div>
 </div>
 
-<!-- 11 · the comparison (the money slide) -->
+<!-- 12 · the comparison (the money slide) -->
 <div class="slide plain">
   <div class="kicker">PROGRESS</div>
   <h2>The same request, twice</h2>
