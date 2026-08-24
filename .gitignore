@@ -42,3 +42,7 @@ docs/pitch/photos/*.jpg
 # PowerPoint's lock file, created while a deck is open in the app. Committed once by
 # accident; it is a transient artifact of an editor, not a deliverable.
 ~$*.pptx
+
+# macOS Finder metadata. Committed once by accident via `git add -A`.
+.DS_Store
+**/.DS_Store
