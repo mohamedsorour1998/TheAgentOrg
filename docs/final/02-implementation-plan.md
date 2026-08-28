@@ -141,6 +141,34 @@ baseline before the other lanes change it.
 ### Phase 2 — the port · Lanes D, F, K + integrator on `graph.py` · parallel
 The pipeline moves onto the queue. **The riskiest phase**; §5's gate applies hardest here.
 
+**SCOPE CORRECTION, measured 2026-08-28 at the start of the phase.** "Port `graph.py`
+onto the queue" was written before Lane A existed and its premise is wrong. Measured:
+
+- **Nothing on the deployed path imports `graph.py` for orchestration.** `grep` for
+  `run_pipeline(` across `agentorg/ scripts/ infra/` returns exactly one hit — its own
+  `__main__` block. Every other caller is a test, in 17 files.
+- **The cloud pipeline and Lane A's queue already share one implementation**:
+  `run-pipeline.yml` runs `python scripts/run_stage.py <stage>`, and
+  `queue/runner.py` runs the identical command as a subprocess. There is no second
+  orchestrator to port.
+- **The seven comment renderers are already shared.** `run_stage.py` calls
+  `graph._plan_comment`, `_gate_comment`, `_develop_comment`, `_review_comment`,
+  `_security_comment` and `_sre_comment` directly. `graph.py` is the renderer library
+  plus a test-only walk, not a rival pipeline.
+
+So porting `graph._walk` would move code nothing calls, while leaving the actual
+duplication — `_walk`'s stage sequence versus `run_stage.py`'s six `_stage_*`
+functions, 713 and 909 lines — exactly where it is. That duplication is real and it is
+where CLAUDE.md's three mutations survived 793 tests, but it is a **Phase 3** job,
+because §3 already deletes `run_stage.py` there "once the queue has run both demo
+paths". Deleting the file is the port; doing both is doing it twice.
+
+**What the integrator did in Phase 2 instead**, having established the above: fixed
+`SecurityResult.scoring` being empty on both fixture paths, so a `fixture-fallback`
+block no longer renders "no findings were scored" over three findings. Same class of
+defect the phase was aimed at — a check whose output cannot distinguish "did not run"
+from "found nothing" — reached from the direction that was actually broken.
+
 ### Phase 3 — product surface · Lanes G, H, I, J, M · parallel
 Tests, retrieval, the UI. `run_stage.py` is deleted here, by the integrator, once the
 queue has run both demo paths.
