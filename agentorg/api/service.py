@@ -33,6 +33,7 @@ that is `budgets.check`'s own decision and this module does not soften it.
 
 from __future__ import annotations
 
+import secrets
 import time
 
 from pydantic import BaseModel, Field
@@ -153,20 +154,36 @@ def _tenant(credential: Credential) -> str:
 def _placeholder_run_id(tenant_id: str, ticket_id: str) -> str:
     """The placeholder `plan` is enqueued under.
 
-    Mirrors `worker.start_run`'s shape (`pending-<ticket>-<epoch>`) rather than
+    Mirrors `worker.start_run`'s shape (`pending-<ticket>-...`) rather than
     inventing a second one, and sanitises the ticket for the same stated reason:
     "a ticket id like `a/b` would otherwise make an unsafe run id out of a
     legitimate ticket".
 
     THE TENANT IS IN THE PLACEHOLDER, which `worker.start_run` has no need for.
-    Two tenants submitting the same ticket id in the same second would otherwise
+    Two tenants submitting the same ticket id at the same moment would otherwise
     collide on the queue's UNIQUE index, and the second would receive a refusal
-    naming the first tenant's job -- a cross-tenant disclosure through an error
+    naming the FIRST TENANT'S job id -- a cross-tenant disclosure through an error
     message.
+
+    AND IT ENDS IN RANDOM BYTES RATHER THAN ONLY A TIMESTAMP, which is a MEASURED
+    fix. `worker.start_run` uses `int(time.time())`, whole seconds, which is
+    correct for a human typing one command; two API submissions arrive far closer
+    together than that. Measured with millisecond precision and no random suffix,
+    `test_two_submissions_without_a_key_are_two_runs` failed:
+
+        ValueError: job for run 'pending-tenant-alpha-7-1787910797807' stage
+        'plan' attempt 1 is already queued as 70a9d75a-... (status 'ready')
+
+    So two legitimate keyless submissions of one ticket became a 500. Any clock
+    resolution has this bug -- it only moves the window -- and the caller cannot
+    avoid it, because the collision is between two requests they made deliberately.
+    The timestamp STAYS because it makes a placeholder sortable and legible in a
+    log; the random suffix is what makes it unique.
     """
     safe_ticket = "".join(c for c in ticket_id if c.isalnum() or c in "-_") or "run"
     safe_tenant = "".join(c for c in tenant_id if c.isalnum() or c in "-_") or "t"
-    candidate = f"pending-{safe_tenant}-{safe_ticket}-{int(time.time() * 1000)}"
+    unique = secrets.token_hex(4)
+    candidate = f"pending-{safe_tenant}-{safe_ticket}-{int(time.time())}-{unique}"
     if not log.is_safe_run_id(candidate):
         # Reachable through a long tenant id plus a long ticket id: MAX_TICKET_ID
         # is 200 and `log.MAX_RUN_ID_LENGTH` is smaller, so the sum can exceed it.
