@@ -48,7 +48,9 @@ from pydantic import BaseModel, Field
 
 from .. import fixtures_loader, github_ops, repo_snapshot
 from ..common import llm
+from ..cost import report as cost
 from ..state import RunState, SLOCheck, SREResult
+from .reviewer import render_generated_tests
 
 
 class SREAdvice(BaseModel):
@@ -104,6 +106,21 @@ Contribute:
   * estimated_cost_note -- any new infrastructure or spend this change implies.
   * notes -- how to roll this change back, in one sentence.
 
+THE TARGET IS A PYTHON 3.12 FLASK APPLICATION. `app/auth.py` holds a `login()` view
+reading `request.form`, an `authenticate(username, password)` helper and a
+`create_app()` factory; `redis` carries shared state and configuration comes from
+`os.environ`. Judge operational risk against that, not against a generic service.
+
+IF A RUN COST block appears below, those figures are MEASURED and are not yours to
+restate, dispute or recompute — they are what THIS pipeline's own model calls
+consumed. `estimated_cost_note` is for the spend the CHANGE implies once deployed:
+new infrastructure, a new managed service, a new per-request cost. If the block
+carries a finding about caching, that is a fact about our pipeline and not about the
+change; do not turn it into an SLO check against the developer.
+
+A figure the block reports as `not priced` or `not measured` is an ABSENCE, never a
+zero. Do not describe an unpriced run as cheap or free.
+
 Be brief and concrete."""
 
 # The name of the check carrying the measured CI fact. A constant because
@@ -140,6 +157,39 @@ def _prompt(state: RunState) -> str:
             f"SECURITY VERDICT: {state.security.verdict} "
             f"({len(state.security.blocking)} blocking finding(s))"
         )
+
+    # WHAT THIS RUN COST. Rendered by `cost.render`, imported rather than formatted
+    # here, for the reason `report.py`'s own docstring gives: a second renderer is a
+    # second place the same figures are formatted, free to disagree with the first. That
+    # module refuses to flatter -- `usd is None` prints "not priced" and never "$0.00",
+    # and an unmeasurable cache prints "not measured" and never "0%" -- and reproducing
+    # any of that here would be reproducing the part that is easy to get wrong.
+    #
+    # ONLY WHEN THERE ARE ROWS, and `len(state.cost.stages)` is the discriminator rather
+    # than `usd`. Lane E measured why: an unwired run has zero rows and `usd=None`,
+    # while a wired run whose container fell back to a fixture has a row per stage and
+    # `usd=0.0`. `usd == 0.0` cannot tell those apart. `cost.render(None)` answers "no
+    # model calls recorded for this run", which is true and useless in a prompt -- it
+    # would spend tokens telling the SRE that a measurement it never asked for is
+    # absent, and invite it to reason about the gap.
+    #
+    # EMPTY ON EVERY RUN THE TWO PIPELINES CURRENTLY PRODUCE. Measured over the AST:
+    # neither `graph.py` nor `scripts/run_stage.py` assigns `state.cost` or calls
+    # `build_cost_record` -- zero assignments, zero calls in both files. Lane E records
+    # that gap as needing one line per stage in the integrator's files. So this renders
+    # nothing today and needs no edit when those lines land, which is the same shape as
+    # the generated-tests block above.
+    if state.cost is not None and state.cost.stages:
+        parts.append(f"RUN COST (measured, ours, not the change's):\n{cost.render(state.cost)}")
+
+    # THE GENERATED TESTS, through the reviewer's renderer -- one spelling of the
+    # green-proves-nothing caveat for all three agents that read the record. The SRE
+    # gets it because "was this change tested" is an operational question and
+    # `passed=3` from a model-written suite is not the answer it looks like.
+    generated = render_generated_tests(state)
+    if generated:
+        parts.append(generated)
+
     return "\n\n".join(parts)
 
 
