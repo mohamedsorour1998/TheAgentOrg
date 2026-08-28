@@ -2666,8 +2666,8 @@ than carrying a second copy.
 
 ## The presentation — `scripts/make_deck.py`
 
-The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-prefinal.pptx`,
-16 slides, real transitions and click-advanced animations. One command, and it
+The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-final.pptx`,
+19 slides, real transitions and click-advanced animations. One command, and it
 self-checks:
 
 ```bash
@@ -2675,15 +2675,45 @@ self-checks:
 ```
 
 ```
-docs/pitch/TheAgentOrg-prefinal.pptx  (379 KB)
-  slides:      16
-  animated:    14
+docs/pitch/TheAgentOrg-final.pptx  (387 KB)
+  slides:      19
+  animated:    17
   layout:      clean
   sections:    all four covered
   transitions: all
   OK — motion, content rules and layout verified in the saved file
   file(1):     Microsoft OOXML
 ```
+
+`TheAgentOrg-prefinal.pptx` (16 slides, 14 animated) is kept unchanged as the Aug 25
+artifact. **Regenerating touches only the final file** — the generator's output path
+changed, so a `git status` showing the prefinal deck modified means somebody ran an older
+copy of the script.
+
+**Every constant was re-measured for the final deck, and six were stale** —
+`TESTS_PASSING` 1102 → 1853 and `TEST_FILES` 41 → 73, because twelve lanes committed
+concurrently. Two constants are deliberately **ranges** (`COST_LOW`/`COST_HIGH`): the
+cost spread is 30% across three consecutive runs of one unchanged ticket, so a point
+value would be the most repeated and least reproducible number on the deck.
+
+**THE WRAPPED-HEIGHT AUDIT TOOK FOUR PASSES ON ONE SLIDE, and the sequence is the
+lesson.** Slide 12 ("From a pipeline to a platform", ten capability bullets in two
+columns) went `2 collisions @0.09in` → `3 @0.03in` → `1 @0.12in` → `1 @0.00in` → clean.
+Two of those passes made the **copy shorter**, which is the right fix; the last moved a
+footnote by 0.16in, which is the right fix for an estimator deliberately crude enough to
+call itself a smoke alarm. A width-only check reports clean at every step of that
+sequence. **Do not chase a 0.00in collision by nudging geometry alone** — it means the
+slide is at its density limit, and the honest move is to cut a word.
+
+**The banned-phrase check is not vacuous, verified by RED.** Assigning the forbidden
+sentence to a real slide bullet produces `FAIL: banned phrase is back on a slide: 'no
+model in it'` and **exit 1**, with `layout: clean` beside it — so the four checks are
+independent. Reverted; the phrase is not in the deck.
+
+**The palette has not drifted.** Measured by parsing both files: all ten tokens agree
+between `make_deck.py`'s `RGBColor(...)` constants and
+`docs/pitch/preview/index.html`'s CSS custom properties. That check is worth re-running
+after any colour edit, because the preview is how the design was signed off.
 
 **Why generated.** Somebody has to be able to fix a typo at 11pm the night before and
 regenerate. And a hand-built `.pptx` lets a stale figure survive on a slide indefinitely
