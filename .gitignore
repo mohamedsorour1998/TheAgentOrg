@@ -24,8 +24,25 @@ infra/Terraform/modules/*/.build/
 .terraform.lock.hcl
 
 # Pipeline run artifacts (logs + paused state)
-runs/
-runs-archive-*/
+#
+# ANCHORED WITH A LEADING SLASH, and that is a measured fix rather than tidying. A bare
+# `runs/` matches a directory AT ANY DEPTH, so it also swallowed `web/app/api/runs/` and
+# `web/app/(routes)/runs/` -- the two lanes building the run screens each hit it
+# independently, and in both cases `git add` REPORTED SUCCESS while staging nothing:
+#
+#     $ git check-ignore -v web/app/api/runs/route.ts
+#     .gitignore:27:runs/    web/app/api/runs/route.ts
+#
+# A pattern written for one directory silently claimed every directory of that name in a
+# growing repository, and the failure mode is the worst available: no error, no output,
+# and a commit that looks complete. Both lanes worked around it with a scoped negation in
+# `web/.gitignore`; those stay as belt and braces, but the rule itself is now correct.
+#
+# `/runs/` is the pipeline's own run directory. A linked worktree's `runs/` sits at that
+# worktree's root, and `.claude/` is ignored wholesale below, so nothing that needed
+# ignoring stops being ignored.
+/runs/
+/runs-archive-*/
 build/
 dist/
 
