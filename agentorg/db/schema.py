@@ -27,6 +27,41 @@ Reads differ, and the difference is stated in the ADR rather than glossed: Postg
 policy `USING` clause constrains a SELECT, and nothing in SQLite can. So on the tested
 path a read is only as scoped as its accessor, which is why the accessors carry an
 explicit predicate the leak suite's RED step can remove.
+
+THE POSTGRES HALF IS NOW EXECUTED, AND ITS GUARANTEE DEPENDS ON WHO CONNECTS
+===========================================================================
+Lane B wrote this DDL and could only assert it structurally -- no Postgres existed on any
+machine that ran the suite. Executed for the first time on 2026-08-28 against a real
+PostgreSQL 16.15, it produced one defect and one caveat, and the caveat is the more
+important of the two.
+
+The defect: `Column("unlimited", "INTEGER", "BOOLEAN", default="0")` was rejected with
+`DatatypeMismatch: column "unlimited" is of type boolean but default expression is of type
+integer`. Correct for sqlite, which has no boolean type; Postgres will not coerce. Fixed
+with `postgres_default`, so the class can no longer express a default that is right in only
+one dialect.
+
+THE CAVEAT: RLS DID NOT ISOLATE ANYTHING ON THE FIRST ATTEMPT, and the DDL was not at
+fault. Measured, same database, same policies, two connections:
+
+    as the superuser that owns the tables
+      attacker sees: [('run-t-attacker',...), ('run-t-victim',...)]   <- LEAK
+      unscoped read: 2 rows
+
+    as a plain LOGIN role with SELECT/INSERT/UPDATE granted
+      attacker sees: [('run-t-attacker',...)]                          <- refused
+      unscoped read: 0 rows
+
+**Postgres skips row-level security for a superuser, for any role with `BYPASSRLS`, and
+for the table's owner.** `FORCE ROW LEVEL SECURITY` -- which this module emits and
+`tests/test_tenancy.py:243` pins -- fixes only the third of those three. Nothing in SQL can
+constrain a superuser.
+
+So the deployment requirement is a property of the CONNECTION, not of this schema: the
+application must connect as a non-superuser role that does not own these tables. A DSN
+pointing at a superuser turns every policy here into decoration while `pg_policies` still
+lists all six, which is exactly the shape this repository exists to refuse -- a check
+present, enumerable, and enforcing nothing.
 """
 
 from __future__ import annotations
@@ -72,6 +107,21 @@ class Column:
     primary_key: bool = False
     unique: bool = False
     default: str | None = None
+    # THE DEFAULT IS ALSO DIALECT-DEPENDENT, and one column proved it the first time this
+    # dialect was ever executed against a real Postgres:
+    #
+    #     DatatypeMismatch: column "unlimited" is of type boolean but default expression
+    #     is of type integer
+    #
+    # `Column("unlimited", "INTEGER", "BOOLEAN", default="0")` is correct for sqlite,
+    # which has no boolean type and stores 0/1, and REJECTED by Postgres, which will not
+    # coerce an integer literal into a boolean column. The class carried per-dialect
+    # TYPES and a single shared DEFAULT, so it could not express a value that differs —
+    # and the mismatch was invisible for as long as nobody ran the Postgres half.
+    #
+    # `postgres_default` overrides `default` for that dialect only. Absent, `default` is
+    # used for both, which is right for every other column in this schema.
+    postgres_default: str | None = None
     references: str | None = None  # "table(column)"
 
     def render(self, dialect: str) -> str:
@@ -83,8 +133,11 @@ class Column:
             parts.append("NOT NULL")
         if self.unique and not self.primary_key:
             parts.append("UNIQUE")
-        if self.default is not None:
-            parts.append(f"DEFAULT {self.default}")
+        default = self.default
+        if dialect == POSTGRES and self.postgres_default is not None:
+            default = self.postgres_default
+        if default is not None:
+            parts.append(f"DEFAULT {default}")
         if self.references is not None:
             parts.append(f"REFERENCES {self.references}")
         return " ".join(parts)
@@ -339,7 +392,7 @@ BUDGET = Table(
         # meaning unlimited -- makes "nobody has configured this yet" and "this tenant
         # may spend without bound" the same value. `budgets.check` refuses a tenant with
         # no row at all, so a missing budget is a refusal rather than a blank cheque.
-        Column("unlimited", "INTEGER", "BOOLEAN", default="0"),
+        Column("unlimited", "INTEGER", "BOOLEAN", default="0", postgres_default="FALSE"),
         Column("updated_at", "TEXT", "TIMESTAMPTZ"),
     ),
     tenant_column="tenant_id",

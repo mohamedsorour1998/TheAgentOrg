@@ -430,3 +430,121 @@ def test_the_ledger_is_not_in_the_set_of_tenant_tables():
     exception hides.
     """
     assert migrations.LEDGER_TABLE not in schema.TABLES_BY_NAME
+
+
+# ── THE POSTGRES DIALECT, EXECUTED — added by the integrator on 2026-08-28 ────
+#
+# Lane B wrote the Postgres DDL and could only assert it structurally, because no Postgres
+# existed on any machine that ran this suite. It was executed for the first time against a
+# real PostgreSQL 16.15 and FAILED ON ITS FIRST STATEMENT SET:
+#
+#     DatatypeMismatch: column "unlimited" is of type boolean but default expression is
+#     of type integer
+#
+# `Column("unlimited", "INTEGER", "BOOLEAN", default="0")` is correct for sqlite, which has
+# no boolean type and stores 0/1, and rejected by Postgres, which will not coerce. The
+# class carried per-dialect TYPES and one shared DEFAULT, so it could not express a value
+# that differs between them -- and every structural test passed for as long as nobody ran
+# the Postgres half.
+#
+# These tests do not need a database. They read the rendered DDL, which is what the earlier
+# tests could not do only because nobody thought to compare a default against its own
+# column type.
+
+def test_no_boolean_column_carries_a_numeric_default_in_the_postgres_ddl():
+    """A BOOLEAN column with a `0` default is refused by Postgres at CREATE TABLE.
+
+    Asserted over the rendered DDL rather than over the Column objects, because the
+    rendering is where the two halves meet: a column may legitimately hold `default="0"`
+    for sqlite as long as `postgres_default` overrides it here.
+    """
+    import re
+
+    ddl = schema.render_schema(schema.POSTGRES)
+    offenders = [
+        line.strip() for line in ddl.splitlines()
+        if re.search(r"\bBOOLEAN\b", line) and re.search(r"DEFAULT\s+-?\d+\b", line)
+    ]
+
+    assert not offenders, (
+        f"the Postgres DDL declares a BOOLEAN column with a numeric DEFAULT: {offenders}. "
+        f"Postgres refuses this at CREATE TABLE with DatatypeMismatch -- it will not "
+        f"coerce an integer literal into a boolean column. Use `postgres_default=\"FALSE\"`."
+    )
+
+
+def test_the_sqlite_ddl_still_uses_a_numeric_default_for_that_column():
+    """The other half. Without this, the fix could be 'use TRUE/FALSE everywhere'.
+
+    SQLite has no boolean type: it stores 0/1, and `DEFAULT FALSE` there is a bareword
+    that sqlite accepts and then treats as a string. So the two dialects genuinely need
+    different literals, which is the whole reason `postgres_default` exists rather than
+    the default simply being changed.
+    """
+    import re
+
+    ddl = schema.render_schema(schema.SQLITE)
+    unlimited = [line for line in ddl.splitlines() if '"unlimited"' in line]
+
+    assert unlimited, "no `unlimited` column in the sqlite DDL; this test would pin nothing"
+    assert re.search(r"DEFAULT\s+0\b", unlimited[0]), (
+        f"the sqlite DDL no longer defaults `unlimited` to 0: {unlimited[0].strip()!r}. "
+        f"SQLite has no boolean type, so a TRUE/FALSE bareword is stored as text."
+    )
+
+
+def test_a_dialect_specific_default_only_affects_that_dialect():
+    """`postgres_default` must not leak into the sqlite rendering, or the fix is a swap.
+
+    Exercised on a synthetic column rather than on the schema, so it keeps testing the
+    mechanism after `unlimited` is the only real user of it -- or stops being one.
+    """
+    column = schema.Column("flag", "INTEGER", "BOOLEAN", default="0",
+                           postgres_default="FALSE")
+
+    assert "DEFAULT 0" in column.render(schema.SQLITE)
+    assert "DEFAULT FALSE" in column.render(schema.POSTGRES)
+    assert "DEFAULT FALSE" not in column.render(schema.SQLITE), (
+        "the Postgres default leaked into the sqlite rendering"
+    )
+
+
+def test_force_row_level_security_is_emitted_AND_the_superuser_caveat_is_recorded():
+    """FORCE RLS fixes ONE of the three ways Postgres skips a policy. Measured.
+
+    Postgres skips row-level security for a superuser, for any role with BYPASSRLS, and
+    for the table's OWNER. `FORCE ROW LEVEL SECURITY` addresses only the third.
+
+    MEASURED against a real PostgreSQL 16.15, same database and the same six policies,
+    two different connections:
+
+        as the superuser owning the tables   attacker saw BOTH tenants' runs, unscoped
+                                             read returned 2 rows
+        as a plain LOGIN role                attacker saw only its own, unscoped read
+                                             returned 0 rows
+
+    So the isolation guarantee is a property of the CONNECTION, not of this schema. A DSN
+    pointing at a superuser turns every policy into decoration while `pg_policies` still
+    lists all six -- a check present, enumerable, and enforcing nothing.
+
+    This test cannot verify the connection (there is no database in the suite). It pins
+    that the DDL does its half and that the caveat is written down where somebody
+    configuring a DSN will find it.
+    """
+    import pathlib
+
+    ddl = schema.render_schema(schema.POSTGRES)
+    assert schema.SCOPED_TABLES, "SCOPED_TABLES is empty; this test would pin nothing"
+
+    for table in schema.SCOPED_TABLES:
+        assert f'ALTER TABLE "{table.name}" FORCE ROW LEVEL SECURITY;' in ddl, (
+            f"{table.name} enables RLS without FORCE, so the table's owner -- which is "
+            f"whatever role ran the migration -- bypasses every policy on it"
+        )
+
+    source = pathlib.Path(schema.__file__).read_text(encoding="utf-8")
+    assert "superuser" in source.lower(), (
+        "schema.py does not mention that a superuser bypasses RLS regardless of FORCE. "
+        "That is the one deployment mistake which leaves all six policies listed in "
+        "pg_policies and none of them enforcing anything."
+    )
