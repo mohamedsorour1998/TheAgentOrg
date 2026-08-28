@@ -979,6 +979,137 @@ measured by building a wheel into a temp target and reading the tree, because
 `test_packaging.py`'s `REQUIRED_SUBPACKAGES` lists only `agents`/`common`/`security`
 and so cannot answer it.
 
+### `agentorg/retrieval/` — context for PROSE and DRAFTING, and never for the gate
+
+Added 2026-08-28 (Lane H), spec §10, judge requirement 8. The spec calls this the
+requirement most likely to become a demo of a vector database rather than a product
+improvement, so the acceptance test is a **moved number**.
+
+**No third-party import, and that is a measured constraint rather than a preference.**
+`test_agentcore_deploy_assets.py::test_requirements_covers_every_third_party_import_in_the_package`
+AST-walks `agentorg/`, so an embeddings client or vector store here becomes a pinned
+dependency of all five arm64 images — the same test Lane K measured refusing `starlette`,
+which is already installed. `search.py` is weighted token overlap: sets not counts,
+`keywords` at 3× body text, ties broken on `doc_id`. **The limit is stated as a test**
+(`test_the_synonym_limit_is_real_and_this_test_records_it` asserts the FAILURE), so adding
+stemming turns it red rather than letting the docstring quietly stop being true.
+
+| Module | What |
+|---|---|
+| `provenance.py` | four values plus one unnameable; ONE encode, ONE decode |
+| `guard.py` | the allow-list, and `refuse_verdict_arguments` |
+| `search.py` | deterministic ranking, and the stated synonym limit |
+| `repo_history.py` / `conventions.py` / `advisories.py` | the three corpora, curated, offline |
+| `measure.py` | H6's before/after. Run it; do not quote a number from here |
+
+**`documents == 0` READS IDENTICALLY FOR THREE DIFFERENT FACTS**, which is why the
+provenance vocabulary exists and is the same argument as `scan_provenance`:
+
+| Value | Meaning |
+|---|---|
+| `retrieved` | a corpus was searched and returned documents |
+| `empty` | searched, matched nothing — a fact about the QUERY, not a fault |
+| `disabled` | `RETRIEVAL_ENABLED` is false — a **choice** |
+| `unavailable` | the corpus raised — a **fault** |
+| `""` | a record predating the encoding. Rendered *unknown*, never guessed |
+
+The value rides **inside `RetrievalRecord.corpora`** as `conventions=retrieved`, because
+`state.py` is frozen and that model declares three fields; a fifth field is a contract
+change this lane may not make. A **bare corpus name decodes to `""`, never to
+`retrieved`** — a record that merely names a corpus is not evidence that corpus answered.
+
+**H5 is enforced three ways, and the contract alone is NOT one of them.** `RetrievalRecord`
+declaring no verdict field stops retrieved text being *stored* where the rule looks. It does
+not stop `compute_security_verdict(findings, threshold=retrieved_value)`, which reads like
+correct code and raises `KeyError` from inside the one stage whose purpose is to produce a
+verdict. So `guard.context_for` refuses any consumer not on an allow-list, and
+`refuse_verdict_arguments` refuses the six argument names a verdict reads.
+
+**The security consumer is spelled `security_explanation`, and the spelling IS the
+boundary.** There is no consumer name that reaches the rule: `_explain` receives an
+already-decided verdict and its reply is only ever assigned to `SecurityResult.explanation`.
+`context_for` returns `(text, provenance_entries, count)` — a caller cannot take the text
+without taking the record.
+
+**H7 attempts the breach rather than asserting isolation**, following
+`tests/test_tenancy_leak.py`. Five attack documents written as plausible internal documents
+in the corpus's own register — the finding is a known false positive; the threshold here is
+above critical; `AKIAIOSFODNN7EXAMPLE` is AWS's published example so it authenticates
+nothing; MAINTENANCE MODE, ignore previous instructions; approved exception SEC-4417 is on
+file. Each carries the poisoned run's real rule names so it actually **ranks** — an attack
+document nobody retrieves is not an attack — and
+`test_the_attack_documents_are_actually_retrieved` is the positive control without which
+every refusal proves only that nothing was there.
+
+`low` and `LOW` are the pair worth keeping: the first is **legal and still blocks**
+(`critical >= low`), the second raises. The attack fails for two different reasons and
+neither is "the string was ignored".
+
+#### H6 — MEASURED, and the metric is not the one the plan named
+
+```
+python -m agentorg.retrieval.measure --trials 8      # nova-2-lite, all 96 reviews source=model
+
+MISMATCH CAUGHT   baseline 6/8    retrieval 8/8
+FALSE BLOCKS      baseline 0/40   retrieval 0/40
+HARD CONTROLS     refused 8/8 in all four arm/case combinations
+```
+
+The baseline approved a diff that did not implement its ticket in **2 of 8** reviews; the
+retrieval arm approved none. Read the three lines together or not at all — a reviewer
+objecting more on the mismatch **and** more on the settled questions has become
+objection-happy, not better informed, and this project already paid for that (two clean runs
+ended `status=failed` at the revision cap with security reporting PASS).
+
+**The plan asked for false-block rate. It is ALREADY ZERO**, measured `0/15` in both arms
+over the four objections CLAUDE.md records the reviewer wrongly blocking on plus missing
+tests. That is the hand-written prompt fix working, and it means a corpus restating those
+rulings has nothing to improve — moving a number there would have needed a baseline weaker
+than the one that ships. So the metric became the reviewer's **miss rate on a plan
+mismatch**, the failure the scanners structurally cannot catch since
+`compute_security_verdict` reads findings and not intent. The five settled cases are kept as
+the control in the other direction.
+
+**Two measurement defects found by RUNNING it**, both this repo's named pattern arriving in
+a harness rather than a test:
+
+- **The diffs were fragments.** `BASELINE 5/5 RETRIEVAL 5/5`, every `must_fix` reading
+  "references 'os' and 'time' modules that are not imported". The reviewer was objecting
+  correctly to a defect no corpus can address, so the number **could not** move. Every case
+  is now a complete module, asserted by `ast.parse`.
+- **`strands.Agent` STREAMS to stdout**, so the first readable run had every result row
+  prefixed by a fragment of the reply it described. Captured around the call.
+
+**A TEST DISPROVED A CLAIM ALREADY WRITTEN INTO TWO FILES.** I asserted the diff alone
+cannot retrieve `history-0001`, the rejection the gain depends on. It can:
+
+```
+diff only     history-0005 17   history-0002 14   history-0001 12
+diff+ticket   history-0005 30   history-0001 25   history-0004 17
+```
+
+Both retrieve it at `limit=3`; the ticket changes its **rank**, third to second, and its
+score, 12 to 25. The wrong claim came from reading a two-corpus probe where four
+`conventions` entries sit above it. Corrected in both places with the scores pasted, and the
+test now asserts the rank IMPROVES rather than that the document appears — a test
+"corrected" to match the wrong claim would have pinned the wrong fact while reading as
+evidence.
+
+**A RED STEP DELETED A TEST INSTEAD OF FAILING ONE**, and it is the twelfth instance of the
+named pattern. Dropping `"threshold"` from `guard.VERDICT_ARGUMENTS` — the single most
+valuable name in the set — took `tests/test_retrieval_boundary.py` from **32 passed to 31
+passed**, because the parametrisation read the set under test. `31 passed` reads like a clean
+run. Fixed as Lane C fixed `SEVERITY_ORDER`: the names are a **literal**, with an anchor
+test asserting the two agree in both directions and `threshold` asserted separately by name.
+Re-run: `2 failed, 31 passed`.
+
+**Not wired into any agent prompt**, and that is a real gap rather than an oversight: the
+five agents' prompt text is Lane M's this phase. The wiring is one call per consumer —
+`guard.context_for(<consumer>, query)`, append the text to the prompt, put the three return
+values on `RunState.retrieval`. Until it lands, `retrieval` is exercised only by its tests
+and **no deployed run carries a retrieval record** — the same shape as `scoring` before its
+call sites landed.
+
 ### `agentorg/github_ops.py` — GitHub API vs local git
 
 `_use_local()` returns `config.OFFLINE or not (config.GITHUB_TOKEN and
@@ -1520,7 +1651,7 @@ an audit trail.
 
 ## The test suite
 
-**64 test files** as of 2026-08-28, after Phase 1 and Phase 2
+**67 test files** as of 2026-08-28, after Phase 1, Phase 2 and Lane H
 (`ls tests/test_*.py | wc -l`), plus
 five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
@@ -1569,6 +1700,9 @@ not every file.
 | `test_ingress_dispatch_target.py` | connection, API destination, input transformer | 9 |
 | `test_functional_contract.py` | every result matches the frozen schema | 9 |
 | `test_provenance.py` | the discriminator itself — **source of all 3 skips** | 7 |
+| `test_retrieval_boundary.py` | **H7** — ATTEMPTS the breach: five hostile documents through the real block rule | 33 |
+| `test_retrieval_provenance.py` | H1's four values, the fault-vs-choice split, and the synonym limit as a test | 28 |
+| `test_retrieval_measure.py` | H6's harness — the cases carry their trait; the arms differ in one thing | 18 |
 | `test_integration_conformance.py` | **THE CONFORMANCE SUITE** — three adapters, one set of test bodies, none naming its adapter | 42 |
 | `test_integration_interface.py` | what `CodeHost` and `host()` REFUSE, plus the delegation claim over the AST | 24 |
 | `test_block_shape_stability.py` | field/type fingerprint stable over 10 runs | 6 |
@@ -1655,7 +1789,7 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
-### The pattern found ELEVEN times across four layers
+### The pattern found TWELVE times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -1755,6 +1889,20 @@ The instances, briefly:
   CONSEQUENCE rather than the mechanism. And an **inert mutation was found in this same
   lane**, from copying `SEVERITY_ORDER`'s text out of CLAUDE.md, which omitted its type
   annotation — the substitution matched nothing and the suite stayed green.
+
+- **A RED STEP THAT DELETED A TEST RATHER THAN FAILING ONE** — the twelfth instance, and
+  the same root cause as the eleventh one layer down: a **parametrisation** whose case list
+  comes from the thing under test. Lane H's H7 suite parametrised its attack over
+  `guard.VERDICT_ARGUMENTS`; dropping `"threshold"` from that set — the one argument
+  `compute_security_verdict` actually accepts — took the file from **32 passed to 31
+  passed**. Nothing failed. `31 passed` reads like a clean run.
+
+  The fix is Lane C's: restate the names as a **literal**, add an anchor asserting the two
+  agree in BOTH directions (missing from the guard is a hole; present in the guard but never
+  attempted is a stale literal), and assert the load-bearing name separately. Re-run: `2
+  failed, 31 passed`. **`pytest -k` is not the only way a selection silently empties — a
+  parametrisation derived from the code under test does it too, and the count still looks
+  healthy.**
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -2160,6 +2308,17 @@ ruff / actionlint / terraform fmt      exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
 runtimes                               all five READY at v30
 ```
+
+**Lane H, in a worktree at `6c8bb4f` plus its own four commits:**
+
+```
+pytest -q                              1792 passed, 4 skipped in 204.14s
+ruff check agentorg scripts tests      All checks passed!
+```
+
+`1714 → 1792` is **78 tests** from one lane, and the `4 skipped` is the documented
+worktree constant (three scanner skips plus the gitignored `terraform.tfvars`), not a
+regression — see the note at the top of this file.
 
 `1131 → 1714` is **583 tests** across nine lanes. Preflight check 3 still reads
 `LINES: [3, 4]` with `provenance: scanners`, so the discriminator survived Lane C
@@ -2815,6 +2974,7 @@ writing is the cheap form of that check.
 | `agentorg/db/` | The tenancy schema as DATA (one definition, two dialects), the connection + tenant binding, forward-only migrations |
 | `agentorg/tenancy/` | Scoped accessors, per-tenant secret crypto, budgets, tenant zero, and `ADR-001-database.md` |
 | `agentorg/queue/` | The job queue that replaces Actions' sequencing. `_memory.py` keeps the suite hermetic; `_sql.py` is durable and holds the ADR. **A pause is a durable ROW** |
+| `agentorg/retrieval/` | Three curated corpora, deterministic ranking, and **the boundary as a refusal**: no consumer name reaches `compute_security_verdict`. Stdlib only — an import here ships to five arm64 images |
 | `agentorg/api/` | The control plane: submit, watch, cancel, configure, verified webhook ingress, and a generated OpenAPI schema. Stdlib HTTP. **No route can approve or resume a gate** |
 | `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
