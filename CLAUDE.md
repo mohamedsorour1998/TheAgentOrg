@@ -69,6 +69,41 @@ machine means the skips are broken.
 
 Anything that looks like a crash on a projector outranks polish.
 
+### One test failed in every worktree and nowhere else — FIXED in `cf5cb83`
+
+Recorded because **three lanes each spent time on it as their own regression, and I
+told all three they were wrong before measuring**. The lesson is about how it was
+misdiagnosed, not about the fix, which is one line.
+
+`test_the_stage_records_the_trigger_onto_the_run_state` passed in the shared checkout
+and failed in **every linked worktree, at any commit** — including a pristine one at
+`9b2b1ee` with no lane's code in it. It runs `scripts/run_stage.py` as a **subprocess**,
+so `sys.path[0]` is `scripts/` and the worktree root never reaches `sys.path`. The
+editable install's finder then resolves `agentorg` to the **shared checkout**:
+
+```
+MAPPING = {'agentorg': '/Users/sorour/sorour/TheAgentOrg/agentorg'}
+```
+
+`gates._STATE_DIR` derives from `__file__`, so the stage wrote the shared checkout's
+`runs/` while the test globbed the worktree's. Fixed by putting `PYTHONPATH=REPO_ROOT`
+in the subprocess env; verified **`21 passed`** in a pristine worktree that failed
+before it. **Nothing in the product was wrong** — both halves behaved exactly as
+documented.
+
+Three things worth keeping:
+
+- **`RUNS_DIR`, which that test sets, is read by NOTHING.** `grep -rn RUNS_DIR
+  agentorg/ scripts/` is empty. Believing it redirected state is what made the failure
+  look inexplicable, and it is why the first three diagnoses were wrong. The comment at
+  the call site now says so.
+- **`-k` WITH A MISSPELLED NAME EXITS 0.** Measured: `pytest -k triger` (one `g`)
+  reports `1172 deselected` and exits **0** — indistinguishable from a clean run. That
+  is how a lane "verified" a fix that had not run. Assert the selection is non-empty, or
+  read the collected count.
+- **A failure reproducing in every worktree and never on `main` is environmental**, and
+  the discriminator is a **pristine worktree at the same commit** — not a stash, which
+  leaves the editable install pointing the same wrong way.
 
 ---
 
