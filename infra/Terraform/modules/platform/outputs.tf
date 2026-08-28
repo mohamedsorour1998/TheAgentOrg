@@ -37,7 +37,7 @@ output "worker_log_group" {
 # the absence of an ARN. `scripts/preflight.py` check 6 reads the live account and
 # says the same thing from the other direction.
 output "worker_runtime_enabled" {
-  description = "Whether the ECS cluster, task definition and service were created. FALSE by default: those resources spend continuously and the Postgres queue dialect they run has a measured DatatypeMismatch on every enqueue. A green apply with this false has created a registry and two roles, nothing more -- and cannot be told from a real deployment by the apply's exit code."
+  description = "Whether the ECS cluster, task definition and service were created. FALSE by default: those resources are the project's first hourly charges, and the DSN's database role decides whether RLS binds (as the table OWNER a policy admits every row with no tenant bound). A green apply with this false has created a registry and two roles, nothing more -- and cannot be told from a real deployment by the apply's exit code."
   value       = var.runtime_enabled
 }
 

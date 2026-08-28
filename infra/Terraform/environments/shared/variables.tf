@@ -13,7 +13,7 @@ variable "image_retention_count" {
 ################################################################################
 
 variable "platform_runtime_enabled" {
-  description = "Create the ECS cluster, worker task definition and service. False by default: they spend continuously, and agentorg/queue/_sql.py's Postgres dialect has a measured DatatypeMismatch on every enqueue."
+  description = "Create the ECS cluster, worker task definition and service. False by default: they are the project's first hourly charges, and the DSN's database role decides whether tenant isolation binds -- as the table OWNER an RLS policy admits every row with no tenant bound, as a plain role none. Verify with scripts/preflight.py check 6."
   type        = bool
   default     = false
 }

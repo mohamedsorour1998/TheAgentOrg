@@ -23,20 +23,53 @@ variable "image_retention_count" {
 #
 # The ingress gate exists because an API_KEY connection needs a secret's VALUE at
 # PLAN time, and an ungated read of a secret nobody has written fails the plan.
-# This gate exists because the resources behind it SPEND CONTINUOUSLY and the code
-# they would run has a MEASURED defect.
+# This gate exists because the resources behind it SPEND CONTINUOUSLY and because
+# one input to them is a correctness decision nobody has made yet.
 #
-# THE DEFECT, measured 2026-08-28 against a real PostgreSQL 16.15 -- the first time
-# this repository's Postgres dialect has ever been executed:
+# THE ORIGINAL REASON IS GONE, AND RECORDING THAT MATTERS MORE THAN THE GATE.
+# This variable was first written because the Postgres queue dialect had never been
+# executed and, on its first execution, refused its own INSERT:
 #
 #   psycopg.errors.DatatypeMismatch: column "poisoned" is of type integer but
-#   expression is of type boolean
-#   HINT:  You will need to rewrite or cast the expression.
+#   expression is of type boolean          -- agentorg/queue/_sql.py:369
 #
-# raised from `agentorg/queue/_sql.py:369`, on the FIRST `enqueue`. So a worker
-# service started against a Postgres queue today reaches READY, reports healthy,
-# polls, and fails on every job. `agentorg/queue/` is Lane A's file and this lane
-# does not edit it; the gate is what keeps that fact from becoming a running bill.
+# FIXED on `main` at 471fc31 / 69ab1d3 (`_SCHEMA` is now a per-dialect template).
+# RE-MEASURED INDEPENDENTLY 2026-08-28 against PostgreSQL 16.15, after rebasing --
+# enqueue, claim, a refused second claim, pause at a gate, resume, complete, with
+# `poisoned` surviving as a real `bool`:
+#
+#   dialect = postgres
+#   enqueue      -> plan ready poisoned = True
+#   claim        -> plan claimed worker-a poisoned = True
+#   second claim -> None (two workers cannot hold one)
+#   pause        -> paused gate1
+#   resume       -> plan ready decided_by = a-real-person
+#   complete     -> done
+#
+# So THE QUEUE PATH THESE RESOURCES WOULD RUN NOW WORKS. Two reasons to keep the
+# gate off by default remain, and neither is that.
+#
+# REASON 1: THE DSN'S DATABASE ROLE IS THE ENTIRE TENANT-ISOLATION GUARANTEE, and
+# nothing in this module can check it. MEASURED 2026-08-28 on a real Postgres,
+# two roles against one table with one RLS policy:
+#
+#   as the TABLE OWNER, no tenant bound       2 of 2 rows visible
+#   as a plain application role, unbound      0 rows
+#   as a plain application role, tenant=t1    1 row
+#
+# Postgres skips row-level security for a superuser, for any role holding
+# BYPASSRLS, and for the TABLE OWNER. `FORCE ROW LEVEL SECURITY` fixes only the
+# third. So a DSN naming the owning role turns every policy into decoration while
+# `pg_policies` still lists each one -- a cross-tenant read returning rows, with
+# the schema looking correct. That is a WORSE outcome than no deployment, and the
+# fix is an operator action (provision a non-owning role) that a Terraform variable
+# cannot verify. `scripts/preflight.py` check 6 is what checks it, from the DSN.
+#
+# REASON 2: THE RESOURCES BILL BY THE HOUR. Every other resource in this repository
+# is per-invocation -- Lambda at reserved concurrency 2, DynamoDB PAY_PER_REQUEST,
+# five AgentCore runtimes that cost nothing idle. A Fargate task and the database it
+# needs are the project's first standing charges, and `worker_hourly_usd_estimate`
+# states the figure in the plan output rather than leaving it to a bill.
 #
 # WHY A COUNT GATE AND NOT SIMPLY OMITTING THE RESOURCES. Infrastructure that does
 # not exist in code cannot be reviewed, planned, or costed, and the next person
@@ -44,7 +77,7 @@ variable "image_retention_count" {
 # artifact that says exactly what an apply would create -- which is what the task
 # asks this lane to be able to state.
 variable "runtime_enabled" {
-  description = "Create the ECS cluster, the worker task definition and its service. FALSE by default: these resources spend continuously, and the Postgres queue dialect they would run has a measured DatatypeMismatch on every enqueue (agentorg/queue/_sql.py:369). Turn on only after that is fixed and a worker has been observed claiming a job."
+  description = "Create the ECS cluster, the worker task definition and its service. FALSE by default for two measured reasons: these resources are the project's first hourly charges, and the DSN's database role decides whether RLS binds at all -- as the table OWNER a policy admits 2 of 2 rows with no tenant bound, as a plain role 0. The queue's Postgres dialect itself now works (verified 2026-08-28 against PostgreSQL 16.15); that is no longer a reason to leave this off."
   type        = bool
   default     = false
 }

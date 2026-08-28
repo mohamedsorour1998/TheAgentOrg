@@ -3,8 +3,10 @@
 # Everything in this file is `count = var.runtime_enabled ? 1 : 0`, so the default
 # plan creates a registry, a log group and two roles and nothing that bills by the
 # hour. The gate's full reasoning is on `runtime_enabled`; the short version is that
-# the Postgres queue dialect these resources would run has a DatatypeMismatch on
-# every enqueue, measured 2026-08-28 against a real PostgreSQL 16.15.
+# these are the project's first HOURLY charges, and that the DSN's database role --
+# which nothing here can inspect -- decides whether tenant isolation binds at all.
+# Measured on a real Postgres: as the table OWNER an RLS policy admits 2 of 2 rows
+# with no tenant bound; as a plain application role, 0.
 
 # ── THE PRECONDITIONS. Three inputs whose absence would deploy something worse ──
 #
@@ -214,9 +216,10 @@ resource "aws_ecs_service" "worker" {
   }
 
   # NO `deployment_circuit_breaker` WITH ROLLBACK, DELIBERATELY. A worker that
-  # crash-loops on a real defect -- the DatatypeMismatch above is exactly one --
-  # would be rolled back to the previous task definition, and the deployment would
-  # report success for the version it did not run. That is the shape this repository
+  # crash-loops on a real defect -- and this repository has already produced one that
+  # fired on the FIRST enqueue against Postgres -- would be rolled back to the
+  # previous task definition, and the deployment would report success for the version
+  # it did not run. That is the shape this repository
   # refuses everywhere else: a check that cannot distinguish "did not run" from
   # "passed". A failing worker should stay failing and visible in its log group.
 

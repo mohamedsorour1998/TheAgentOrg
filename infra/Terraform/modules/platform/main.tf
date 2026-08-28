@@ -9,42 +9,62 @@
 # omission is a decision rather than an unfinished edge.
 #
 # The worker needs a durable Postgres for `QUEUE_BACKEND=postgres`. An RDS instance
-# here would be the obvious answer and would be wrong today, for three measured
-# reasons:
+# here would be the obvious answer and is refused today for three reasons -- and the
+# first one is not the one this file originally gave.
 #
-#   1. THE CODE THAT WOULD USE IT DOES NOT WORK YET. Measured 2026-08-28 against a
-#      real PostgreSQL 16.15 -- the first execution of this repository's Postgres
-#      dialect, ever:
+#   1. THE DSN'S DATABASE ROLE IS THE WHOLE TENANT-ISOLATION GUARANTEE, and creating
+#      the instance is the easy half of that. MEASURED 2026-08-28 on a real
+#      PostgreSQL 16.15, two roles against one table carrying one RLS policy:
 #
-#        psycopg.errors.DatatypeMismatch: column "poisoned" is of type integer but
-#        expression is of type boolean
+#        as the TABLE OWNER, no tenant bound      2 of 2 rows visible
+#        as a plain application role, unbound     0 rows
+#        as a plain application role, tenant=t1   1 row
 #
-#      from `agentorg/queue/_sql.py:369`, on the FIRST `enqueue`. Creating a database
-#      for code that cannot write to it is a bill with no capability attached.
+#      Postgres skips row-level security for a superuser, for any role with
+#      BYPASSRLS, and for the TABLE OWNER; `FORCE ROW LEVEL SECURITY` covers only
+#      the third. So the single choice of which role the DSN names decides whether
+#      six policies enforce anything or are decoration -- and `pg_policies` lists
+#      every one either way.
 #
-#   2. IT IS THE MOST EXPENSIVE THING IN THE DESIGN AND IT NEVER STOPS. Read from
-#      the AWS Pricing API on 2026-08-28, not recalled:
+#      An `aws_db_instance` here would create a master user that OWNS everything it
+#      migrates, which is exactly the wrong role for the worker to connect as. Doing
+#      this properly means: instance, master user, a migration run as the owner, a
+#      separate non-owning application role, GRANTs, and a DSN naming the second --
+#      a provisioning sequence, not a resource. Half-building it would ship the
+#      failing configuration with the reassuring shape.
+#
+#   2. IT IS THE FIRST STANDING CHARGE IN THE PROJECT. Read from the AWS Pricing API
+#      on 2026-08-28, not recalled:
 #
 #        db.t4g.micro PostgreSQL Single-AZ   $0.0160/hour   = ~$11.68/month
 #        gp3 storage                         $0.115/GB-month
 #
-#      Every other resource in this repository is per-invocation: Lambda at
-#      reserved concurrency 2, DynamoDB PAY_PER_REQUEST, five AgentCore runtimes
-#      that cost nothing idle. An RDS instance is the first standing charge, and it
-#      accrues whether or not a run ever happens.
+#      Every other resource here is per-invocation: Lambda at reserved concurrency 2,
+#      DynamoDB PAY_PER_REQUEST, five AgentCore runtimes that cost nothing idle.
 #
 #   3. WHO OWNS THE SCHEMA IS AN OPEN QUESTION IN THIS PHASE. Three consumers want
 #      one Postgres -- the queue (`_sql.py`'s `queue_jobs`), Lane B's tenancy schema,
 #      and Auth.js's session tables (`web/lib/auth.ts` refuses to start without
 #      `DATABASE_URL`). `infra/selfhost/docker-compose.yml` points all three at one
-#      database on purpose, and Lane B's own note says NOTHING IN THE SUITE CONNECTS
-#      TO POSTGRES. Choosing an instance size, a parameter group and a migration
-#      owner before any of that is exercised is choosing on no evidence.
+#      database on purpose. And the web app's tenant lookup is currently CIRCULAR
+#      under RLS: `membershipsFor` reads the RLS-scoped `membership` table to
+#      discover the tenant RLS needs bound, so `/api/session` answers
+#      `signed_in: true` with `tenant_id: null` and every authenticated route 401s.
+#      `web/lib/tenant.ts:126` records the fix -- a narrow unscoped path for the
+#      identity lookup only -- and names it as a change to THIS module's role model.
+#      Choosing an instance size before that role model exists is choosing early.
 #
-# So the DSN arrives as a secret ARN. A team that has an operational Postgres --
-# RDS, Aurora Serverless, or a container -- points this at it without this module
-# holding an opinion it cannot justify. The refusal when it is empty is the
-# important half: see the precondition below.
+# NOTE ON WHAT IS NO LONGER TRUE. This comment previously gave a fourth reason: that
+# the queue's Postgres dialect refused its own INSERT with a `DatatypeMismatch` on
+# `poisoned`. That was real, it was fixed on `main` (471fc31 / 69ab1d3), and it has
+# been re-measured independently here -- enqueue, claim, a refused second claim,
+# pause, resume and complete all pass with `poisoned` surviving as a real `bool`.
+# Recorded rather than deleted, because a stale justification for a gate is how a
+# gate outlives its reason and nobody can tell which reasons still hold.
+#
+# So the DSN arrives as a secret ARN. A team with an operational Postgres and a
+# non-owning application role points this at it. The refusal when it is empty is the
+# important half: see the precondition in ecs.tf.
 #
 # ── AND IT DOES NOT RUN THE API OR THE WEB APP ───────────────────────────────
 #

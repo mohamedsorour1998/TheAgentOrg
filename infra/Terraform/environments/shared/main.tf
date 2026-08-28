@@ -117,17 +117,24 @@ module "state" {
 #
 # The registry, the log group and two IAM roles are always created and cost
 # nothing. The ECS cluster, task definition and service are COUNT-GATED OFF --
-# `runtime_enabled` defaults false -- because they bill by the hour and because
-# the Postgres queue dialect they would run has a defect measured 2026-08-28
-# against a real PostgreSQL 16.15:
+# `runtime_enabled` defaults false -- for two reasons, both measured:
 #
-#   psycopg.errors.DatatypeMismatch: column "poisoned" is of type integer but
-#   expression is of type boolean          -- agentorg/queue/_sql.py:369
+#   * They are the project's FIRST HOURLY CHARGES. Everything else here is
+#     per-invocation (Lambda at reserved concurrency 2, DynamoDB PAY_PER_REQUEST,
+#     five AgentCore runtimes that cost nothing idle).
+#   * THE DSN'S DATABASE ROLE DECIDES WHETHER TENANT ISOLATION BINDS, and nothing
+#     in Terraform can inspect it. Measured 2026-08-28 on PostgreSQL 16.15, one
+#     table, one RLS policy, two roles:
 #
-# on the FIRST enqueue. So a worker service today would reach RUNNING, report
-# healthy, poll, and fail every job. The module's main.tf carries the full
-# reasoning, including why it creates no database and why the API and the web app
-# are deliberately absent.
+#       as the TABLE OWNER, no tenant bound      2 of 2 rows visible
+#       as a plain application role, unbound     0 rows
+#
+#     Postgres skips RLS for a superuser, for BYPASSRLS, and for the table owner.
+#     A DSN naming the owner makes every policy decoration while `pg_policies`
+#     still lists each one.
+#
+# The module's main.tf carries the full reasoning, including why it creates no
+# database and why the API and the web app are deliberately absent.
 #
 # `image_retention_count` comes from the same root variable the agentcore module
 # reads, so the two registries cannot drift to different retentions.
