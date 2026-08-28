@@ -116,7 +116,16 @@ ALL_WORKFLOWS = sorted(WORKFLOWS.glob("*.yml"))
 # per-stage jobs assume the role through OIDC exactly as deploy.yml does. Adding
 # the name here is this test's mechanism working, not a workaround for it -- the
 # registration IS the deliberate decision the docstring below asks for.
-AWS_WORKFLOW_NAMES = {"deploy.yml", "terraform.yml", "run-pipeline.yml"}
+# deploy-platform.yml joined the set 2026-08-28 (Lane N). It builds and pushes the
+# queue worker's arm64 image and can force a new deployment of its ECS service, so
+# its `build` and `redeploy` jobs assume the role through OIDC exactly as deploy.yml
+# does. THIS TEST CAUGHT IT ON THE FIRST FULL-SUITE RUN after the workflow was added,
+# which is the mechanism working: registering the name here is the deliberate
+# decision the docstring asks for, not a workaround. Its own blast radius is covered
+# by tests/test_platform_deploy.py.
+AWS_WORKFLOW_NAMES = {
+    "deploy.yml", "terraform.yml", "run-pipeline.yml", "deploy-platform.yml",
+}
 
 # Read from docs/plan/week1-verification-log.md:11-30. Never recalled, never
 # re-derived from live AWS state -- Task 6 is forbidden from calling AWS at all.
