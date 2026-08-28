@@ -104,6 +104,41 @@ export const READERS = path.join(
   "reader",
 );
 
+/**
+ * The reader scripts, named ONE BY ONE rather than built from a caller's string.
+ *
+ * =========================================================================
+ * A MEASURED BUILD DEFECT, not defensiveness. The first version spawned
+ * `path.join(READERS, `${moduleName}.py`)`, and `next build` reported:
+ *
+ *     Static analysis determined that this filesystem access causes the whole
+ *     project to be traced and included in the output. This is usually
+ *     unintentional and leads to all source files (including the public folder)
+ *     to be deployed as part of the server code.
+ * =========================================================================
+ *
+ * "The whole project" here is a repository whose `runs/` directory holds ~10k
+ * gitignored files that CLAUDE.md says never to list. Turbopack could not prove which
+ * file the template reached, so it conservatively traced everything into the server
+ * bundle — a deployment that succeeds, ships the entire repository, and slows or fails
+ * on a size limit. Exactly the shape this project is careful about: a build reporting
+ * success while doing something nobody asked for.
+ *
+ * A LITERAL MAP FIXES IT AND IS BETTER ANYWAY. `readPipeline` now takes a KEY, not a
+ * path fragment, so a caller cannot name a file — the union type makes a typo a
+ * compile error rather than a subprocess that fails at runtime, and no request value
+ * can influence which script runs. That was already true (every call site passes a
+ * literal) and is now enforced by the type system rather than by inspection.
+ */
+const READER_SCRIPTS = {
+  runs: "runs.py",
+  detail: "detail.py",
+  approve: "approve.py",
+  repositories: "repositories.py",
+} as const;
+
+export type ReaderName = keyof typeof READER_SCRIPTS;
+
 /** How long one read may take before it is abandoned, in milliseconds. */
 const TIMEOUT_MS = 20_000;
 
@@ -150,13 +185,39 @@ export class PipelineError extends Error {
  * lost time to it.
  */
 async function readPipeline<T>(
-  moduleName: string,
+  moduleName: ReaderName,
   request: Record<string, unknown>,
 ): Promise<T> {
   const body = JSON.stringify(request);
 
   return new Promise<T>((resolve, reject) => {
-    const child = spawn(PYTHON, [path.join(READERS, `${moduleName}.py`)], {
+    // ── `turbopackIgnore` — MEASURED, AND THE ALTERNATIVE IS WORSE ─────────────
+    //
+    // `next build` warns here, and the warning is correct about what it sees:
+    //
+    //     Static analysis determined that this filesystem access causes the whole
+    //     project to be traced and included in the output. This is usually
+    //     unintentional and leads to all source files (including the public folder)
+    //     to be deployed as part of the server code.
+    //
+    // "The whole project" is a repository whose `runs/` holds ~10k gitignored files
+    // CLAUDE.md says never to list, so tracing it into the server bundle is a
+    // deployment that succeeds and ships the entire repository. The paths are
+    // genuinely runtime values -- `REPO_ROOT` and `READERS` derive from
+    // `import.meta.url`, and `PYTHON` from the environment -- because the thing being
+    // launched is an EXTERNAL INTERPRETER, not a module Turbopack could bundle.
+    //
+    // Narrowing the filename to a literal map (above) did not silence it, measured:
+    // the warning is about the whole `spawn` call, not the argument. So the honest
+    // options were the documented opt-out or pretending the paths are static.
+    //
+    // WHAT THIS COSTS, STATED: the reader scripts and the Python interpreter are NOT
+    // bundled and must exist on the deployment host. That is already true -- this
+    // layer shells out to `.venv-main/bin/python` and reads `agentorg/`, neither of
+    // which a JavaScript bundler can carry -- so the ignore records a fact rather than
+    // creating one. `docker compose` mounts the repository, which is why the
+    // self-hosted stack is the deployment this is written for.
+    const child = spawn(/* turbopackIgnore: true */ PYTHON, [path.join(READERS, READER_SCRIPTS[moduleName])], {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
