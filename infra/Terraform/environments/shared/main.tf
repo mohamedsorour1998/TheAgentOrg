@@ -111,3 +111,43 @@ module "state" {
   runtime_role_arns = [module.agentcore.runtime_role_arn, data.aws_iam_role.github_actions.arn]
   tags              = local.tags
 }
+
+################################################################################
+# Platform: where the queue worker runs. LANE N.
+#
+# The registry, the log group and two IAM roles are always created and cost
+# nothing. The ECS cluster, task definition and service are COUNT-GATED OFF --
+# `runtime_enabled` defaults false -- because they bill by the hour and because
+# the Postgres queue dialect they would run has a defect measured 2026-08-28
+# against a real PostgreSQL 16.15:
+#
+#   psycopg.errors.DatatypeMismatch: column "poisoned" is of type integer but
+#   expression is of type boolean          -- agentorg/queue/_sql.py:369
+#
+# on the FIRST enqueue. So a worker service today would reach RUNNING, report
+# healthy, poll, and fail every job. The module's main.tf carries the full
+# reasoning, including why it creates no database and why the API and the web app
+# are deliberately absent.
+#
+# `image_retention_count` comes from the same root variable the agentcore module
+# reads, so the two registries cannot drift to different retentions.
+################################################################################
+module "platform" {
+  source = "../../modules/platform"
+
+  name                  = local.name
+  account_id            = local.account_id
+  image_retention_count = var.image_retention_count
+  tags                  = local.tags
+
+  # Off by default. Set through TF_VAR_platform_runtime_enabled in
+  # .github/workflows/terraform.yml -- NEVER in terraform.tfvars, which
+  # `.gitignore:14` ignores, so a value set there exists only on the laptop that
+  # wrote it while CI applies from a fresh checkout. That failure is measured: the
+  # ingress rule sat at zero targets while looking configured locally.
+  runtime_enabled      = var.platform_runtime_enabled
+  worker_image         = var.platform_worker_image
+  queue_dsn_secret_arn = var.platform_queue_dsn_secret_arn
+  subnet_ids           = var.platform_subnet_ids
+  vpc_id               = var.platform_vpc_id
+}
