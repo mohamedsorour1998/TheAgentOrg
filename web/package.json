@@ -1,0 +1,33 @@
+{
+  "name": "theagentorg-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Agent Org web application. Lane I owns app/api and lib; Lane J owns the routes and components.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@auth/pg-adapter": "1.11.3",
+    "next": "16.3.3",
+    "next-auth": "5.0.0-beta.32",
+    "pg": "8.23.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

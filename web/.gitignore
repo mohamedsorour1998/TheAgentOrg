@@ -1,0 +1,44 @@
+# Node
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Auth.js and database secrets. NEVER COMMITTED.
+#
+# `AUTH_SECRET`, `AUTH_GITHUB_ID` and `AUTH_GITHUB_SECRET` are real credentials:
+# the OAuth client secret can mint tokens against somebody's repositories, and
+# `AUTH_SECRET` signs the session cookies -- leaking it lets anyone forge a
+# session, which on this application means approving a security gate.
+#
+# The repository root's .gitignore already covers `.env`; these are the Next.js
+# variants it does not match.
+.env*.local
+.env.development
+.env.production
+
+# ── A NEGATION, AND IT IS LOAD-BEARING ───────────────────────────────────────
+#
+# The repository root's `.gitignore:27` holds a bare `runs/`, for the pipeline's run
+# logs and paused state (~10k gitignored files). A bare pattern with a trailing slash
+# matches a directory AT ANY DEPTH -- so it also swallowed `web/app/api/runs/`, which
+# is the run list and run detail endpoints.
+#
+# MEASURED, and this is why the negation is here rather than a rename: `git add -A web`
+# reported success and staged nothing for those two routes, and `git status` showed a
+# clean tree. `git check-ignore -v` named the cause:
+#
+#     .gitignore:27:runs/   web/app/api/runs/route.ts
+#     .gitignore:27:runs/   web/app/api/runs/[runId]/route.ts
+#
+# Two endpoints Lane J is building against would have been absent from the branch with
+# every gate green -- `tsc`, `eslint` and `vitest` all read the WORKING TREE, so none
+# of them can see a file that is not committed. That is this repository's signature
+# failure shape (every check reporting success while the thing did not happen) arriving
+# through a gitignore pattern.
+#
+# The alternative was renaming the route, which would change the public URL from
+# `/api/runs` to something else to work around a pattern meant for a different
+# directory. The URL is the contract Lane J imports; the ignore file is not.
+!app/api/runs/

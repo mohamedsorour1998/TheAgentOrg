@@ -60,6 +60,23 @@ actionlint .github/workflows/*.yml                            # exit 0
 cd infra/Terraform && terraform fmt -check -recursive          # exit 0
 ```
 
+**If you touched `web/`, there are FOUR MORE GATES and none of the four above sees
+them** — the Python suite does not compile TypeScript:
+
+```bash
+cd web
+npm run lint        # eslint, exit 0
+npm run typecheck   # tsc --noEmit, exit 0
+npm test            # vitest run
+npm run build       # next build — 0 warnings, and the ONLY gate that compiles the app
+```
+
+`npm run build` is not redundant with the other three. Measured 2026-08-28: `tsc`,
+`eslint` and `vitest` all read the WORKING TREE and none compiles the app, so a
+dynamic `spawn` path that made Turbopack trace the **whole repository** (including
+`runs/`, ~10k files) into the server bundle passed all three. The build is also the
+only gate that would notice a route file absent from the commit.
+
 **If you touched `scripts/make_deck.py`, also regenerate the deck** — none of the four
 gates opens it, so a broken slide passes all of them:
 
@@ -2988,6 +3005,140 @@ the error scrolled above it. Redone through a file whose script **asserts its ow
 substitution applied and re-reads the file to confirm**. `assert s.count(old) == 1` before
 writing is the cheap form of that check.
 
+### The web application (Lane I) — the first surface that can open a gate remotely
+
+`web/` is Next.js 16 / React 19 / Auth.js 5, and it is the surface that retires
+`agentorg/approve_server.py`. That module has **no authentication**, binds loopback
+only, and records `by="ui-reviewer"` for every decision "because with no
+authentication the server genuinely does not know who clicked". Lane K's control
+plane deliberately has **no approval route at all**. So `POST /api/approvals` is the
+first route in this repository that can open a gate over a network, and the whole
+design is that **every refusal it can express is worth more than a route that accepts
+and hopes**.
+
+**IT CALLS THE PYTHON MODULES AS A SUBPROCESS AND NOT LANE K'S HTTP API.** Three
+measured reasons: Lane K has no approval route (so it cannot serve this lane's central
+task at all), its key store is in-process module state so a Node process cannot
+provision into it, and every route there takes its tenant from a machine credential
+with an AST test forbidding a request-supplied one.
+
+**A NODE DATABASE CLIENT WOULD BE THE WORST OPTION AND IS AVAILABLE.** `node:sqlite`
+is in the stdlib here — measured, `DatabaseSync` exists — so reimplementing
+`WHERE tenant_id = ?` in TypeScript is genuinely possible. It must not be: the SQLite
+triggers compare against `current_tenant()`, an application-defined function only
+`db.engine.connect()` registers, so a Node connection fails every scoped WRITE loudly
+with "no such function" **while every scoped READ succeeds unscoped**. That asymmetry
+is how a leak ships green. Verified through the real reader against a two-tenant
+database: `victim sees ['run-victim-0002']`, `visible to tenant-zero ['run-mine-0001']`.
+
+The cost is stated rather than hidden: **~200ms per read** (measured, 0.183s to import
+the four packages), which is fine for a list and a detail screen and is not fine for a
+two-second poll — one more reason I4 is a stream.
+
+#### What refuses a wrong-tenant approval, in order
+
+`web/lib/authz.ts` is pure functions over already-measured facts, so a route
+physically cannot hand it a tenant it did not resolve server-side. Ten refusal codes,
+one entry point, one `return` per refusal — `_Refused`'s reason, which is exactly
+right: "the failure that loses a security gate is not the explicit reject; it is one
+branch out of several falling through to approval."
+
+1. `Origin` must be an **exact** configured origin. Not host-only:
+   `http://app.example` is refused where `https://app.example` is allowed, because a
+   host-only match accepts a downgrade an attacker chooses. Runs FIRST, so an
+   anonymous cross-site probe drives no database read — `infra/ingress/handler.py`'s
+   ordering.
+2. No session, or a session with no tenant → refused.
+3. `facts.tenantId !== session.tenantId` → refused, and **byte-identical to "no such
+   run"** (asserted with `toEqual`). A run id is an unguessable uuid, so 403 would
+   confirm somebody else's run exists; the HTTP layer answers **404** for both.
+4. The run's repository must be in the tenant's scope. An **empty scope is a refusal**,
+   not an exemption — Lane K's empty key store direction.
+
+`by` comes from the session and a test drives a hostile body carrying its own `by` to
+prove a client cannot reach the audit field.
+
+**THE `gates.resume` GAP IS CLOSED AT THE BOUNDARY, WITH TWO CHECKS WHERE
+`approve_server._apply` HAS ONE.** That divergence is deliberate. That function uses a
+single predicate and argues correctly that one is safer than several — but it reads
+**one** record, the log. This lane reads **two**, the queue's paused row and the run's
+state document, written by different code at different times, and they can disagree.
+Measured:
+
+```
+status=rejected + awaitingGates=['gate2']  -> run-already-ended
+status=running  + awaitingGates=[]         -> gate-not-awaiting
+```
+
+Checking only the queue row **permits the first**, which is precisely the gap where
+`gates.resume` appends an approval to a rejected run and `timeline.py` renders it
+after the rejection. All four terminal statuses are refused, not only `rejected` — a
+blocked run must not become approvable afterwards. Nothing is fixed in `gates.py`,
+for `tests/test_approve_server.py:266-289`'s reason.
+
+#### Four things measured rather than assumed
+
+- **ONE WRITE, TO THE QUEUE, AND `gates` IS NOT IMPORTED.**
+  `scripts/worker.py:approve` records why: its first version called `gates.resume` as
+  well and the state carried the decision TWICE, the second attributed to
+  `github-environment-reviewer` — one click rendering as two decisions on a timeline a
+  judge reads. Verified against a real paused row: `decided_by='a-real-person'`.
+- **`next build` TRACED THE WHOLE REPOSITORY into the server bundle**, and no other
+  gate can see it — `tsc`, `eslint` and `vitest` all read the working tree and none
+  compiles the app. `runs/` is ~10k files, so the deployment would have succeeded and
+  shipped everything. `npm run build` belongs in the gate list.
+- **`runs/` IN THE ROOT `.gitignore` SILENTLY SWALLOWED FOUR ROUTE FILES.** A bare
+  pattern with a trailing slash matches at any depth, so `web/app/api/runs/` was
+  ignored: `git add -A` reported success and staged nothing, `git status` showed clean.
+  Fixed with `!app/api/runs/` in `web/.gitignore`. This is a fourth instance of
+  "state on disk but not in the index", with a twist — the file was absent from the
+  COMMIT while present on disk, so it worked perfectly for me and for nobody else.
+- **A MATCHER THAT MATCHED THE WRONG DECLARATION.** `contract.test.ts` asked for
+  `RunState.status` and matched **`ci_status`** on `SREResult`, failing with
+  `expected [ 'blocked', 'failed', …(3) ] to deeply equal [ 'failing', 'passing',
+  'unknown' ]`. It failed loudly, which is the only reason it was caught — had
+  `ci_status` carried the same members it would have passed against the wrong field.
+  **A matcher that matches the wrong thing is worse than one that matches nothing:
+  nothing is detectable and wrong is not.**
+
+#### Known gaps, named rather than implied
+
+- **NO POSTGRES HAS EVER BEEN CONNECTED.** `agentorg/db/engine.py` is sqlite3-only,
+  Lane B's note says nothing in the suite connects to one, and `docker compose up` has
+  never run. **A sign-in flow that has never completed against a real Postgres is not
+  a working sign-in flow.** The Auth.js configuration typechecks and builds; that is a
+  different claim.
+- **`repo` OAuth SCOPE IS ALL-OR-NOTHING.** There is no per-repository OAuth scope, so
+  the in-scope list is enforced by this application and not by GitHub. Per-repository
+  grants need a GitHub App (installation tokens, a different authorisation model).
+- **REVOCATION DOES NOT REACH GITHUB.** `DELETE /api/link/github` deletes the token
+  row and every session row in one transaction — possible only because sessions are in
+  the DATABASE; on a JWT strategy it would delete a row nothing reads while the cookie
+  worked for thirty days. GitHub's own grant survives; calling
+  `DELETE /applications/{client_id}/grant` needs the **client secret** as basic auth,
+  and putting that in a browser-reachable path on the process that can approve a gate
+  is worse. The response says so.
+- **REPOSITORY SCOPE IS ADDITIVE.** `accessors` exposes `add_repository` and no
+  delete, and a deleted row would orphan the ownership record an approval reads. So a
+  repository cannot be disconnected through the API; narrowing needs a
+  `repository.in_scope` column or a delete accessor, both Lane B's file.
+- **THE SSE CURSOR IS `updated_at`, AND THERE IS NO BETTER OPTION.** No event table,
+  no sequence, no LISTEN/NOTIFY anywhere in `agentorg/` — `queue_jobs` is the only
+  table and `job_id` is an unordered uuid4. Three limits: `heartbeat` bumps
+  `updated_at` with no state change (handled by diffing the rendered fields, and a RED
+  step proved a naive key emits a frame per lease renewal), there is no index on it,
+  and deletes are invisible. A real event table with a sequence is the correct end
+  state and is new schema on Lane A's file.
+- **`SecurityResult.scoring` HAS NO PRODUCER YET**, so `/scoring` reads the field
+  correctly and answers empty. Lane C's own note says its two call sites belong to
+  other lanes.
+- **THE TENANT BOOTSTRAP IS THE ONE UNSCOPED QUERY, AND IT CANNOT BE SCOPED** — it is
+  what PRODUCES the scope, exactly as Lane K's `auth.resolve()` produces the
+  `Credential`. Keyed on the session's own verified login, returns only that person's
+  memberships, reads no run/secret/budget/repository, never writes. `ORDER BY` is
+  load-bearing: without it a person's tenant could change between requests. One tenant
+  per session today; a switcher is a further step.
+
 ---
 
 ## Where things live
@@ -3010,6 +3161,7 @@ writing is the cheap form of that check.
 | `agentorg/queue/` | The job queue that replaces Actions' sequencing. `_memory.py` keeps the suite hermetic; `_sql.py` is durable and holds the ADR. **A pause is a durable ROW** |
 | `agentorg/retrieval/` | Three curated corpora, deterministic ranking, and **the boundary as a refusal**: no consumer name reaches `compute_security_verdict`. Stdlib only — an import here ships to five arm64 images |
 | `agentorg/api/` | The control plane: submit, watch, cancel, configure, verified webhook ingress, and a generated OpenAPI schema. Stdlib HTTP. **No route can approve or resume a gate** |
+| `web/` | The Next.js application. **Lane I owns `web/app/api/**` + `web/lib/**`; Lane J owns `web/app/(routes)/**` + `web/components/**`.** `lib/contract.ts` + `lib/endpoints.ts` are the contract J imports; `lib/authz.ts` holds every approval refusal as pure functions; `lib/reader/*.py` are Python subprocesses so Lane B's accessors stay the ONLY tenant scoping. **`POST /api/approvals` is the first surface here that can open a gate over a network** |
 | `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
