@@ -256,7 +256,13 @@ container must see has to travel as a field: `poisoned` (the caller's choice),
 | `ScanProvenance` | `scanners`, `fixture-fallback`, `fixture-stub` |
 | `ScanProvenanceOrUnknown` | the above plus `""` — a row written before the field existed |
 
-`SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}`.
+`SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}`.
+
+**The `: dict[str, int]` annotation is quoted here deliberately.** An earlier version of
+this line omitted it, and a Lane C RED step built its mutation from this file's text: the
+substitution matched nothing, the suite stayed green at `25 passed`, and an inert
+mutation is indistinguishable from a caught one. **Copy source from the source, not from
+this file** — and assert your substitution applied before trusting the result.
 
 `LogEvent.action` also admits `"merged"`, which nothing in `agentorg/` ever
 writes — dead vocabulary, harmless, but check `timeline._MARK` before removing it.
@@ -304,6 +310,29 @@ Two properties to keep in mind:
   docstrings depend on that, and it is why a scanner failure must never become an
   empty list — that would send a poisoned change green with the whole suite
   staying green alongside it.
+
+- **DETERMINISM IS NOT ENOUGH, AND 24 OF 25 TESTS PROVED IT.** Measured 2026-08-28 by
+  Lane C: transposing two rows of `SEVERITY_ORDER` — `"high": 3, "critical": 2` — left
+  **24 of 25** determinism tests green and silently turned the 25th into a **SKIP**,
+  reported as `24 passed, 1 skipped`, which reads like a clean run. With that table, **a
+  committed credential stops blocking at the shipped threshold.**
+
+  The cause is structural and applies to any property test over a lookup table: every
+  property derived its expectation from **the same table the rule reads**, so the
+  mutation moved the rule and the expectation together and the lattice stayed
+  self-consistent — repeatable, order-independent, monotone, and wrong. Determinism is
+  satisfied by a wrong table applied consistently.
+
+  Two fixes, and the first is a deliberate exception to this repo's no-second-declaration
+  rule: `tests/test_scoring_determinism.py` restates the ranking as a **literal**,
+  because a second declaration is the only way to detect a change in the first. The
+  second states the **consequence** rather than the mechanism — a gitleaks finding blocks
+  at every legal threshold — and it is the assertion that actually reads as an alarm.
+
+  **The skip was the worse half.** Its condition was computed from `THRESHOLD_FLOOR`,
+  which derives from the table under test, so the mutation moved the floor and **deleted
+  the test**. A skip whose condition depends on the thing under test is a test that can
+  delete itself; assert the refusal as behaviour instead.
 - **An unknown threshold used to raise `KeyError` mid-run.** Verified:
   `compute_security_verdict([], threshold="HIGH")` → `KeyError: 'HIGH'`, raised
   from inside the security agent — the one stage whose whole purpose is to produce
@@ -442,6 +471,70 @@ because `compute_security_verdict([])` passes — an `[]` returned from there is
 careless `return` away from the silent-pass bug, and that `return` would be
 invisible in review, because returning the value a helper handed you is what
 correct code looks like.
+
+---
+
+### The scoring policy — `agentorg/security/scoring.py`
+
+**ONE table, three scanners, native → ours.** Added 2026-08-28 (Lane C) because a judge
+doubted the determinism claim and was right to: "a fixed threshold decides" was exactly
+true for trivy and semgrep, which map their native severities, and **vacuously** true for
+gitleaks, which hardcoded `severity="critical"` at the `Finding` constructor. Three
+tables in three files, one of which was not a table at all.
+
+**No run's verdict changed.** Every mapping is byte-for-byte what the two private tables
+did; `tests/test_scanner_correctness.py`'s 9 call sites into both `_map_severity`
+functions are the regression net, and the wrappers still expose `_map_severity` as the
+named seam those tests drive.
+
+| Thing | Value | Why |
+|---|---|---|
+| `FAIL_CLOSED_SEVERITY` | `high` | ONE constant for all three. Refused **at import** if it drops below the shipped block threshold — the semgrep default that was measured failing open cannot be reintroduced quietly. Deliberately not `critical`, so an unrecognised severity does not impersonate a discovered secret. |
+| `POLICY[tool]` | a table **or** a constant, never both | `__post_init__` refuses anything else. Two of the three scanners emit a severity and are MAPPED; one emits none and is ASSIGNED one by rule. Both set means two answers exist and nothing records which the verdict used. |
+| `THRESHOLD_FLOOR` | **derived**, `critical` | Computed from the policy carrying `protects_core_guarantee`. A literal would be a second declaration of gitleaks' severity, and two copies keep agreeing while one moves. |
+| `NATIVE_NONE` vs `NATIVE_UNRECORDED` | `""` vs `<not recorded>` | "the scanner has nothing to say about severity" and "the scanner said something and this row lost it" are different facts. One spelling makes a gap in the artifact read as data about gitleaks. |
+
+**THE GITLEAKS CONSTANT STAYS — it is a POLICY, and now the code says so.** gitleaks
+reports no severity field at all (RuleID, File, StartLine, Description, an entropy score,
+nothing that ranks the hit), so there is nothing to map and a severity must come from
+somewhere. The rule: **any finding from a secret scanner is `critical`**, because a
+committed credential has no lesser grade. Rejected alternatives, recorded next to the
+value: entropy ranking scores a short high-entropy token below a long structured one, and
+per-rule severities means answering "which credentials are we willing to merge?".
+
+The wrapper calls `scoring.policy_severity("gitleaks")` rather than typing the word, and
+`POLICY["gitleaks"].rationale` is **rendered** into the PR comment — a justification that
+lives only in a comment is one nobody outside that file can quote. The honest
+consequence, stated rather than papered over: **the threshold does not DISCRIMINATE among
+gitleaks findings.** All sit at the top of the scale, so the arithmetic is `critical >=
+threshold`, true for every threshold this project accepts. It still runs; it has one input
+to compare.
+
+**`THRESHOLD_FLOOR` does not bind today, and the test says so.** All four legal thresholds
+pass, because the floor is `critical`. It binds the moment gitleaks' constant is lowered,
+which is the realistic way this guarantee is lost — so
+`test_the_threshold_floor_binds_when_the_secret_policy_is_lowered` lowers the source of
+truth in an exec'd **copy** of the module and watches `high` become a refusal. A floor
+that cannot be observed refusing anything is a vacuous check.
+
+**`resolve_threshold` REFUSES, never CLAMPS.** Clamping runs the gate at a threshold the
+operator did not ask for and reports success — the same shape as `STATE_BACKEND` falling
+back to `local` on a typo. It also raises `ValueError` for a value outside the vocabulary,
+because `config` validates the **environment variable** at import and a per-project
+threshold arrives at **run** time, where an import-time check cannot see it.
+
+**Where the module is NOT yet wired, and it is a real gap.** `SecurityResult.scoring` is
+populated by `score_findings`, but the two call sites belong to other lanes:
+`agents/security.py` (emit the rows) and `github_ops.py` (render the table). Until those
+land, `scoring` is exercised only by its tests — the module is correct and **no deployed
+run carries a scoring row**. `render_scoring_table` returns **lines**, not a blob, because
+every renderer in `github_ops.py` composes a list and joins once.
+
+**`score_findings` never writes `>=`.** Every `blocking` flag comes from
+`compute_security_verdict`, one call per finding, against the same five lines the
+pipeline's verdict comes from. A local comparison would be a second decision path whose
+only job is to agree with the first, and **an audit artifact that can disagree with the
+decision it describes is worse than none: it reads as proof.**
 
 ---
 
@@ -1286,7 +1379,7 @@ an audit trail.
 
 ## The test suite
 
-**46 test files** as of 2026-08-28 (`ls tests/test_*.py | wc -l`), plus five
+**51 test files** as of 2026-08-28 (`ls tests/test_*.py | wc -l`), plus five
 non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
 `--collect-only`; the table lists the largest and the ones whose subject matters,
@@ -1297,6 +1390,9 @@ not every file.
 | `test_deploy_workflow.py` | `deploy.yml` + `terraform.yml` blast radius — the two files that can spend money | 106 |
 | `test_approve_server.py` | the approval screen, mostly what it **refuses** | 95 |
 | `test_scanner_resilience.py` | the ABSENT/FAULT matrix, inside-out | 82 |
+| `test_scoring_failclosed.py` | an unrecognised severity must still BLOCK, per scanner + the threshold floor | 30 |
+| `test_scoring_determinism.py` | the determinism claim, exhaustive — and the ranking anchor | 27 |
+| `test_scoring_table.py` | one table for three scanners; the gitleaks constant as policy, over the AST | 18 |
 | `test_run_pipeline_workflow.py` | the cloud pipeline's blast radius and ungameable gates | 68 |
 | `test_ingress_handler.py` | the webhook Lambda — HMAC first, EventBridge second | 49 |
 | `test_agentcore_deploy_assets.py` | requirements / Dockerfile, unexerciseable locally | 49 |
@@ -1409,7 +1505,7 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
-### The pattern found TEN times across four layers
+### The pattern found ELEVEN times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -1495,6 +1591,20 @@ The instances, briefly:
   **A RED step must be shown to change the output, not merely to have been applied.** If
   a mutation leaves the result byte-identical, it did not test what you think; pick
   another one and say so.
+
+- **A PROPERTY TEST THAT READS THE TABLE UNDER TEST** — the eleventh instance, and the
+  first where the blind spot was the *test suite's own expectation source*. Twenty-five
+  determinism tests, all deriving their expectation from `SEVERITY_ORDER`, could not see
+  `SEVERITY_ORDER` change: transposing `high` and `critical` left **24 green and turned
+  the 25th into a skip**, while a committed credential silently stopped blocking. Full
+  write-up under the block rule above.
+
+  The general form: **a property is only as strong as the independence of the oracle it
+  is checked against.** "Same inputs, same output" is satisfied by any consistent wrong
+  answer, so pin the VALUE somewhere the mutation cannot follow, or assert the
+  CONSEQUENCE rather than the mechanism. And an **inert mutation was found in this same
+  lane**, from copying `SEVERITY_ORDER`'s text out of CLAUDE.md, which omitted its type
+  annotation — the substitution matched nothing and the suite stayed green.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -2343,6 +2453,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/common/diff.py` | What a diff PROPOSES — added lines only |
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile` |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
+| `agentorg/security/scoring.py` | ONE severity table for all three scanners, the gitleaks policy, the threshold floor, and the `ScoreRow` audit trail |
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
 | `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
 | `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — 4 of 31 modules, **1** module-level. Replaced four grep counts that reproduced under no scope |
