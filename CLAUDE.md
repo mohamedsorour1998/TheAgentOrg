@@ -216,6 +216,29 @@ unknown number of times, which Actions cannot express as "repeat until".
 A blocked run exits `3` from `develop`; `gate2` declares `needs: develop`, so it
 never starts. **No `if:` expresses the block — the dependency graph does.**
 
+**Since Phase 1 there is a second path, and it removes that constraint.**
+`agentorg/queue/` + `scripts/worker.py` provide the sequencing, handoff, pause and
+isolation Actions provides today — and a pause is a **durable row**, not a held runner
+slot, so it can happen anywhere. The seven jobs may therefore collapse; **the three
+gates must not.** Verified end to end with no Actions involved: a clean ticket reaches
+`promoted`, a poisoned one exits **3** with `blocking=2`, a refusal exits **4**.
+
+Two facts from building it that outlive the queue itself:
+
+- **SQS could not have done this, and the reason is correctness.** Its nearest thing to
+  a pause is a visibility timeout **capped at 12 hours**, so a gate awaiting a human
+  silently becomes claimable after half a day and the run merges with an approval nobody
+  gave. It also cannot answer `jobs_for_run`. Hence SQL, and `QUEUE_BACKEND=sqs` **raises**
+  rather than falling through to memory.
+- **The claim is at-least-once, not exactly-once, and the tests say so.** Two workers
+  cannot hold one job — that is the transaction plus a UNIQUE index. What no queue can
+  rule out without a fencing token the work itself honours is a lease that expired while
+  its worker was **alive but wedged**. So `reclaimed_from` is the only trace that a stage
+  may have run twice, and `worker._already_ran` reads the **run's** own record before
+  re-running such a job — keyed on `security` rather than `dev` for `develop`, because the
+  developer fills `state.dev` first and a reclaimed `develop` that produced a diff then
+  died before the scanners ran would otherwise read as complete.
+
 ### Why a Lambda, and whether EventBridge earns its place
 
 There is no inbound-webhook API in EventBridge — checked, not assumed:
@@ -1379,9 +1402,11 @@ an audit trail.
 
 ## The test suite
 
-**51 test files** as of 2026-08-28 (`ls tests/test_*.py | wc -l`), plus five
-non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
-`dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
+**55 test files** as of 2026-08-28, after Phase 1 (`ls tests/test_*.py | wc -l`), plus
+five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
+`dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
+as five lanes committed, and three of those figures were written into this file while
+true. Measure it; do not read it. The per-file counts below were measured with
 `--collect-only`; the table lists the largest and the ones whose subject matters,
 not every file.
 
@@ -1984,7 +2009,7 @@ Three things worth keeping:
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 20** — re-read 2026-08-28 with `preflight.py` check 2. The number climbs on
+**version 25** — re-read 2026-08-28 with `preflight.py` check 2. The number climbs on
 every deploy; what matters is that all five carry the SAME one. All five carry the
 **same** version: a split would mean a partial deploy, where some agents run new code
 and some old and no stage's output says
@@ -2002,10 +2027,24 @@ terraform fmt -check -recursive        exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
 ```
 
+**And again at `f8d978d`, with all five Phase 1 lanes merged:**
+
+```
+pytest -q                              1502 passed, 3 skipped in 139.33s
+ruff / actionlint / terraform fmt      exit 0
+preflight.py                           preflight OK   (all 4 checks PASS)
+```
+
+`1131 → 1502` is **371 tests** added by five lanes: queue (A), tenancy (B), scoring (C),
+cost (E) and evidence (L). The suite is 2.5 minutes and still needs no infrastructure —
+that is what keeps it usable as a gate, and it is why Lane A's in-process queue backend
+and Lane B's sqlite dialect are the tested paths rather than a convenience.
+
 Preflight check 3 read `LINES: [3, 4]` with `provenance: scanners` from the deployed
-security runtime — so the discriminator still separates real scanners from the fixture
-after the Phase 0 contract batch. That is the one number to re-read after any lane
-touches `agentorg/security/`, and Lane C is doing exactly that.
+security runtime — **both times**, so the discriminator survived Lane C rewriting all
+three scanner wrappers behind a shared severity table. That is the one number to re-read
+after any lane touches `agentorg/security/`, and it is the check no green suite can
+replace.
 
 Environments `gate1`/`gate2`/`gate3`, each with `required_reviewers` — **and each
 with `can_admins_bypass: true`**, measured:
@@ -2446,6 +2485,8 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/fixtures_loader.py` | Resolves `fixtures/` from the **repo root** |
 | `agentorg/db/` | The tenancy schema as DATA (one definition, two dialects), the connection + tenant binding, forward-only migrations |
 | `agentorg/tenancy/` | Scoped accessors, per-tenant secret crypto, budgets, tenant zero, and `ADR-001-database.md` |
+| `agentorg/queue/` | The job queue that replaces Actions' sequencing. `_memory.py` keeps the suite hermetic; `_sql.py` is durable and holds the ADR. **A pause is a durable ROW** |
+| `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
 | `agentorg/common/llm.py` | Bedrock, with the fixture fallback — and the token/usage recorder |
