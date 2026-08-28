@@ -54,6 +54,27 @@
 #      identity lookup only -- and names it as a change to THIS module's role model.
 #      Choosing an instance size before that role model exists is choosing early.
 #
+# DECIDED 2026-08-28: NO RDS. THE DATABASE IS LOCAL, AND THIS IS NOT A DEFERRAL.
+#
+# The operator's call, taken after the full stack was verified running on a local
+# Postgres 17.11 under podman -- backend, frontend and database, with real rows read
+# through the tenancy accessors. So the three reasons above stop being "why not yet" and
+# become "why not at all, for this deployment":
+#
+#   * the role-model problem does not arise: a local database is provisioned by whoever
+#     runs `podman compose up`, who can create the non-owning application role in one
+#     statement rather than through a Terraform provisioning sequence.
+#   * the standing charge disappears. Every resource this module creates is now
+#     per-invocation again, which is the property the rest of the account has.
+#   * `infra/selfhost/docker-compose.yml` is the answer to "where does the database
+#     live", and it is a file somebody can read.
+#
+# WHAT THAT COSTS, STATED PLAINLY: nothing in AWS holds run history, so the web app and
+# the queue are reachable only where the containers run. The GitHub Actions pipeline is
+# unaffected -- it never used this database, and `run-pipeline.yml` still carries the
+# whole demo. A future managed database would need the role sequence above; this comment
+# is the record of why it was not built rather than of what was forgotten.
+#
 # NOTE ON WHAT IS NO LONGER TRUE. This comment previously gave a fourth reason: that
 # the queue's Postgres dialect refused its own INSERT with a `DatatypeMismatch` on
 # `poisoned`. That was real, it was fixed on `main` (471fc31 / 69ab1d3), and it has

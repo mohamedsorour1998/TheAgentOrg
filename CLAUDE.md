@@ -1799,7 +1799,7 @@ an audit trail.
 
 ## The test suite
 
-**73 test files** as of 2026-08-28, after Phase 1, Phase 2, Lane H and Lane M
+**78 test files** as of 2026-08-28, after all five phases
 (`ls tests/test_*.py | wc -l`), plus
 five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
@@ -2644,7 +2644,123 @@ Three things worth keeping:
   fails by returning the fail-safe value rather than by erroring. Any future agent-side
   code reaching for a token has this shape.
 
-### Running the whole stack locally — the only way to exercise the Postgres paths
+### THE LOCAL STACK — backend, frontend and database in podman
+
+**This is how the app runs.** Decided 2026-08-28: **no RDS.** The database is local, the
+GitHub Actions pipeline is untouched, and `infra/selfhost/docker-compose.yml` is the whole
+answer to "where does this live".
+
+```bash
+podman machine init && podman machine start        # once
+cd infra/selfhost
+podman compose up -d postgres                     # wait for healthy
+
+# BOTH schemas, in this order — see the two grant traps below
+../../.venv-main/bin/python -c \
+  "from agentorg.db import schema; print(schema.render_schema(schema.POSTGRES))" \
+  | podman exec -i theagentorg-selfhost-postgres-1 psql -U agentorg -d agentorg
+podman exec -i theagentorg-selfhost-postgres-1 psql -U agentorg -d agentorg \
+  < ../../web/lib/schema.sql
+
+podman compose build worker web                   # ~4 min the first time
+podman compose up -d api web
+```
+
+Then `http://127.0.0.1:3000` (UI) and `http://127.0.0.1:8100/v1/health` (API). Stop with
+`podman compose down`; free the VM with `podman machine stop`.
+
+**Verified end to end**, 2026-08-28:
+
+```
+postgres  Up (healthy)  127.0.0.1:5432   PostgreSQL 17.11, 12 tables, 6 RLS policies
+api       Up            127.0.0.1:8100   {"status":"healthy","routes":8}
+web       Up            127.0.0.1:3000   /api/runs returns a real row from the container DB
+
+POST /api/approvals unauthenticated          -> 401 "Nothing was recorded."
+  + Origin: https://evil.example             -> 403, BEFORE authentication
+```
+
+**SIX DEFECTS ONLY THIS COULD FIND**, each in the first statement that reached the
+database, and each invisible to a hermetic suite:
+
+| Where | What |
+|---|---|
+| compose | pointed at the agent image, whose `.dockerignore` strips `scripts/` — the container's own command was absent |
+| buildah | the paired `Dockerfile.dockerignore` convention is **BuildKit-only**. Lane N's file was correct, documented, and inert |
+| `web/` | had no image at all |
+| `engine.connect` | sqlite-only, so a DSN was read as a **filename** |
+| `accessors.py` | 23 `?` placeholders; psycopg saw literal text — "0 placeholders but 1 parameters were passed" |
+| `_all` | `created_at` is TEXT in sqlite and TIMESTAMPTZ in Postgres — `datetime is not JSON serializable` |
+
+**TWO CONFIGURATION TRAPS, and the first is the instructive one.** `DATABASE_URL` is
+Auth.js's, read by Node; **`TENANT_DB` is the Python readers'**. Setting only the first
+left `/api/session` answering **200** while `/api/runs` failed — invisible on the one
+route anybody checks first, because the session path never touches a reader. And
+`pipeline.ts` computes `REPO_ROOT` as `lib/../..`, which inside the image is `/`, not
+`/app`, and it **overrides** any `PYTHONPATH` compose sets — so the package is mounted
+where it looks (`/agentorg`) rather than where it seemed to.
+
+**THE CONTAINER CONNECTS AS A SUPERUSER, SO RLS CONSTRAINS NOTHING THERE.** That is why
+`tenant_id` resolves in the container and would not with a properly-scoped role. It is
+the open item, not a fix: see `web/lib/tenant.ts:126`.
+
+### Making the sign-in button work — a real GitHub OAuth app
+
+The shipped credentials are `selfhost-dev-only` placeholders, so the button renders,
+CSRF-protects correctly, and cannot complete. Two settings make it real.
+
+**Create the app** at `github.com/settings/developers` → OAuth Apps → New:
+
+```
+Homepage URL          http://127.0.0.1:3000
+Authorization callback http://127.0.0.1:3000/api/auth/callback/github
+```
+
+**THE HOST MUST MATCH EXACTLY, AND `localhost` IS NOT `127.0.0.1` TO GITHUB.** They are the
+same machine and different *origins*: the callback is compared as a string, and a mismatch
+answers `redirect_uri_mismatch` — which reads as a broken app rather than a typo. This
+stack is configured for `127.0.0.1` (`AUTH_URL` in the compose file, and the published port
+binds that address deliberately). Either register `127.0.0.1` in GitHub, or change both to
+`localhost`; do not mix them.
+
+Then put the id and secret in `infra/selfhost/docker-compose.yml`'s `web` service —
+`AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` — and `podman compose up -d web`.
+
+**A GitHub OAUTH APP, NOT A GITHUB APP.** The two are different products: an OAuth app
+issues a user token and is what `next-auth`'s GitHub provider expects. A GitHub App issues
+installation tokens and would need a different provider and a JWT flow. `read:user repo`
+are the scopes this app asks for.
+
+**Sign-in still refuses after that, and it is not a bug.** `signed_in` becomes true and
+`tenant_id` stays `null`, because a fresh GitHub login has no `web_identity` row and no
+`membership` — so `tenantForLogin` returns null and every authenticated route 401s. That is
+fail-closed by design, and item 1 in the open list is the reason the lookup cannot resolve
+itself. To act as a real tenant, insert the two rows:
+
+```sql
+INSERT INTO app_user (id, email, created_at) VALUES ('u-you', '<your-email>', now());
+INSERT INTO membership (id, tenant_id, user_id, role, created_at)
+  VALUES ('m-you', 'tenant-zero', 'u-you', 'reviewer', now());
+INSERT INTO web_identity (auth_user_id, app_user_id, github_login)
+  SELECT id, 'u-you', '<what /api/session reports as login>' FROM users WHERE email = '<your-email>';
+```
+
+`github_login` must equal what `/api/session` reports as `login` — `MEMBERSHIP_QUERY` joins
+on that column, and a display name where a handle was expected returns zero rows with no
+error. Measured: that exact mismatch is why the first seeded session resolved no tenant.
+
+**To skip OAuth entirely for a demo**, insert a session row and set the cookie:
+
+```sql
+INSERT INTO sessions ("sessionToken", "userId", expires)
+  SELECT 'demo-token', id, now() + interval '1 day' FROM users WHERE email = '<your-email>';
+```
+
+then in the browser console on `127.0.0.1:3000`:
+`document.cookie = "authjs.session-token=demo-token; path=/"`. The session strategy is
+`database`, so the row is the session — there is no JWT to forge.
+
+### Reproducing the Postgres paths on the host, without containers
 
 The suite is hermetic by design and **cannot see any of the defects in the section above**.
 Reproducing them takes a real database. Recorded because it took three wrong diagnoses to
@@ -2731,17 +2847,17 @@ full-suite run** — `test_every_workflow_that_reaches_aws_is_one_we_expect` fai
 `Extra items in the left set: 'deploy-platform.yml'`, which is that guard working
 exactly as designed; registering the name is the deliberate decision it asks for.
 
-**And again at `62bee51`, with Phases 1, 2 AND 3 merged — twelve lanes:**
+**And at `e93205e`, with ALL FIVE PHASES and all FOURTEEN LANES merged:**
 
 ```
-pytest -q                              1854 passed, 3 skipped in 158.36s
+pytest -q                              1966 passed, 3 skipped in 299.65s
 ruff / actionlint / terraform fmt      exit 0
-preflight.py                           preflight OK   (all 4 checks PASS)
-runtimes                               all five READY at v36
+preflight.py                           all SEVEN checks PASS, runtimes v39
 web: tsc / eslint / vitest / build     0 · 0 problems · 10 files 166 tests · builds
+the local stack                        postgres + api + web up in podman
 ```
 
-`1131 → 1854` is **723 tests** across twelve lanes. **73 test files.** Preflight check 3
+`1131 → 1966` is **835 tests** across fourteen lanes. **78 test files.** Preflight check 3
 still reads `LINES: [3, 4]` with `provenance: scanners` — the discriminator has now
 survived Lane C rewriting all three scanner wrappers, Lane D moving every GitHub call
 behind an interface, Lane H adding retrieval, and Lane M rewriting all six prompts.
@@ -3941,6 +4057,29 @@ noise.**
 
 ---
 
+## WHAT IS STILL OPEN, as of 2026-08-28
+
+All five phases and fourteen lanes are merged; the app runs locally. These are the named
+gaps, each one measured rather than suspected. **Nothing here is unknown — the value of
+the list is that none of it is a surprise.**
+
+| # | Open | Why it is not done |
+|---|---|---|
+| 1 | **Two-role database model** — the app must connect as a non-owning role | `membershipsFor` reads the RLS-scoped `membership` table to discover the tenant RLS needs bound. Circular. `web/lib/tenant.ts:126` records the three options and why two are wrong; the right one changes the deployment's role model |
+| 2 | **`migrations.migrate` cannot run on Postgres** | it calls `connection.executescript`, which psycopg has no such method for — so the forward-only ledger, its checksum guard and its idempotency have never run there. Every Postgres verification so far applied the DDL directly and bypassed the runner |
+| 3 | **`state.cost` is assigned nowhere** | so the SRE prompt's cost block renders `""` on every run. Two lines, one per pipeline |
+| 4 | **`/api/runs/[id]/scoring` answers empty** | the PR comment carries the scoring table; that endpoint has no producer on its path |
+| 5 | **Selenium has never run** | no browser on this host, and `pyproject.toml`'s `testpaths = ["tests"]` means the four tests are not even collected — `--collect-only \| grep -ci selenium` is 0 |
+| 6 | **GitHub OAuth cannot complete locally** | the credentials are `selfhost-dev-only` placeholders. A real app's id and secret make the sign-in button work; see the setup note below |
+| 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
+| 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
+| 9 | **`time_to_merge` and `escaped_defects`** | honest gaps in the scorecard. They need real runs over real time, not a harness |
+| 10 | **`docker compose up` for the model service** | the ollama half of the compose file is unused while the pipeline stays on GitHub. Lane F measured the local-model parity separately |
+
+**Closed by decision rather than by work:** RDS. The database is local — see
+`infra/Terraform/modules/platform/main.tf`, which records why an `aws_db_instance` was not
+built and what that costs.
+
 ## Where things live
 
 | Path | What |
@@ -3963,6 +4102,8 @@ noise.**
 | `agentorg/api/` | The control plane: submit, watch, cancel, configure, verified webhook ingress, and a generated OpenAPI schema. Stdlib HTTP. **No route can approve or resume a gate** |
 | `web/` | The Next.js application. **Lane I owns `web/app/api/**` + `web/lib/**`; Lane J owns `web/app/(routes)/**` + `web/components/**`.** `lib/contract.ts` + `lib/endpoints.ts` are the contract J imports; `lib/authz.ts` holds every approval refusal as pure functions; `lib/reader/*.py` are Python subprocesses so Lane B's accessors stay the ONLY tenant scoping. **`POST /api/approvals` is the first surface here that can open a gate over a network** |
 | `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
+| `web/Dockerfile` | The web image. Two-stage, non-root, **build-time placeholder secrets** — `next build` refuses without all four env vars, so a real one baked into a layer is the shape of the leaked `github_pat_`. Installs `pydantic` + `psycopg` because `pipeline.ts` spawns Python readers |
+| `infra/selfhost/docker-compose.yml` | **The local stack: postgres, api, web** (+ ollama, unused when the pipeline stays on GitHub). Every port bound `127.0.0.1` only. No RDS, by decision |
 | `web/lib/` | **Lane I.** `contract.ts` (types + vocabulary, no runtime import) and `endpoints.ts` (the route table). The TypeScript half of the frozen contract |
 | `web/app/api/` | **Lane I.** Twelve endpoints. Every error is one shape, `ApiError` |
 | `web/app/(routes)/` | **Lane J.** Seven screens. Its `.gitignore` re-includes `runs/`, which the ROOT gitignore swallows — see the web section above |
