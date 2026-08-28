@@ -106,6 +106,19 @@ def scope_for(connection: sqlite3.Connection, tenant_id: str) -> TenantScope:
             "building a scope. A blank scope matches a blank tenant column, which is a "
             "row nobody owns."
         )
+    # PUSH THE TENANT INTO A POSTGRES SESSION, HERE, because this is the one function
+    # holding both the connection and the tenant. `engine.acting_as` binds thread-local
+    # state and has no connection to push it into; `engine.connect` has the connection and
+    # runs BEFORE the tenant is bound in every caller measured (`web/lib/reader/runs.py:153`
+    # connects, then enters `acting_as` on the next line).
+    #
+    # A no-op on sqlite, where the tenant reaches the triggers through the registered
+    # `current_tenant()` function instead.
+    #
+    # WITHOUT THIS, POSTGRES RLS SEES AN EMPTY SETTING AND EVERY SCOPED READ RETURNS NO
+    # ROWS -- not an error, an empty result. That is the worst available failure for a
+    # scoping mechanism, because it is indistinguishable from "this tenant has no data".
+    engine.bind_tenant(connection)
     return TenantScope(connection=connection, tenant_id=tenant_id)
 
 
@@ -150,14 +163,70 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _sql(scope: TenantScope, sql: str) -> str:
+    """`sql` with `?` rewritten to `%s` when the connection is psycopg.
+
+    EVERY QUERY IN THIS MODULE IS WRITTEN IN SQLITE'S DIALECT — 23 `?` placeholders — and
+    psycopg accepts only `%s`. MEASURED against a real Postgres in a container:
+
+        psycopg.ProgrammingError: the query has 0 placeholders but 1 parameters were passed
+
+    Note what that error says: psycopg saw the `?` as literal text, so the statement was
+    syntactically fine and simply had no placeholders. A rewrite is therefore not
+    cosmetic — without it the parameters have nowhere to go.
+
+    REWRITTEN HERE, AT THE THREE EXECUTE SITES, rather than at each of the ~30 query
+    literals. That is `queue/_sql.py:352`'s reasoning applied one module over: "every
+    method would otherwise carry the same conditional, and one of them would eventually be
+    written with the wrong placeholder and fail only against the dialect nobody was
+    testing."
+
+    STILL PARAMETERISED EITHER WAY. This changes the placeholder token, never the values —
+    `params` continues to travel separately, so no amount of hostile input becomes SQL.
+    """
+    if isinstance(scope.connection, sqlite3.Connection):
+        return sql
+    return sql.replace("?", "%s")
+
+
 def _one(scope: TenantScope, sql: str, params: tuple) -> sqlite3.Row | None:
     with engine.acting_as(scope.tenant_id):
-        return scope.connection.execute(sql, params).fetchone()
+        engine.bind_tenant(scope.connection)
+        return scope.connection.execute(_sql(scope, sql), params).fetchone()
+
+
+def _iso(value: object) -> object:
+    """A `datetime` as an ISO-8601 string; anything else unchanged.
+
+    THE TWO DIALECTS RETURN DIFFERENT PYTHON TYPES FOR THE SAME COLUMN. `created_at` is
+    `TEXT` in sqlite and `TIMESTAMPTZ` in Postgres, so sqlite hands back a string and
+    psycopg hands back a `datetime`. MEASURED through the web reader against a real
+    Postgres:
+
+        TypeError: Object of type datetime is not JSON serializable
+
+    Normalised HERE rather than in each of the four readers, because this is the boundary
+    where every other dialect difference in this module is already reconciled — the
+    placeholder rewrite and the tenant push are three lines up. A reader-side `default=str`
+    on `json.dump` would fix the symptom in one of four files and leave the other three to
+    fail the same way later, against the dialect nobody was testing.
+
+    ISO-8601 rather than `str()` even though they coincide for a `datetime`: the callers are
+    TypeScript, `RunSummary.created_at` is typed `string`, and `Date.parse` wants a format
+    it can rely on.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
 def _all(scope: TenantScope, sql: str, params: tuple) -> list[dict]:
     with engine.acting_as(scope.tenant_id):
-        return [dict(row) for row in scope.connection.execute(sql, params).fetchall()]
+        engine.bind_tenant(scope.connection)
+        return [
+            {key: _iso(val) for key, val in dict(row).items()}
+            for row in scope.connection.execute(_sql(scope, sql), params).fetchall()
+        ]
 
 
 def _write(scope: TenantScope, sql: str, params: tuple) -> None:
@@ -182,7 +251,8 @@ def _write(scope: TenantScope, sql: str, params: tuple) -> None:
     guards are absent entirely.
     """
     with engine.acting_as(scope.tenant_id):
-        scope.connection.execute(sql, params)
+        engine.bind_tenant(scope.connection)
+        scope.connection.execute(_sql(scope, sql), params)
     scope.connection.commit()
 
 

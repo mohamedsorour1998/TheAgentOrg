@@ -148,6 +148,24 @@ _NOT_RUNTIME = {
     # agent-server layer that does not exist yet (pyproject.toml:26 keeps
     # `# "fastmcp"` commented out). Dead code today.
     "starlette",
+    # agentorg/db/engine.py:158,202 — inside `connect()`'s Postgres branch and
+    # `_pg_row_factory()`, both reached ONLY when the value passed to `connect` starts
+    # `postgresql://`. The five agent containers open no database at all: they receive a
+    # RunState over HTTP, call a model, and answer. `config.STATE_BACKEND` defaults to
+    # `local` and `TENANT_DB` is unset in every runtime, so the branch is unreachable
+    # there and the import never executes.
+    #
+    # DECLARING IT WOULD BE THE WRONG FIX, not merely a heavier one. psycopg[binary] ships
+    # a compiled libpq wheel; adding it to `agents/requirements.txt` puts a native
+    # extension into five arm64 images for a code path they cannot take — and CLAUDE.md
+    # records what a native dependency does on the wrong platform: an amd64 image "pushes,
+    # deploys, then fails to start with an exec format error that reads like a broken
+    # entrypoint".
+    #
+    # It IS declared where it is used: `pyproject.toml`'s `selfhost` extra, which the
+    # worker and web images install. Verified with the whole stack running under podman —
+    # both read a real Postgres through this branch.
+    "psycopg",
 }
 
 

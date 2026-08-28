@@ -123,7 +123,17 @@ services:
   worker:
     build:
       context: ../..
-      dockerfile: agentorg/agents/Dockerfile
+      # `infra/worker/Dockerfile`, NOT the agent image. This pointed at
+      # `agentorg/agents/Dockerfile` until 2026-08-28, and that image cannot run this
+      # service's own command: the repository root `.dockerignore:51` is `scripts/`, so
+      # `scripts/worker.py` is stripped from the context before the build sees it. The
+      # container would have started and died on a missing file.
+      #
+      # Lane N found it and built the second image for exactly this reason. Same defect
+      # shape as `COPY fixtures ./fixtures`, which was measured on the first runtime that
+      # served traffic: `/ping` answered 200 and every `/invocations` raised
+      # FileNotFoundError.
+      dockerfile: infra/worker/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,6 +181,109 @@ services:
     restart: unless-stopped
 
   # ── THE API AND THE UI ─────────────────────────────────────────────────────
+  #
+  # ADDED 2026-08-28, on the terms the note below set: both lanes have landed, both
+  # services bind 127.0.0.1 on the host, and both depend on postgres.
+
+  api:
+    build:
+      context: ../..
+      # THE WORKER IMAGE, REUSED. `agentorg/api/` is standard-library only —
+      # deliberately, because `tests/test_agentcore_deploy_assets.py` asserts every
+      # third-party import under `agentorg/` appears in the agent requirements, so a
+      # framework here would become a dependency of all five arm64 agent containers.
+      # That decision is what lets this service need no image of its own.
+      dockerfile: infra/worker/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      QUEUE_BACKEND: postgres
+      QUEUE_DSN: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      TENANT_DB: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      OFFLINE: "true"
+      # 0.0.0.0 INSIDE THE NAMESPACE, 127.0.0.1 ON THE HOST. The container has to bind
+      # every interface of its own namespace or the port publish below reaches nothing —
+      # and the publish is what keeps it off the network. `main()` defaults to loopback
+      # precisely so this has to be said out loud; see api/server.py.
+      API_HOST: 0.0.0.0
+      API_PORT: "8100"
+    command: ["python", "-m", "agentorg.api.server"]
+    ports:
+      # 127.0.0.1 ONLY. Every authenticated route refuses without a provisioned M2M key
+      # and no route can approve a gate, but an unauthenticated caller still reaches
+      # /v1/health, /v1/openapi.json and the ingress endpoint — so the bind stays local.
+      - "127.0.0.1:8100:8100"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../../web
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      # FAKE, LOCAL-ONLY VALUES. `next build` refuses without all four — Lane I's
+      # fail-closed design firing at build time — and GitHub OAuth cannot complete
+      # against them, which is correct for a self-hosted stack nobody registered an app
+      # for. A real deployment supplies real ones from a secret store.
+      AUTH_SECRET: selfhost-dev-only-not-a-credential
+      AUTH_GITHUB_ID: selfhost-dev-only
+      AUTH_GITHUB_SECRET: selfhost-dev-only
+      AUTH_URL: http://127.0.0.1:3000
+      AUTH_TRUST_HOST: "true"
+      HOSTNAME: 0.0.0.0
+      # THE READERS NEED THE PACKAGE ON sys.path. `web/lib/pipeline.ts` spawns one
+      # short-lived `python` per read — a deliberate architecture, because a Node database
+      # client has no `current_tenant()`, so scoped WRITES fail loudly while scoped READS
+      # SUCCEED UNSCOPED, which is how a tenant leak ships green.
+      AGENTORG_PYTHON: /usr/bin/python3
+      PYTHONPATH: /repo
+      # TWO VARIABLES, ONE DATABASE, AND THEY ARE READ BY DIFFERENT LANGUAGES.
+      # `DATABASE_URL` above is Auth.js's, read by the Node adapter for sessions.
+      # `TENANT_DB` is `agentorg.tenancy`'s, read by the Python readers. Setting only the
+      # first is what produced `PipelineError: the pipeline read failed` with
+      # `/api/session` still answering 200 — the session path never touches a reader, so
+      # the missing variable was invisible on the first route anybody checks.
+      TENANT_DB: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      OFFLINE: "true"
+      LLM_DISABLED: "true"
+    volumes:
+      # `agentorg/` MOUNTED AT /app/agentorg, NOT AT /repo, and the path is the whole
+      # point. `pipeline.ts:220-224` spawns the reader with `cwd: REPO_ROOT` and
+      # `PYTHONPATH: REPO_ROOT`, both computed from `import.meta.url` — which inside this
+      # image resolves to `/app`, not to wherever the repository is mounted. So it
+      # OVERRIDES any PYTHONPATH set here, and the reader failed with
+      # `ModuleNotFoundError: No module named 'agentorg'` while `TENANT_DB` was correctly
+      # set and the package sat readable at /repo.
+      #
+      # Mounting the package where the app already looks is the fix that needs no code
+      # change. `:ro` because the web app has no business writing to a checkout — its only
+      # state is in Postgres.
+      #
+      # The image cannot simply CONTAIN it: this service's build context is `web/`, and
+      # widening it to the repository root would trace `runs/` (~10k gitignored files)
+      # into a Node image.
+      # AT `/`, NOT `/app`, AND THE ARITHMETIC IS WHY. `pipeline.ts:78` computes
+      # `REPO_ROOT` as `dirname(import.meta.url)/../..` — from `/app/lib` that is `/`, not
+      # `/app`. It then spawns the reader with `cwd: REPO_ROOT` and
+      # `PYTHONPATH: REPO_ROOT`, OVERRIDING whatever this file sets. Measured: with the
+      # package at `/app/agentorg` and `python3 -c "import agentorg"` working from `/app`,
+      # the reader still failed with `ModuleNotFoundError` — because it was looking at `/`.
+      #
+      # In a repository checkout `web/lib/../..` IS the repository root, so the expression
+      # is correct there and wrong only for an image whose app lives one directory down.
+      # Mounting where it looks costs nothing; changing the expression would be a code
+      # change to make a container layout convenient, which is the wrong direction.
+      - ../../agentorg:/agentorg:ro
+      - ../../fixtures:/fixtures:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+  # The note this replaced, kept because its reasoning still governs what may be added:
   #
   # DELIBERATELY ABSENT, and this is a statement about the repository rather
   # than about compose. `agentorg/api/` and any UI belong to other lanes and do

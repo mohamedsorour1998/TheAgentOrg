@@ -1,0 +1,13 @@
+# Paired with `web/Dockerfile`. Docker and podman both read the `.dockerignore` beside
+# the Dockerfile when the build context is this directory.
+#
+# `node_modules` FIRST AND IT MATTERS MOST. The builder runs `npm ci` itself, so copying
+# a host `node_modules` in would be slower AND wrong: this host is arm64 darwin and the
+# image is arm64 linux, so any native binary in there is built for the wrong platform and
+# fails at runtime with a message about an invalid ELF header rather than about the copy.
+node_modules
+.next
+.env
+.env.*
+*.log
+.DS_Store

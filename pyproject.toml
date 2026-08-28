@@ -44,8 +44,9 @@ dev = [
     # asserts what a non-editable install actually ships.
     "python-pptx>=1.0,<2",
 ]
-# THE SELF-HOSTED PATH'S ONE DEPENDENCY, and it was missing entirely until Lane F
-# tried to reproduce F1 on a clean install.
+# THE SELF-HOSTED PATH'S DEPENDENCIES. Both were missing entirely: `openai` until Lane F
+# tried to reproduce F1 on a clean install, and `psycopg` until the whole stack was run
+# under podman against a real Postgres.
 #
 # `config.LLM_BASE_URL` routes to an OpenAI-compatible gateway, and `strands` reaches
 # it through `openai`. Measured: `pip show strands-agents` lists boto3, botocore,
@@ -65,6 +66,19 @@ dev = [
 # containers never take. `pip install .[selfhost]` is the self-hoster's line.
 selfhost = [
     "openai>=1.0,<3",
+    # THE POSTGRES DRIVER, and it belongs here rather than in the base install for the
+    # same reason `openai` does: `agentorg/db/engine.py` reaches it only when the value
+    # passed to `connect()` starts `postgresql://`, and the five arm64 agent containers
+    # open no database at all. psycopg[binary] ships a compiled libpq wheel, so declaring
+    # it at the base would put a native extension into five images for a branch they
+    # cannot take.
+    #
+    # `tests/test_agentcore_deploy_assets.py` exempts it by name with that reasoning, and
+    # the exemption's honesty depends on this line existing — a dependency exempted from
+    # one requirements file and declared in NO other is not optional, it is missing.
+    # Verified with the whole stack under podman: the worker and web images install this
+    # extra and both read a real Postgres through that branch.
+    "psycopg[binary]>=3,<4",
 ]
 
 [tool.setuptools.packages.find]

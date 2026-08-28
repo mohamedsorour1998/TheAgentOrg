@@ -48,7 +48,25 @@ tests/
 target_repo/
 docs/
 tickets/
-scripts/
+# `scripts/` IS NO LONGER IGNORED, and the reason is that the convention which was
+# supposed to make it safe does not exist in every builder.
+#
+# Lane N's `infra/worker/Dockerfile` needs `scripts/worker.py` and `scripts/run_stage.py`,
+# and it relied on a paired `infra/worker/Dockerfile.dockerignore` overriding this file --
+# which is real in BuildKit and NOT IMPLEMENTED IN BUILDAH. Measured 2026-08-28 with
+# podman 6.1.0, and the error names the file it actually used:
+#
+#     COPY scripts ./scripts
+#     no items matching glob ".../merge/scripts" copied
+#     (1 filtered out using /Users/sorour/sorour/TheAgentOrg/.dockerignore)
+#
+# So the paired file was documented, correct, and inert. The build failed at the COPY
+# rather than producing an image missing its own entrypoint, which is the good outcome and
+# is why `infra/worker/Dockerfile` carries a build-time guard asserting the file arrived.
+#
+# UN-IGNORING IT COSTS THE AGENT IMAGE NOTHING BUT CONTEXT SIZE. `agentorg/agents/
+# Dockerfile` has no `COPY scripts`, so nothing new ships there -- verified: it copies
+# `agentorg`, `fixtures` and its requirements, and nothing else.
 infra/Terraform/
 .github/
 .superpowers/
