@@ -173,6 +173,52 @@ from "found nothing" — reached from the direction that was actually broken.
 Tests, retrieval, the UI. `run_stage.py` is deleted here, by the integrator, once the
 queue has run both demo paths.
 
+**THE PRECONDITION IS MET AND THE DELETION IS STILL WRONG. `run_stage.py` STAYS.**
+
+Both demo paths ran on the queue, measured 2026-08-28 with `QUEUE_BACKEND=postgres`,
+`OFFLINE=true LLM_DISABLED=true`, no GitHub Actions anywhere:
+
+```
+POISONED  plan → [gate1 PAUSED, released by --approve] → develop
+          status=blocked        worker exit 3
+CLEAN     plan → gate1 → develop → gate2 → sre → gate3 → promote
+          status=promoted       security=pass       decisions=3
+```
+
+The gate genuinely paused and waited for a human — the property a GitHub Environment
+provides by holding a runner slot, provided instead by a row.
+
+**But the queue does not REPLACE `run_stage.py`, it INVOKES it**, and that is
+deliberate. `agentorg/queue/runner.py:49` is `_RUN_STAGE = _ROOT / "scripts" /
+"run_stage.py"`, and its module docstring gives two reasons that are still true:
+
+- **Per-stage process isolation.** Two pieces of module state would otherwise be
+  inherited by an in-process call, and both produce a *false measurement* rather than a
+  crash: `llm._record`/`last_source()` (a run inheriting the previous run's provenance
+  "looks like a measurement"), and the scanner fan-out memo (`tests/conftest.py`'s fifth
+  guard exists because "a stale cache hit looks exactly like a scan"). A worker running
+  seven stages in one process inherits both, all day, with nothing clearing them.
+- **The exit code.** `run_stage.py` communicates through `sys.exit(main())`. A subprocess
+  guarantees that an `os._exit`, a segfault or a `SystemExit` raised anywhere in the tree
+  still arrives as a number. `3 ≠ 1` is what makes a blocked demo run distinguishable
+  from a broken workflow on a projector.
+
+Measured blast radius of deleting it: **15** invocations in `run-pipeline.yml`, **2**
+references in `queue/runner.py`, **17** test files. Deleting it breaks the deployed cloud
+pipeline *and* the queue that was meant to replace it.
+
+So the plan's phrase "deleted, not edited" was written expecting the queue to reimplement
+the stages in-process. Lane A chose the subprocess instead, for reasons its docstring
+argues better than the plan did — and that choice makes `run_stage.py` the **shared stage
+implementation both paths run**, not a rival to be removed. The right reading of the
+ownership row is now *nobody edits it casually*, which it already was.
+
+The real remaining duplication is `graph._walk`'s stage sequence versus `run_stage.py`'s
+six `_stage_*` functions. That is a genuine defect — CLAUDE.md records three mutations
+surviving 793 tests there — and it is **not** fixed by deleting either file, because
+`_walk` is the test-only path and `run_stage.py` is the deployed one. Left as named debt
+rather than closed badly a week before the final.
+
 ### Phase 4 — hardening and the deck · Lanes L, N + integrator · parallel
 `approve_server.py` retired. Deck rebuilt. Limitations costed.
 
