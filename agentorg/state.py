@@ -177,6 +177,23 @@ class StageCost(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0         # cache READS, not writes -- see the docstring
+    # DID THE PROVIDER SAY ANYTHING ABOUT CACHING AT ALL? Not the same question as
+    # `cached_tokens > 0`, and the difference decides who to go and ask.
+    #
+    #     False + 0 tokens  the provider reported no cache field -- our SDK reading
+    #                       or the provider's support is the suspect
+    #     True  + 0 tokens  the provider measured and the answer was zero -- we set
+    #                       no cache point, which is a change to prompt assembly
+    #
+    # Both render as "0.0% cache hit rate", so no reported number is wrong either way;
+    # the two just want different fixes and a reader could not tell which they had.
+    # `llm.Usage` draws this distinction and `usage_payload` carries it across the
+    # remote seam -- it used to STOP at this model, which is why the field exists.
+    #
+    # Added by the integrator on Lane E's spec, since `state.py` is the frozen
+    # contract. Optional and defaulting False, so every CostRecord already on disk
+    # still validates and reads as "nobody told us" -- which is true of all of them.
+    cached_reported: bool = False
 
 
 class CostRecord(BaseModel):

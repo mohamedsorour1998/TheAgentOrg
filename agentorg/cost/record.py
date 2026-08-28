@@ -146,6 +146,12 @@ def build_cost_record(stage: str = "") -> CostRecord:
             input_tokens=sum(e.input_tokens for e in entries),
             output_tokens=sum(e.output_tokens for e in entries),
             cached_tokens=sum(e.cached_tokens for e in entries),
+            # `any`, not `all`: one call in the stage reporting a cache field is
+            # enough to establish that the provider CAN report it, which is the
+            # question this flag answers. `all` would let a single fixture row --
+            # which reports nothing, by construction -- mask a real measurement, and
+            # the fixture-then-model ordering happens on every revision loop.
+            cached_reported=any(e.cached_reported for e in entries),
         ))
 
     return CostRecord(stages=stages, usd=total_usd(stages))

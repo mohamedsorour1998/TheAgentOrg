@@ -222,36 +222,99 @@ def test_an_absent_cache_key_is_recorded_as_unreported_not_as_zero():
     )
 
 
-def test_the_reported_flag_does_NOT_survive_the_fold_and_that_gap_is_pinned():
-    """Distinction 2 reaches `Usage` and the wire, and STOPS at `StageCost`.
+def test_the_reported_flag_survives_the_fold_onto_a_stage_row():
+    """Distinction 2 now reaches `StageCost`. It used to stop one layer short.
 
-    Pinned as a KNOWN GAP rather than left for somebody to rediscover. `StageCost`
-    declares no `cached_reported` field -- it is Phase 0's frozen contract and not
-    Lane E's file -- so both halves of the distinction the test above establishes
-    arrive here as a row with `cached_tokens=0`, and `cache_hit_rate` answers 0.0
-    for each. MEASURED:
+    THIS TEST REPLACES A GAP-PINNING TEST, and the replacement is the interesting part.
+    Lane E wrote `test_the_reported_flag_does_NOT_survive_the_fold_and_that_gap_is_
+    pinned`, which asserted `cached_reported` was ABSENT from `StageCost` and carried a
+    message naming the three steps to finish the job. `state.py` is the frozen contract,
+    so the lane could not add the field itself.
 
-        provider SAID NOTHING   usage.cached_reported=False  -> rate=0.0
-        provider SAID ZERO      usage.cached_reported=True   -> rate=0.0
+    The integrator added it, that test went red exactly as designed, and its message was
+    the specification for this one. A gap recorded only in a comment gets closed halfway
+    -- the field added, nothing reading it -- and nothing says so.
 
-    Neither reported number is wrong -- both mean no caching is happening -- but the
-    two want different fixes, and the record cannot say which one a reader has.
-
-    THIS TEST IS WRITTEN TO FAIL WHEN THE GAP CLOSES, which is the point. A future
-    lane adding `StageCost.cached_reported: bool = False` (additive, so the freeze
-    permits it) will see this test go red, and its message says what to do: carry
-    `any(e.cached_reported for e in entries)` in `build_cost_record` and split the
-    rendering. A gap recorded only in a comment gets closed halfway -- the field
-    added and nothing reading it -- and nothing would say so.
+    `any`, not `all`. One call in the stage reporting a cache field establishes that the
+    provider CAN report it, which is the question the flag answers. `all` would let a
+    single fixture row -- which reports nothing, by construction -- mask a real
+    measurement, and the fixture-then-model ordering happens on every revision loop.
     """
-    from agentorg.state import StageCost as _StageCost
+    llm.reset_usage()
+    llm._record_usage(llm.Usage(stage="develop", model=MODEL, input_tokens=100,
+                                output_tokens=10, cached_tokens=0,
+                                cached_reported=False))   # a fixture-shaped row
+    llm._record_usage(llm.Usage(stage="develop", model=MODEL, input_tokens=900,
+                                output_tokens=90, cached_tokens=0,
+                                cached_reported=True))    # the provider measured zero
 
-    assert "cached_reported" not in _StageCost.model_fields, (
-        "StageCost has GAINED a `cached_reported` field. Good -- now finish the "
-        "job: carry `any(e.cached_reported for e in entries)` through "
-        "`build_cost_record`, and split `report.render`'s cache finding so "
-        "'the provider said nothing' and 'the provider measured zero' read "
-        "differently. Then delete this test."
+    built = record.build_cost_record()
+    row = next(r for r in built.stages if r.stage == "develop")
+
+    assert row.cached_reported is True, (
+        "one call in the stage reported a cache field and the folded row says nobody "
+        "did; `all` was used where `any` is required, so a fixture row can mask a real "
+        "measurement"
+    )
+    assert row.cached_tokens == 0, "the flag must not invent cached tokens"
+
+
+def test_a_stage_where_nothing_reported_caching_stays_unreported():
+    """The other half. Without this, `cached_reported=True` could be hardcoded.
+
+    A test asserting only the True case passes against `cached_reported=True` written as
+    a literal, which would make every run claim the provider measured caching -- and send
+    a reader to change prompt assembly on the strength of a measurement never taken.
+    """
+    llm.reset_usage()
+    llm._record_usage(llm.Usage(stage="plan", model=MODEL, input_tokens=500,
+                                output_tokens=50, cached_tokens=0,
+                                cached_reported=False))
+
+    row = next(r for r in record.build_cost_record().stages if r.stage == "plan")
+
+    assert row.cached_reported is False, (
+        "no call reported a cache field, yet the row claims one did"
+    )
+
+
+def test_the_two_zero_cache_causes_render_differently():
+    """The reader-facing half, and the reason the field was worth adding.
+
+    Both cases display `0.0%`. Before the split they also produced the SAME finding --
+    "every call paid full price... nothing sets a cache point" -- which sends a reader to
+    change prompt assembly. That advice is right for one cause and wrong for the other:
+    if no call ever carried a cache field, the suspect is how usage is read, and the
+    prompt code may already be correct.
+
+    Asserted on the RENDERED text, because the finding is the whole deliverable here. A
+    field nobody renders is a field nobody reads.
+    """
+    reported = CostRecord(stages=[StageCost(stage="develop", model=MODEL,
+                                            input_tokens=1000, output_tokens=100,
+                                            cached_tokens=0, cached_reported=True)])
+    silent = CostRecord(stages=[StageCost(stage="develop", model=MODEL,
+                                          input_tokens=1000, output_tokens=100,
+                                          cached_tokens=0, cached_reported=False)])
+
+    reported_text = report.render(reported)
+    silent_text = report.render(silent)
+
+    assert "0.0%" in reported_text and "0.0%" in silent_text, (
+        "both cases must still display the same rate; the field explains the zero, "
+        "it does not change it"
+    )
+    assert "NO CACHED READS" in reported_text, (
+        "a provider-measured zero must still name the actionable cause: we set no "
+        "cache point"
+    )
+    assert "CACHING NEVER REPORTED" in silent_text, (
+        "a run where nothing reported a cache field must say so rather than assert a "
+        "measurement that was never taken"
+    )
+    assert reported_text != silent_text, (
+        "the two causes render identically, so the distinction reaches the data and "
+        "stops before the reader -- which is where it matters"
     )
 
     def _folded(cached_reported: bool) -> float | None:
@@ -819,9 +882,18 @@ def test_a_run_with_no_cached_reads_renders_the_finding_in_words():
 
     A zero here means the five agents each paid full price for the repository
     snapshot they re-sent, on every call -- the largest silent cost in the design.
+
+    `cached_reported=True` IS REQUIRED FOR THIS TO BE THE RIGHT FINDING, and that is
+    not incidental. The row says the provider measured caching and reported zero, so
+    the cause is ours -- we set no cache point -- and "every call paid full price" is
+    sound advice. A row with the flag False means nothing reported a cache field at
+    all, which renders the same 0.0% and warrants a DIFFERENT message; see
+    `test_the_two_zero_cache_causes_render_differently`. Updated by the integrator
+    when `StageCost.cached_reported` landed.
     """
     rendered = report.render(CostRecord(
-        stages=[StageCost(stage="plan", model=MODEL, input_tokens=20000)],
+        stages=[StageCost(stage="plan", model=MODEL, input_tokens=20000,
+                          cached_reported=True)],
         usd=0.0066,
     ))
 
@@ -853,8 +925,11 @@ def test_a_cache_rate_that_merely_ROUNDS_to_zero_still_carries_the_finding():
     each other and neither agreed with the page.
     """
     # One cached token in ~1M shown: 1e-06, which is NOT 0.0 and renders as 0.0%.
-    barely = [StageCost(stage="plan", model=MODEL,
-                        input_tokens=999_999, output_tokens=10, cached_tokens=1)]
+    # `cached_reported=True` because a row carrying a cached token self-evidently had
+    # a cache field to read it from -- and it keeps this test on the branch it is
+    # about, which is the ROUNDING, not the reported/silent split.
+    barely = [StageCost(stage="plan", model=MODEL, input_tokens=999_999,
+                        output_tokens=10, cached_tokens=1, cached_reported=True)]
 
     rate = record.cache_hit_rate(barely)
     assert rate != 0.0, (

@@ -136,10 +136,35 @@ def render(cost: CostRecord | None) -> str:
     # rate the reader treats as zero, so it is the display that must decide.
     displays_as_zero = rate is not None and _pct(rate) == _pct(0.0)
     if displays_as_zero:
-        lines.append(
-            "_NO CACHED READS: every call paid full price for the repository "
-            "snapshot it re-sent. Nothing in agentorg/ sets a cache point._"
-        )
+        # TWO CAUSES, AND THEY SEND YOU TO DIFFERENT PLACES. `StageCost` gained
+        # `cached_reported` once the integrator added it (Lane E specified the field
+        # and could not add it -- `state.py` is the frozen contract), so this layer
+        # can finally tell them apart:
+        #
+        #   reported, zero    the provider measured caching and the answer was zero.
+        #                     WE set no cache point. The fix is prompt assembly, in
+        #                     the agents, and it is ours.
+        #   never reported    no call in the run carried a cache field at all. The
+        #                     suspect is our SDK reading or the provider's support,
+        #                     and the fix is to go and look rather than to change
+        #                     prompt code that may already be correct.
+        #
+        # Both used to render the first message, which sent a reader to change prompt
+        # assembly on the strength of a measurement that had never been taken.
+        # `any`, matching `build_cost_record`: one call reporting the field proves
+        # the provider CAN report it.
+        if any(row.cached_reported for row in cost.stages):
+            lines.append(
+                "_NO CACHED READS: the provider measured caching and reported zero. "
+                "Every call paid full price for the repository snapshot it re-sent. "
+                "Nothing in agentorg/ sets a cache point._"
+            )
+        else:
+            lines.append(
+                "_CACHING NEVER REPORTED: no model call in this run carried a cache "
+                "field, so this 0.0% is an absence rather than a measurement. Check "
+                "how usage is read before changing prompt assembly._"
+            )
     elif rate is None:
         lines.append(
             "_CACHE NOT MEASURED: no input tokens were recorded, so a hit rate "
