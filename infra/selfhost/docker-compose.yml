@@ -232,7 +232,24 @@ services:
       AUTH_SECRET: selfhost-dev-only-not-a-credential
       AUTH_GITHUB_ID: selfhost-dev-only
       AUTH_GITHUB_SECRET: selfhost-dev-only
-      AUTH_URL: http://127.0.0.1:3000
+      # `localhost`, NOT `127.0.0.1`, AND THE CHOICE HAS TO BE MADE ONCE FOR BOTH.
+      # GitHub compares an OAuth callback as a STRING: `http://localhost:3000/...` and
+      # `http://127.0.0.1:3000/...` are the same machine and different origins, and a
+      # mismatch answers `redirect_uri_mismatch` — which reads as a broken app rather
+      # than a typo. Auth.js builds its own callback from AUTH_URL, so this value and the
+      # URL registered in the GitHub OAuth App must agree exactly.
+      #
+      # `localhost` is chosen because that is what a browser address bar gets typed with,
+      # and because `localhost` resolves to BOTH ::1 and 127.0.0.1 while the published
+      # port below binds IPv4 only — so `localhost` works and `[::1]` does not. Measured:
+      #
+      #     http://127.0.0.1:3000  -> 200
+      #     http://localhost:3000  -> 200
+      #     http://[::1]:3000      -> connection refused
+      #
+      # The port publish stays `127.0.0.1:` regardless: that is what keeps this off the
+      # network, and it is an address to bind rather than a name to visit.
+      AUTH_URL: http://localhost:3000
       AUTH_TRUST_HOST: "true"
       HOSTNAME: 0.0.0.0
       # THE READERS NEED THE PACKAGE ON sys.path. `web/lib/pipeline.ts` spawns one

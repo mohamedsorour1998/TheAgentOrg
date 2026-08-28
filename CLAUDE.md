@@ -2712,16 +2712,30 @@ CSRF-protects correctly, and cannot complete. Two settings make it real.
 **Create the app** at `github.com/settings/developers` → OAuth Apps → New:
 
 ```
-Homepage URL          http://127.0.0.1:3000
-Authorization callback http://127.0.0.1:3000/api/auth/callback/github
+Homepage URL          http://localhost:3000
+Authorization callback http://localhost:3000/api/auth/callback/github
 ```
 
 **THE HOST MUST MATCH EXACTLY, AND `localhost` IS NOT `127.0.0.1` TO GITHUB.** They are the
 same machine and different *origins*: the callback is compared as a string, and a mismatch
-answers `redirect_uri_mismatch` — which reads as a broken app rather than a typo. This
-stack is configured for `127.0.0.1` (`AUTH_URL` in the compose file, and the published port
-binds that address deliberately). Either register `127.0.0.1` in GitHub, or change both to
-`localhost`; do not mix them.
+answers `redirect_uri_mismatch` — which reads as a broken app rather than a typo.
+
+**This stack uses `localhost`** (`AUTH_URL` in the compose file). Measured on macOS, and
+the asymmetry is worth knowing:
+
+```
+http://127.0.0.1:3000  -> 200
+http://localhost:3000  -> 200
+http://[::1]:3000      -> connection refused
+```
+
+`localhost` resolves to `::1` FIRST and then `127.0.0.1`, while the published port binds
+IPv4 only — so a client that gives up after the IPv6 answer sees a refusal, and one that
+falls through does not. That is why `localhost` can appear broken on a machine where
+`127.0.0.1` works, and why the two must not be mixed between GitHub and `AUTH_URL`.
+
+The port publish stays `127.0.0.1:` regardless: that is an address to BIND, and it is what
+keeps this off the network. `AUTH_URL` is a name to VISIT. They are different questions.
 
 Then put the id and secret in `infra/selfhost/docker-compose.yml`'s `web` service —
 `AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` — and `podman compose up -d web`.
