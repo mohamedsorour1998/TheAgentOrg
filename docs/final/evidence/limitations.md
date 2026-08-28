@@ -311,3 +311,236 @@ is degraded today; a future change to that knob has a known landmine.
 PATH. On a machine with no scanners those three RUN and the skip count is 0. That
 inversion is a deliberate check: `7 passed` from that file on a provisioned machine
 means the skips are broken.
+
+---
+---
+
+# PHASE 4 · seven more, and one struck off
+
+**Nine entries above, measured at `9b2b1ee`.** One is now partly closed and eight are
+unchanged. Seven new ones follow — every one found by measurement in this phase, and
+every one costed the same way: what removing it takes, and why not now.
+
+## Entry 8 is PARTLY CLOSED, and the remainder is a different limitation
+
+The instrument exists. `agentorg/cost/` prices a run, `llm.usage()` records every call,
+and `scripts/measure_cost.py` reports **$0.013036 – $0.016931** per clean change with
+the AWS Pricing API query and its read date attached. The cost dimension is no longer
+an unmeasured row on the scorecard.
+
+**What remains is not the same limitation.** It is entry 10.
+
+---
+
+## 10 · `RunState.cost` is never assigned, so no run carries its own cost
+
+**What.** The instrument works and nothing on the pipeline path calls it. Measured over
+the AST, both pipelines:
+
+```
+agentorg/graph.py       state.cost stores at NONE   cost-API calls NONE
+scripts/run_stage.py    state.cost stores at NONE   cost-API calls NONE
+grep -rn '.cost =' agentorg/ scripts/   ->  (nothing)
+```
+
+The usage payload **does** now cross the remote seam — `server.py:203` sends
+`"usage": llm.usage_payload()` and `agent_client.py:556` calls `absorb_usage_payload`.
+So the tokens reach the runner and then nothing writes them onto the state.
+
+**Three visible consequences.** The SRE's cost block renders `""` on every run
+(`sre.py:182` guards on `state.cost is not None and state.cost.stages`, correctly). The
+web `/api/runs/[runId]/cost` endpoint reads the field correctly and answers empty. And
+`measure_cost.py` must drive `graph.run_pipeline` in process rather than reading a
+deployed run.
+
+**Cost to remove: two lines per pipeline**, in `graph.py` and `scripts/run_stage.py`.
+`llm.reset_usage()` at the start of a stage and `state.cost = merge_cost_records(...)`
+at the end, plus `llm.attribute_usage_to(stage)` so every call does not land in a single
+`plan` row — which Lane E measured happening without it.
+
+**Why not now.** Both files are the integrator's, and the correct shape is a decision
+about per-stage attribution across a nine-stage run handed job to job as an artifact,
+not a two-line patch. `usd` is also **not** the discriminator for whether it landed —
+`len(state.cost.stages)` is, because an unwired run has zero rows with `usd=None` while
+a wired run that fell back has a row per stage with `usd=0.0`.
+
+---
+
+## 11 · No Postgres has ever been connected, so the sign-in flow has never completed
+
+**What.** `agentorg/db/engine.py` is sqlite3-only. Nothing in the 1853-test suite
+connects to a Postgres. `docker compose up` has never run — re-measured 2026-08-28,
+`command -v docker` finds `/opt/homebrew/bin/docker` and `docker info` reports no
+daemon. So every authenticated web route refuses with `no-tenant`, and the Auth.js
+sign-in flow that `next-auth` + `@auth/pg-adapter` + `pg` exist to serve has **never
+completed once**.
+
+**The Postgres RLS is real emitted DDL asserted structurally, and nothing has executed
+it.** Same distinction as a green `terraform apply` against
+`simulate-principal-policy`: one proves the policy was written, the other proves it
+permits the call.
+
+**Two things this does NOT mean.** The web application typechecks, lints, passes 166
+tests across 10 files, and builds 18 routes — verified here. And the refusal is
+**fail-closed by design**: returning tenant zero would have demoed perfectly and handed
+every new signup the original deployment's runs.
+
+**Cost to remove: a Postgres and one migration run.** `docker compose up -d postgres`,
+`DATABASE_URL` pointed at it, `python -m agentorg.db.migrations`, then sign in. The
+schema is already one definition emitting two dialects, so there is nothing to write.
+
+**Why not now.** It needs a Docker daemon on the demo machine, and installing one the
+day before a judged demo is the kind of change that turns a working laptop into a
+broken one. The honest position is that the sqlite path is the *tested* path and the
+Postgres path is *emitted but unexecuted*.
+
+---
+
+## 12 · The Postgres queue dialect is never executed
+
+**What.** `agentorg/queue/_sql.py` carries both dialects; `QUEUE_BACKEND` defaults to
+`memory` and psycopg is not installed. The one place that selects `postgres` is
+`infra/selfhost/docker-compose.yml:134` — the file that has never been run.
+
+**And `config.py`'s own comment contradicts its own code**, three lines apart:
+*"The durable backend is the deployed default and is chosen deliberately, never
+inherited"* — while `config.QUEUE_BACKEND` with no environment set measures `'memory'`.
+This is the record disagreeing with itself, which CLAUDE.md names as worse than either
+claim alone.
+
+**Cost to remove: `pip install psycopg` plus entry 11's Postgres.** The SQL is written
+and the migrations are dialect-aware.
+
+**Why not now.** Same daemon, and the deeper reason is entry 13: the queue has no
+caller in the deployed path, so executing its Postgres dialect would verify a code path
+production does not take.
+
+---
+
+## 13 · The queue replaces GitHub Actions in principle and in nothing else
+
+**What.** 1,931 lines of `agentorg/queue/` plus 745 of `scripts/worker.py`, verified end
+to end with no Actions involved — and `grep -icE 'queue|worker'
+.github/workflows/run-pipeline.yml` returns **1**, which is a comment about DynamoDB.
+All seven jobs still run `scripts/run_stage.py`. The worker's only caller is the compose
+file from entry 11.
+
+This is the rejection recorded in `scorecard.md` §7, refused under R4.
+
+**Cost to remove: a rewrite of `run-pipeline.yml` around a long-running worker, plus a
+place for it to run.** The queue's gate model is genuinely *stronger* than an Actions
+Environment — a pause is a durable row, `claim` will not hand a `paused` job to a
+worker, and there is no path from `paused` to `ready` without a `HumanDecision`, whereas
+all three of our Environments measure `can_admins_bypass=True`.
+
+**Why not now.** Actions is what has been verified against the live account for a week,
+and CLAUDE.md's rule holds: anything that looks like a crash on a projector outranks
+polish. The claim is downgraded rather than the code, and the honest sentence is that
+dependence on Actions is now a **choice rather than a constraint**.
+
+---
+
+## 14 · No browser has ever run the browser tests, and they are outside the main suite
+
+**What.** Two separate facts, and the second is the one nobody has written down.
+
+**No driver exists.** Measured 2026-08-28: `import selenium` →
+`ModuleNotFoundError`; `chromedriver` and `geckodriver` both ABSENT from PATH;
+`safaridriver` present at `/System/Cryptexes/App/usr/bin/safaridriver` but it needs
+Safari ▸ Develop ▸ Allow Remote Automation, a GUI action, and CLAUDE.md records it
+hanging with no `/status` response in 120 s. Four Selenium tests are written and skip.
+
+**They are not in `pytest -q` at all.** `pyproject.toml:77` is `testpaths = ["tests"]`,
+so `target_repo/tests/e2e/` is never collected by the command every gate runs —
+measured, `pytest --collect-only -q | grep -ci selenium` returns **0**. Run the
+documented way they behave exactly as designed:
+
+```
+cd target_repo && PYTHONPATH=. python -m pytest tests/e2e -q
+  1 passed, 4 skipped in 0.04s
+  - the `selenium` package is not installed
+  - no chromedriver or geckodriver on PATH
+  Set SELENIUM_REQUIRED=true to make this a failure instead.
+```
+
+So the skip **is** visible and `test_the_skip_is_visible_and_not_silent` does run — but
+only for somebody who knows to `cd` first. A reader who runs the four documented gates
+sees no mention of a browser test in either direction, which is the failure mode
+`SELENIUM_REQUIRED` was built to prevent, one level up.
+
+**Cost to remove: two commands and a GUI click.** `pip install selenium` plus a driver,
+or enable Safari's remote automation. Then `SELENIUM_REQUIRED=true` promotes the skip to
+a fault (`1 failed, 4 errors`, measured by Lane G) so the tests cannot silently stop
+running. Adding `target_repo/tests/e2e` to `testpaths` is a third line and is the part
+worth arguing about — everything below the driver is already verified against a real
+socket, because `LiveServer` opens one (`app.test_client()` is an in-process WSGI shim a
+browser cannot reach).
+
+**Why not now.** Installing a browser driver on the demo machine the day before a judged
+demo, to enable four tests whose subject is a login form the unit tests already cover, is
+a bad trade against CLAUDE.md's rule that a projector crash outranks polish.
+
+---
+
+## 15 · `SecurityResult.scoring` reaches a PR comment and the web endpoint answers empty
+
+**What.** Lane C's scoring policy is wired on the *pipeline* path — `security.py:291`
+calls `score_findings` and `graph.py:232` renders the table into the PR comment, so a
+blocked run's comment carries the audit rows. The web `/scoring` endpoint reads the same
+field, imports the same module (`web/lib/reader/detail.py:46`), and answers **empty**,
+because the runs it reads were recorded before the producer landed.
+
+**This is a data-vintage limitation, not a wiring one**, which is why it is worth its own
+entry: the code is complete on both sides and the gap closes itself as soon as a run is
+recorded through the new path. Nothing needs editing and nothing will announce that it
+happened.
+
+**Cost to remove: one run.** Drive the pipeline once with the scoring producer in place
+and the endpoint has rows.
+
+**Why not now.** It needs entry 11's Postgres to be visible in the UI at all, so it is
+downstream of a limitation with a Docker daemon in front of it.
+
+---
+
+## 16 · A leaked `github_pat_` may still be unrotated, and this repository cannot settle it
+
+**What.** Entry 9 above records two files disagreeing. Re-read at `d6165c8`, they still
+disagree: `terraform.yml:213` says the artifacts were deleted **and the token rotated**;
+`CLAUDE.md` says the safe reading is the pessimistic one and to treat it as compromised
+until an operator confirms otherwise.
+
+**Nothing in the repository can resolve it**, and that is the structural point. A PAT's
+creation date is visible only to the account that holds it, and a live token and a
+rotated one behave identically from in here.
+
+**Cost to remove: one click by a human, outside this repository.** Check the token's
+creation timestamp at `github.com/settings/personal-access-tokens` against 2026-08-22.
+If it predates that date, rotate and update the Secrets Manager entry the API_KEY
+connection reads.
+
+**Why it is still here.** Not a priority question — nobody in this repository *can* do
+it. The lesson is about the record rather than the token: **when a fix depends on an
+action outside the repository, the repository can only record that the action is
+required and how to verify it, never that it happened.** Two files claiming opposite
+things about a credential is worse than either claim alone, because a reader who finds
+the reassuring one stops looking.
+
+---
+
+## The Phase 4 shape, and what it says
+
+| # | Limitation | Blocked on |
+|---|---|---|
+| 10 | `RunState.cost` never assigned | an integrator decision about per-stage attribution |
+| 11 | no Postgres ever connected | **a Docker daemon** |
+| 12 | Postgres queue dialect never executed | **a Docker daemon** + psycopg |
+| 13 | the queue has no caller in production | a `run-pipeline.yml` rewrite, deliberately deferred |
+| 14 | no browser has run the browser tests | a driver install + a GUI click |
+| 15 | `/scoring` answers empty | one run, downstream of 11 |
+| 16 | a token's rotation status is unknown | **a human, outside this repository** |
+
+**Four of seven are blocked on one thing** — a Docker daemon, or a person, on a machine.
+None is blocked on a design that does not work. That is the honest summary and it is a
+better one than a shorter list would give: the pattern is *unexecuted*, not *broken*, and
+the difference is exactly the one this project spends its whole verification story on.
