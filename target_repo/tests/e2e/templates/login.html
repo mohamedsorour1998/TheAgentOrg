@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<!--
+  G3 — the browser surface. The smallest real HTML login form the e2e tests drive.
+
+  WHY IT LIVES UNDER tests/e2e/ RATHER THAN IN app/. `target_repo/app/auth.py` is
+  the file every clean and poisoned diff in this repository is written against, and
+  `fixtures/dev_result_poisoned.json` is the reference diff `scripts/preflight.py`
+  loads to prove the deployed scanners are real. Adding a route to `create_app`
+  means editing that file, so the wiring is kept here and the four-line change to
+  `app/auth.py` is reported to its owner instead. See tests/e2e/app_web.py.
+
+  Deliberately plain: no CSS framework, no JavaScript beyond the form post. A
+  Selenium test that has to wait for a bundle is a Selenium test that goes flaky,
+  and G6 says a flaky blocker gets disabled by the first person it inconveniences.
+
+  Every id below is load-bearing -- the e2e tests locate by id, never by CSS
+  position or text, because a locator that depends on layout breaks on a styling
+  change and reads as a regression in the login handler.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in</title>
+</head>
+<body>
+  <h1>Sign in</h1>
+
+  <form id="login-form" method="post" action="/login">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username">
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password">
+
+    <button id="submit" type="submit">Sign in</button>
+  </form>
+
+  <!--
+    The result panel. Server-rendered rather than filled by JavaScript, so the
+    assertion is on the page the server produced and not on a script that ran.
+    `data-status` carries the HTTP status the handler chose, because a human
+    reading "invalid credentials" cannot tell 401 from a 200 that says so.
+  -->
+  {% if message %}
+  <p id="result" data-status="{{ status }}">{{ message }}</p>
+  {% endif %}
+</body>
+</html>
