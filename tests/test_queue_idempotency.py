@@ -198,7 +198,7 @@ def test_already_ran_is_false_for_a_job_that_was_never_reclaimed(backend):
     """The check runs ONLY for a reclaimed job. A normal claim is the first claim,
     and reading the run's state for every job would make a fresh `develop` skip
     itself whenever a previous run of the same id had one."""
-    job = queue.enqueue("run-i9", "develop")
+    queue.enqueue("run-i9", "develop")
     claimed = queue.claim("worker-a")
     assert claimed.reclaimed_from == ""
     assert worker._already_ran(claimed) is False
