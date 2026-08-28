@@ -2677,6 +2677,124 @@ described as "dead code today", so importing it from a live module would make th
 exclusion a lie. `tests/test_api_ingress.py` asserts the absence locally, so the
 failure names this package instead of surfacing as a packaging test going red.
 
+### Generated tests (Lane G) — a SIXTH agent, and why it must not read the diff
+
+`agentorg/agents/testgen.py`, spec §9 / judge requirement 7. It generates pytest files
+from `state.plan.acceptance_criteria`, executes them, and reports what happened.
+
+**SEPARATION OF AUTHORITY IS THE POINT, one layer out from the block rule.** A model
+that can be persuaded must not stand between a credential and `main` — hence
+`compute_security_verdict`. Same argument for tests: **if the agent that wrote the
+change also writes the test that clears it, the test is a restatement of the change's
+own assumptions.** It passes either way.
+
+Enforced structurally, not by prompt. `_prompt` never touches `state.dev`, and
+`repo_snapshot.render(targets)` is called with **no `diff=`** — that keyword is the
+before/after switch, and the reviewer passing it is what makes this agent's omission a
+deliberate distinction rather than an accident.
+`tests/test_testgen_authority.py` asserts both over the **AST**, plus an executed twin
+that puts a sentinel in `dev.diff` and checks it never reaches the prompt. Over the AST
+because that module's own docstring says "is NOT given `state.dev`" in those words, so
+a substring check is satisfied by the sentence explaining the guarantee — the failure
+this file records twice already. RED: `render(targets, diff=state.dev.diff)` fails **4
+of 8**.
+
+**`test_the_snapshot_is_the_BEFORE_view...` asserts the REVIEWER still passes `diff=`.**
+Without that half, "testgen omits it" stays true if the after-view is deleted, if the
+parameter disappears, or if nobody uses it — a vacuous check that reads as a real one.
+
+**The model is asked for `TestPlan`, which cannot express `passed`, `failed` or
+`binding`.** That is the `SREAdvice` lesson applied before it could bite: those three
+are MEASURED by running the tests, and a model reporting its own pass count is
+fabricated evidence rather than a schema mismatch.
+
+| Field | Rule |
+|---|---|
+| `binding` | **`failed > 0`, in one function.** Not `not passed` |
+| `source` | `acceptance_criteria` or `fixture`. **Never `diff`** — the contract admits it, so the refusal is asserted |
+| `notes` | carries the G7 caveat, the quarantine report, and `NOT EXECUTED` when nothing ran |
+
+**`binding = not passed` is the dangerous mis-spelling**, because it reads as "be
+strict" and would defend itself in review. It turns the GENERATOR's failure to produce
+anything into a block on somebody else's change; the feature then earns a reputation for
+false alarms and gets switched off — which is G6's social failure mode arriving through
+G5. RED, `binding=True` on the missing-test path: 1 failed, 6 passed.
+
+**G7 lives in the rendered notes, not only in the field.** Nobody reads `passed=3` as "a
+model wrote three assertions from a ticket", so `GREEN_PROVES` says it, and a green and a
+red run must not share a message — one string covering both is honest and useless. Same
+argument as `report.render` naming the zero cache hit rate in words.
+
+**The flake policy is ONE retry, and a self-disagreement is a third outcome.** Failed
+then passed is neither a pass (the run disagreed with itself) nor a failure (it did not
+reproduce): it is quarantined, `binding` stays False, and the quarantine is NAMED.
+`QUARANTINE_FLAKY` (a fault) and `QUARANTINE_CHOSEN` (a human's decision) deliberately do
+not share a spelling — `scan_provenance`'s rule, because collapsing them hides a broken
+generated test behind last month's decision. The empty case writes "no tests are
+quarantined" rather than nothing: an absent line and a line stating nothing was excluded
+are different facts and only one is checkable. RED, a flake returning no quarantined
+paths, produced the artifact that makes the case — `2 passed, 0 failed … no tests are
+quarantined` for a run that failed and was retried.
+
+**NO BROWSER RUNS ON THIS MACHINE, and G4 is unverified against a real one.** Measured
+2026-08-28: selenium not installed, `chromedriver`/`geckodriver` not on PATH, no
+Chrome.app or Firefox.app, and `safaridriver -p 4444` **hung with no `/status` response
+in 120 s** (it needs Safari ▸ Develop ▸ Allow Remote Automation, a GUI action). Four
+Selenium tests are written and skip here. `SELENIUM_REQUIRED=true` promotes the skip to a
+**fault** — `1 failed, 4 errors` — the same shape as `SCANNERS_REQUIRED`, and
+`=false` correctly stays a skip. `test_the_skip_is_visible_and_not_silent` runs
+unconditionally and prints what is missing, because a suite collecting zero browser tests
+reads identically to one where they all passed.
+
+**`target_repo/tests/e2e/app_web.py` WRAPS `create_app()` and does not edit
+`app/auth.py`.** That file is what every clean and poisoned diff is written against, and
+`REAL_SCANNER_LINES` is a property of the scanners **and** of that exact reference diff —
+one missing blank line moved the findings from `{3,4}` to `{2,3}`. The new route is
+`/web/login`, not `/login`: overriding the endpoint the unit tests and every generated API
+test drive would mean a browser test that passes because it rewrote the thing under test.
+`LiveServer` opens a real socket, because `app.test_client()` is an in-process WSGI shim a
+browser cannot reach.
+
+**selenium is NOT a dependency of the five arm64 containers**, and that is a constraint
+rather than a preference: `test_requirements_covers_every_third_party_import_in_the_package`
+AST-walks `agentorg/`, so an import there would ship it to all five images. The e2e tests
+live outside `agentorg/` and import selenium **inside a fixture**, so collection never
+needs it. Measured: `0` occurrences in `agents/requirements.txt`, that file's 49 tests
+still green.
+
+**THE DONE-WHEN, measured.** `tests/test_testgen_catches_a_break.py` runs a real
+`python -m pytest` subprocess against `return username in _USERS` — a login handler
+accepting ANY password for a known user:
+
+```
+BROKEN   passed=0 failed=1 binding=True
+WORKING  passed=1 failed=0 binding=False
+>       assert authenticate("alice", "not-the-password") is False
+E       AssertionError: assert True is False
+```
+
+**The security verdict on that same diff is `pass`, correctly.** No credential, no CVE,
+no injectable pattern — the three scanners are structurally blind to it, and one test
+asserts both verdicts side by side. That contrast is the argument for this lane.
+
+**The control is what makes it evidence.** A generated test that failed against every app
+— a syntax error, a bad import, a wrong module path — satisfies the done-when assertion
+perfectly while catching nothing. RED, `_counts` always reporting one failure, is caught
+by the control and by nothing else.
+
+**Two wiring lines are NOT done, and no pipeline stage calls this agent.** `graph.py`,
+`scripts/run_stage.py`, `agents/server.py` and `common/agent_client.py` are the
+integrator's files, so `testgen` is exercised only by its own 28 tests and
+`RunState.generated_tests` is `None` on every run. Same honest state Lane C's `scoring`
+and Lane E's usage payload were left in.
+
+**One more inert-mutation instance, in a RED step's shell quoting.** A `python3 - <<'EOF'`
+heredoc containing `''')` died with `SyntaxError: unmatched ')'`, the mutation never
+applied, and pytest printed `5 passed` — indistinguishable from a caught mutation, with
+the error scrolled above it. Redone through a file whose script **asserts its own
+substitution applied and re-reads the file to confirm**. `assert s.count(old) == 1` before
+writing is the cheap form of that check.
+
 ---
 
 ## Where things live
@@ -2705,6 +2823,8 @@ failure names this package instead of surfacing as a packaging test going red.
 | `agentorg/cost/` | The price table, a run's `CostRecord`, and the cache finding |
 | `agentorg/common/diff.py` | What a diff PROPOSES — added lines only |
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile` |
+| `agentorg/agents/testgen.py` | A SIXTH agent: generates pytest from `plan.acceptance_criteria`, **never from the diff**. Runs them, and reports a red result as binding and a green one as not evidence. **Not wired into any stage yet** |
+| `target_repo/tests/e2e/` | The browser surface + Selenium. Wraps `create_app()` rather than editing `app/auth.py`. **Skips here: no browser on this machine** |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
 | `agentorg/security/scoring.py` | ONE severity table for all three scanners, the gitleaks policy, the threshold floor, and the `ScoreRow` audit trail |
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
