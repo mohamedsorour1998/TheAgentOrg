@@ -1842,6 +1842,93 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
+### A THIRD pattern — a dialect, a driver or a service nobody ever ran
+
+> **Code written for two backends and executed against one is not "mostly working". It
+> is one backend that works and one that has never been observed at all.**
+
+Measured 2026-08-28, the first time a real PostgreSQL 16.15 existed on any machine that
+ran this suite. **Every Postgres path in the repository failed on first execution**, and
+each failure was in the first statement that touched the database:
+
+| Where | What it did | Why the tests could not see it |
+|---|---|---|
+| `db/schema.py` | `DatatypeMismatch: column "unlimited" is of type boolean but default expression is of type integer` | `Column` carried per-dialect TYPES and one shared DEFAULT, so the mismatch was inexpressible in the model and invisible in the rendered DDL nobody compared |
+| `queue/_sql.py` | `DatatypeMismatch: column "poisoned" is of type integer but expression is of type boolean` | `_BOOL_COLUMNS` coerced on the way OUT; nothing coerced on the way IN, because psycopg correctly sends a bool as a bool. Two halves of one round trip, one of them never run |
+| `web/lib/tenant.ts` | the tenant lookup returns nothing — see below | sqlite cannot constrain a `SELECT`, so the query worked on the only backend anybody ran |
+
+Both DDL defects are the **same defect in opposite directions**: a boolean column whose
+literal is right in exactly one dialect. Both are now fixed *at the mechanism* — a
+`postgres_default` field and a per-dialect `_schema()` renderer — so neither can be
+re-expressed by a future column.
+
+**Two lanes said plainly that these paths were unverified**, and both were right to. Lane
+A: "the Postgres dialect is never executed... I will not ship a claim I cannot execute."
+Lane B: "the Postgres RLS is real emitted DDL asserted structurally but never executed."
+Those admissions are why the search took an hour rather than a day — **a lane that names
+what it could not run is worth more than one that reports green.**
+
+### RLS ISOLATION IS A PROPERTY OF THE CONNECTION, NOT OF THE SCHEMA
+
+The most dangerous thing found by running it, because the wrong configuration reports
+perfectly healthy. Same database, same six policies, two connections:
+
+```
+as the superuser that owns the tables
+  attacker sees: [('run-t-attacker',…), ('run-t-victim',…)]   <- LEAK
+  unscoped read: 2 rows
+
+as a plain LOGIN role with SELECT/INSERT/UPDATE granted
+  attacker sees: [('run-t-attacker',…)]                        <- refused
+  unscoped read: 0 rows
+```
+
+**Postgres skips row-level security for a superuser, for any role with `BYPASSRLS`, and
+for the table's OWNER.** `FORCE ROW LEVEL SECURITY` — which `schema.py` emits and
+`tests/test_tenancy.py` pins — addresses only the third. Nothing in SQL can constrain a
+superuser.
+
+So a DSN pointing at a superuser turns all six policies into decoration **while
+`pg_policies` still lists every one of them**: a check present, enumerable, and enforcing
+nothing. The deployment requirement is that the application connects as a non-superuser
+role which does not own these tables.
+
+Two smaller traps from the same session, both of which cost a wrong diagnosis first:
+
+- **`GRANT ... ON ALL TABLES` applies only to tables that exist at the time.** Granting
+  before a second schema file runs leaves the later tables invisible, and the error is
+  `relation "sessions" does not exist` — which reads as a missing migration, not a
+  missing grant.
+- **Table grants are useless without `GRANT USAGE ON SCHEMA public`.** Measured:
+  `current_schemas(true)` returned `{pg_catalog}` for the app role, so `public` was
+  invisible and every table in it "did not exist". The symptom names the table; the cause
+  is the schema.
+
+### THE TENANT LOOKUP IS CIRCULAR UNDER RLS, AND FAIL-CLOSED
+
+`membershipsFor` asks which tenant a login belongs to. It reads `membership`, which is in
+`SCOPED_TABLES` and therefore carries an RLS policy comparing against
+`current_setting('agentorg.tenant_id')`. RLS needs a bound tenant to return a row. **The
+bound tenant is what the function is trying to discover.** Measured, one connection, same
+query, same role:
+
+```
+no tenant bound      -> []
+tenant-zero bound    -> [('tenant-zero',)]
+```
+
+So `/api/session` answers `{"signed_in":true, …, "tenant_id":null}` while `/api/runs`
+answers 401. **That is correct as a default** — the alternative, returning tenant zero
+when the lookup finds nothing, would work in a demo and hand every new signup the original
+deployment's runs.
+
+The fix is a design decision, not a patch, and `web/lib/tenant.ts` records all three
+options with why two are wrong. Briefly: do **not** remove `membership` from
+`SCOPED_TABLES` (it holds who belongs to which organisation — exactly what a cross-tenant
+read must not see), and do **not** add a policy admitting rows when no tenant is bound
+(that makes "nobody is scoped" mean "everybody is visible", on the one table that decides
+scope). The right answer is a narrow unscoped path for the identity lookup alone.
+
 ### A SECOND pattern, found FOUR times in Phase 3 alone — a correct answer nobody asks for
 
 > **A feature can be complete, tested, and reached by nothing. Every test passes. The
@@ -2380,6 +2467,54 @@ Three things worth keeping:
 - **A container with no credential cannot answer a question that needs one**, and it
   fails by returning the fail-safe value rather than by erroring. Any future agent-side
   code reaching for a token has this shape.
+
+### Running the whole stack locally — the only way to exercise the Postgres paths
+
+The suite is hermetic by design and **cannot see any of the defects in the section above**.
+Reproducing them takes a real database. Recorded because it took three wrong diagnoses to
+get right, and every one of them named the wrong cause.
+
+```bash
+brew install postgresql@16
+export PATH="/opt/homebrew/opt/postgresql@16/bin:$PATH"
+pg_ctl -D /opt/homebrew/var/postgresql@16 -l /tmp/pg.log -o "-p 55432" start
+createdb -p 55432 agentorg
+.venv-main/bin/python -m pip install 'psycopg[binary]'      # NOT in any requirements file
+```
+
+Then, and the ORDER matters — see the two grant traps above:
+
+```bash
+# 1. both schemas FIRST
+.venv-main/bin/python -c "from agentorg.db import schema; print(schema.render_schema(schema.POSTGRES))" \
+  | psql -p 55432 -d agentorg
+psql -p 55432 -d agentorg -f web/lib/schema.sql
+
+# 2. a NON-SUPERUSER role that does not own the tables, or RLS enforces nothing
+psql -p 55432 -d agentorg -c "CREATE ROLE agentorg_app LOGIN PASSWORD '<local-only>';"
+psql -p 55432 -d agentorg -c "GRANT USAGE ON SCHEMA public TO agentorg_app;"
+psql -p 55432 -d agentorg -c "GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO agentorg_app;"
+
+# 3. the web app. All four are REQUIRED — next build refuses without them
+cd web && DATABASE_URL='postgresql://agentorg_app:<local-only>@127.0.0.1:55432/agentorg' \
+  AUTH_SECRET='<local-only>' AUTH_GITHUB_ID='<local>' AUTH_GITHUB_SECRET='<local>' \
+  npx next build && npx next start -p 3111
+```
+
+**Stop it afterwards**: `pg_ctl -D /opt/homebrew/var/postgresql@16 stop`. Started in the
+foreground rather than via `brew services` so it does not survive a reboot.
+
+What that configuration proved, end to end, with no GitHub Actions and no AWS:
+
+```
+plan done · gate1 done (paused for a human, released by --approve) · develop blocked exit 3
+status=blocked  security=block  blocking=2  provenance='scanners'  scoring rows=3
+generated_tests populated
+POST /api/approvals unauthenticated -> 401 "Nothing was recorded."
+  + Origin: https://evil.example    -> 403, BEFORE authentication
+  + a body carrying its own "by"    -> 401
+  + decision: "overridden"          -> 401
+```
 
 ### Live configuration
 
