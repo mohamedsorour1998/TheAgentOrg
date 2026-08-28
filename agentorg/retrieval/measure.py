@@ -330,10 +330,20 @@ def _retrieved_for(state: RunState, *, mismatch: bool) -> tuple[str, int]:
     """`(prompt_text, document_count)` from the corpus this consumer reads.
 
     THE QUERY IS THE DIFF PLUS THE TICKET, which is what `guard.context_for`'s caller would
-    pass. The diff alone cannot rank a mismatch document -- the diff says `remote_addr` and
-    nothing about what was ASKED for, and a mismatch is a relation between the two. Measured:
-    the diff alone retrieves the storage-choice ruling; diff plus ticket retrieves
-    `history-0001`, the per-IP-versus-per-email rejection.
+    pass. A mismatch is a relation between what was ASKED and what was WRITTEN, and the diff
+    carries only half of it.
+
+    MEASURED over `repo_history.DOCUMENTS`, and the honest version of this claim is weaker
+    than the one first written here. Weighted-overlap scores:
+
+        diff only     history-0005 17   history-0002 14   history-0001 12
+        diff+ticket   history-0005 30   history-0001 25   history-0004 17
+
+    So the diff alone DOES retrieve `history-0001` -- the per-IP-versus-per-email rejection --
+    at `limit=3`. What the ticket changes is its RANK, third to second, and its score, 12 to
+    25. The first version of this comment claimed the diff alone missed it entirely; that was
+    read off a two-corpus probe where four `conventions` entries sit above it, and
+    `tests/test_retrieval_measure.py` failed on the claim rather than on the code.
 
     `guard.CORPORA["reviewer"]` names both corpora, so this reads both -- the same channels
     the shipped guard would give the reviewer. Called through `hits` rather than
