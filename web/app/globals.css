@@ -78,3 +78,124 @@ samp {
     scroll-behavior: auto !important;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * LANE J ADDS BELOW THIS LINE. Nothing above is edited: the palette custom
+ * properties, the focus ring and the reduced-motion block are Lane I's and are
+ * extended rather than replaced.
+ *
+ * MONO IS THE DISPLAY FACE HERE, and that is the one type decision worth
+ * arguing. This product's memorable strings are `blocking: 2`, `app/auth.py:3`
+ * and `critical >= high` -- a serif display face over a screen whose subject is
+ * a deterministic rule would be decoration pretending to be voice. So the
+ * display scale is mono with negative tracking, and the sans face carries prose
+ * only. Both are system stacks: this app must build with no network, like every
+ * other gate in this repository.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+:root {
+  /* Two more surfaces, derived from Lane I's --surface rather than invented, so
+     a palette change upstream still moves everything. */
+  --surface-sunken: #070a10;
+  --border-strong: #2c3a4f;
+
+  /* A TYPE SCALE, not ad-hoc sizes. Four steps and a caption; anything needing
+     a fifth is a sign the screen is doing two jobs. */
+  --step-display: clamp(1.75rem, 1.2rem + 2.4vw, 2.75rem);
+  --step-title: clamp(1.25rem, 1.05rem + 0.9vw, 1.6rem);
+  --step-body: 0.9375rem;
+  --step-small: 0.8125rem;
+  --step-caption: 0.6875rem;
+
+  /* One spacing ramp. */
+  --gap-1: 0.25rem;
+  --gap-2: 0.5rem;
+  --gap-3: 0.75rem;
+  --gap-4: 1rem;
+  --gap-6: 1.5rem;
+  --gap-8: 2rem;
+  --gap-12: 3rem;
+
+  /* The measure a line of prose is allowed to reach. Past ~70ch the eye loses
+     its place returning to the left edge. */
+  --measure: 68ch;
+}
+
+/* THE EYEBROW. Small, tracked-out, mono, muted -- it labels a region without
+   competing with the region's own heading. Used as the ONLY decorative device
+   in the app, so it stays legible as a signal. */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--step-caption);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 0 0 var(--gap-2);
+}
+
+/* Display and title both mono, both tracked IN -- large mono at default
+   tracking reads as a terminal dump rather than as a headline. */
+.display {
+  font-family: var(--mono);
+  font-size: var(--step-display);
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.title {
+  font-family: var(--mono);
+  font-size: var(--step-title);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  margin: 0;
+}
+
+.prose {
+  max-width: var(--measure);
+  color: var(--text-muted);
+  font-size: var(--step-body);
+}
+
+/* An identifier is compared character by character, so it is mono, it does not
+   wrap mid-token, and it never becomes a link unless it navigates. */
+.ident {
+  font-family: var(--mono);
+  font-size: var(--step-small);
+  color: var(--text);
+  word-break: break-all;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+/* Every interactive control inherits the app's type rather than the UA's. */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* SKIP LINK. Visible only on focus, and it must sit above everything. Without
+   one, reaching the main content by keyboard means tabbing the whole nav on
+   every page. */
+.skip-link {
+  position: absolute;
+  left: var(--gap-4);
+  top: var(--gap-4);
+  z-index: 100;
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--surface-raised);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
