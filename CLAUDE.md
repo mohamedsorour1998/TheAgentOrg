@@ -3363,27 +3363,31 @@ for `tests/test_approve_server.py:266-289`'s reason.
 
 #### Known gaps, named rather than implied
 
-- **~~NO POSTGRES HAS EVER BEEN CONNECTED~~ — OVERTAKEN by `471fc31` / `69ab1d3`, and
-  the corrected claim is narrower and better.** A real **PostgreSQL 16.15** now runs the
-  schema: independently re-verified 2026-08-28 by applying `schema.render_schema("postgres")`
-  to a fresh database — **7 tables, 6 RLS policies** — and driving the queue's Postgres
-  dialect (`enqueue OK … poisoned=True status='ready'`, `claim OK … poisoned= True`).
-  `agentorg/db/engine.py` is still sqlite3-only and **`migrations.migrate` cannot run on
-  Postgres at all**: it calls `connection.executescript`, which only sqlite3 has, so the
-  DDL must be applied through `render_schema` directly. That is a real gap the two fix
-  commits did not close.
+- **~~NO POSTGRES HAS EVER BEEN CONNECTED~~ — OVERTAKEN by `471fc31` / `69ab1d3`.** A
+  real **PostgreSQL 16.15** now runs the schema; the third-pattern section above is the
+  full account, including the RLS-depends-on-the-role finding. Independently re-verified
+  from this lane by applying `schema.render_schema("postgres")` to a fresh database —
+  **7 tables, 6 RLS policies** — and driving the queue (`enqueue OK … poisoned=True`,
+  `claim OK … poisoned= True`).
 
-  **The sign-in flow has still never completed, for a better reason than a missing
-  database.** `69ab1d3` found the tenant lookup is **circular under RLS** — `membershipsFor`
-  reads `membership`, which carries a policy needing a bound tenant, and the bound tenant
-  is what that query exists to discover. Measured: `no tenant bound -> []`,
-  `tenant-zero bound -> [('tenant-zero',)]`.
+  **ONE GAP THOSE TWO COMMITS DID NOT CLOSE: `migrations.migrate` CANNOT RUN ON POSTGRES
+  AT ALL.** It accepts `dialect="postgres"` and then calls `connection.executescript` at
+  three sites (`migrations.py:104`, `:119`, `:145`). Measured:
 
-  **And the RLS is only as good as the ROLE.** As the superuser owning the tables the
-  policies isolate **nothing**; they refuse correctly only as a plain LOGIN role. So
-  "Postgres enforces reads" is true of a correctly-provisioned role and **false of the
-  connection a developer most easily makes.** `docker compose up` has still never run —
-  the Postgres above is a Homebrew service, not the compose stack.
+  ```
+  sqlite3 Connection has executescript: True
+  psycopg Connection has executescript: False
+  ```
+
+  Its annotation is `connection: sqlite3.Connection`, so the parameter offers a dialect
+  the runner physically cannot reach — the DDL has to be applied through `render_schema`
+  directly, which is how every Postgres verification so far has done it. So the
+  **forward-only migration ledger, its checksum guard and its idempotency have never run
+  on Postgres**, and that is a different gap from the two that were fixed.
+
+  **The sign-in flow has still never completed**, for the circular-RLS reason `69ab1d3`
+  records, and `docker compose up` has still never run — the Postgres above is a Homebrew
+  service, not the compose stack.
 - **`repo` OAuth SCOPE IS ALL-OR-NOTHING.** There is no per-repository OAuth scope, so
   the in-scope list is enforced by this application and not by GitHub. Per-repository
   grants need a GitHub App (installation tokens, a different authorisation model).
@@ -3757,7 +3761,7 @@ noise.**
 | `scripts/measure_prompts.py` | Lane M's gate: two prompt changes, one arm each, model-backed. A prompt edit is a behaviour change with no compiler, and `pytest` cannot see it |
 | `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — **5 of 76** modules, **2** module-level at `d6165c8`. Replaced four grep counts that reproduced under no scope |
 | `scripts/measure_{scorecard,sbom,cost}.py` | **Lane L.** The evolution scorecard's row, the container SBOM, and what one change costs. Each **exits non-zero when it cannot measure what it claims** — `--require-real-scanners` and `--require-model` are the two flags that stop a fixture-read figure wearing a real number's clothes |
-| `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **sixteen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
+| `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **seventeen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
 | `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |

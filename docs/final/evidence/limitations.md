@@ -612,3 +612,45 @@ Here the superseded text is evidence of something more useful than a defect: **i
 exactly what nobody had run, and somebody then ran it and found two real bugs.** A
 limitation written down is a limitation somebody can close, and these two were closed by a
 different lane within hours of being recorded. That is the argument for the whole document.
+
+---
+
+## 17 · `migrations.migrate` accepts a Postgres dialect it cannot execute
+
+**What.** Found while re-verifying §11 rather than by reading. `migrate()` takes
+`dialect: str = schema.SQLITE` and is happy to be passed `"postgres"` — and then calls
+`connection.executescript` at three sites, which only `sqlite3` provides:
+
+```
+migrations.migrate(psycopg_connection, dialect="postgres")
+  AttributeError: 'Connection' object has no attribute 'executescript'
+
+sqlite3 Connection has executescript: True
+psycopg Connection has executescript: False
+```
+
+Its own annotation is `connection: sqlite3.Connection` (`migrations.py:111`), so the
+signature is internally consistent — the `dialect` parameter offers a backend the
+`connection` parameter cannot be.
+
+**The consequence is narrower than "Postgres does not work", and worse than it sounds.**
+Every Postgres verification so far — `471fc31`, `69ab1d3`, and this lane's — applied the
+DDL through `schema.render_schema("postgres")` directly. That works. But it bypasses the
+migration runner entirely, so **the forward-only ledger, its checksum guard and its
+idempotency have never executed on Postgres.** `migrations.py`'s own docstring explains
+why that ledger matters: *"A migration edited after it was applied is the failure that
+produces two databases with the same version number and different shapes"*, and the
+checksum is the only thing that can see it.
+
+So a Postgres deployment today gets the schema and **no version history** — the exact
+condition the ledger exists to prevent.
+
+**Cost to remove: one dialect-aware statement splitter.** `executescript` is
+sqlite3-specific sugar for "run this multi-statement string"; psycopg's `execute` will
+take one too, so the fix is roughly `if dialect == POSTGRES: connection.execute(sql) else:
+connection.executescript(sql)` at three sites, plus widening the annotation. The DDL
+itself already renders correctly per dialect — that is what `471fc31` fixed.
+
+**Why not now.** `agentorg/db/` is not this lane's file, and the change wants a test that
+runs the ledger twice against a real Postgres to prove idempotency — which is the whole
+point of it and cannot be asserted structurally. Reported with the reproduction above.

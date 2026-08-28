@@ -17,7 +17,7 @@ evidence rather than clutter.
 | `cost-comparison.md` | §4 · cost | three scenarios, and the arithmetic for the one that is deliberately not measured |
 | `dependency-inventory.md` | §5 · external dependency | substitutable / seam-bound / load-bearing, with a named blast radius each, plus `web/`'s closure which the baseline had no row for |
 | `sbom.md` | §5 · supply chain | CycloneDX SBOM, pinned versions, the deployed **digest**, and the five-step scanner-update process |
-| `limitations.md` | §13 · limitations | **sixteen** limitations, each **costed** — what removing it would take, and why not now |
+| `limitations.md` | §13 · limitations | **seventeen** limitations, each **costed** — what removing it would take, and why not now |
 | `competitors.md` | §7 · competitive landscape | where each competitor is **better**, and the one row nobody else has |
 
 ## The data

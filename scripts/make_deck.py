@@ -963,7 +963,7 @@ def slide_limits(prs):
         "Any of our three approvals can be bypassed by a repository administrator.",
     ], top=Inches(2.7), size=19, gap=0.72)
     note = _text(slide,
-        "Sixteen limitations are written down, each with what removing it would take. Two "
+        "Seventeen limitations are written down, each with what removing it would take. Two "
         "were closed by another engineer within hours of being recorded — which is what "
         "writing them down is for.",
         left=MARGIN, top=Inches(6.15), width=Inches(11.0), height=Inches(0.9),

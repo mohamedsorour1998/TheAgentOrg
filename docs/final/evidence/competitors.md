@@ -85,7 +85,7 @@ limit.
 Copilot's agent, Claude Code and Devin are generally available with paying customers.
 Our sign-in flow **has never completed once** (`limitations.md` §11), our durable queue
 is invoked by nothing in production (§13), and no browser has run our browser tests
-(§14). Sixteen limitations are written down. That is a real answer to "how does this
+(§14). Seventeen limitations are written down. That is a real answer to "how does this
 compare", and it is not a favourable one.
 
 ---
