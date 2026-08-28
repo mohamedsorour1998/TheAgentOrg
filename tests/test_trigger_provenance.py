@@ -372,6 +372,27 @@ def test_the_stage_records_the_trigger_onto_the_run_state():
             "OFFLINE_REPO": f"{workspace}/repo",
             "OFFLINE_NOTES": f"{workspace}/NOTES.md",
             "RUNS_DIR": workspace,
+            # PYTHONPATH IS WHAT MAKES THIS TEST PASS IN A GIT WORKTREE, and without it
+            # this was the only failing test in every one of the final phase's fourteen
+            # lane worktrees -- read as a lane regression by three separate lanes before
+            # the cause was found.
+            #
+            # The subprocess imports `agentorg` through the EDITABLE INSTALL's finder,
+            # which resolves to the main checkout rather than to the tree this test file
+            # lives in. `gates._STATE_DIR` is then
+            # `Path(agentorg.gates.__file__).parent.parent / "runs"` -- the MAIN
+            # checkout's runs/ -- so the stage wrote its state there while the assertion
+            # below globbed the worktree's. Both halves were doing exactly what they say.
+            #
+            # MEASURED in a pristine worktree at 9b2b1ee with no other changes:
+            #   pytest -q tests/test_trigger_provenance.py            -> 1 failed
+            #   PYTHONPATH=$PWD pytest -q tests/...                   -> 21 passed
+            #
+            # Note `RUNS_DIR` above is INERT: `grep -rn RUNS_DIR agentorg/ scripts/`
+            # returns nothing. It is left in place because it documents the intent and
+            # costs nothing, but it is not what redirects the state -- believing it did
+            # is what made this look impossible.
+            "PYTHONPATH": str(REPO_ROOT),
         }
         completed = subprocess.run(
             [
