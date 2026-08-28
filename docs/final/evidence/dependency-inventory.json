@@ -1,0 +1,789 @@
+{
+  "measured_at": "2026-08-28T05:13:27+0300",
+  "commit": "9b2b1ee",
+  "conditions": {
+    "trees_searched": [
+      "agentorg",
+      "infra"
+    ],
+    "python": "3.14.7",
+    "note": "tests/ is excluded on purpose: a token named in an assertion is not a dependency of the product, and counting them would overstate lock-in."
+  },
+  "references": {
+    "bedrock": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 16,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/llm.py",
+              "agentorg/common/model.py",
+              "agentorg/github_ops.py",
+              "agentorg/state.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 25,
+            "files": [
+              "infra/README.md",
+              "infra/Terraform/modules/agentcore/main.tf",
+              "infra/agentcore/README.md",
+              "infra/agentcore/deploy.sh"
+            ]
+          },
+          "scripts": {
+            "occurrences": 19,
+            "files": [
+              "scripts/bedrock_smoke_test.py",
+              "scripts/measure_dependencies.py",
+              "scripts/preflight.py"
+            ]
+          }
+        },
+        "canonical_total": 41,
+        "with_scripts_total": 60
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 32,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/config.py",
+              "agentorg/common/llm.py",
+              "agentorg/common/model.py",
+              "agentorg/github_ops.py",
+              "agentorg/state.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 49,
+            "files": [
+              "infra/README.md",
+              "infra/Terraform/environments/shared/main.tf",
+              "infra/Terraform/modules/agentcore/main.tf",
+              "infra/agentcore/Dockerfile",
+              "infra/agentcore/README.md",
+              "infra/agentcore/deploy.sh"
+            ]
+          },
+          "scripts": {
+            "occurrences": 32,
+            "files": [
+              "scripts/bedrock_smoke_test.py",
+              "scripts/make_deck.py",
+              "scripts/measure_dependencies.py",
+              "scripts/measure_scorecard.py",
+              "scripts/preflight.py"
+            ]
+          }
+        },
+        "canonical_total": 81,
+        "with_scripts_total": 113
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'bedrock' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'bedrock' agentorg infra | wc -l"
+    },
+    "amazonaws": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 0,
+            "files": []
+          },
+          "infra": {
+            "occurrences": 6,
+            "files": [
+              "infra/README.md",
+              "infra/Terraform/modules/agentcore/main.tf",
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/agentcore/README.md"
+            ]
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 6,
+        "with_scripts_total": 13
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 0,
+            "files": []
+          },
+          "infra": {
+            "occurrences": 6,
+            "files": [
+              "infra/README.md",
+              "infra/Terraform/modules/agentcore/main.tf",
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/agentcore/README.md"
+            ]
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 6,
+        "with_scripts_total": 13
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'amazonaws' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'amazonaws' agentorg infra | wc -l"
+    },
+    "github.com": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 4,
+            "files": [
+              "agentorg/agents/Dockerfile",
+              "agentorg/repo_snapshot.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 3,
+            "files": [
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/agentcore/Dockerfile"
+            ]
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 7,
+        "with_scripts_total": 14
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 4,
+            "files": [
+              "agentorg/agents/Dockerfile",
+              "agentorg/repo_snapshot.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 3,
+            "files": [
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/agentcore/Dockerfile"
+            ]
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 7,
+        "with_scripts_total": 14
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'github\\.com' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'github\\.com' agentorg infra | wc -l"
+    },
+    "openai": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 1,
+            "files": [
+              "agentorg/common/model.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 0,
+            "files": []
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 1,
+        "with_scripts_total": 8
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 7,
+            "files": [
+              "agentorg/common/config.py",
+              "agentorg/common/model.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 0,
+            "files": []
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 7,
+        "with_scripts_total": 14
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'openai' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'openai' agentorg infra | wc -l"
+    },
+    "boto3": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 25,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/config.py",
+              "agentorg/common/llm.py",
+              "agentorg/github_ops.py",
+              "agentorg/log.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 9,
+            "files": [
+              "infra/Terraform/environments/shared/main.tf",
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/Terraform/modules/ingress/variables.tf",
+              "infra/Terraform/modules/state/main.tf",
+              "infra/ingress/handler.py"
+            ]
+          },
+          "scripts": {
+            "occurrences": 24,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py",
+              "scripts/measure_scorecard.py",
+              "scripts/preflight.py"
+            ]
+          }
+        },
+        "canonical_total": 34,
+        "with_scripts_total": 58
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 25,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/config.py",
+              "agentorg/common/llm.py",
+              "agentorg/github_ops.py",
+              "agentorg/log.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 9,
+            "files": [
+              "infra/Terraform/environments/shared/main.tf",
+              "infra/Terraform/modules/ingress/main.tf",
+              "infra/Terraform/modules/ingress/variables.tf",
+              "infra/Terraform/modules/state/main.tf",
+              "infra/ingress/handler.py"
+            ]
+          },
+          "scripts": {
+            "occurrences": 24,
+            "files": [
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py",
+              "scripts/measure_scorecard.py",
+              "scripts/preflight.py"
+            ]
+          }
+        },
+        "canonical_total": 34,
+        "with_scripts_total": 58
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'boto3' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'boto3' agentorg infra | wc -l"
+    },
+    "pygithub": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 9,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/github_ops.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 0,
+            "files": []
+          },
+          "scripts": {
+            "occurrences": 7,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 9,
+        "with_scripts_total": 16
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 9,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/github_ops.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 0,
+            "files": []
+          },
+          "scripts": {
+            "occurrences": 8,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 9,
+        "with_scripts_total": 17
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'PyGithub' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'PyGithub' agentorg infra | wc -l"
+    },
+    "pydantic": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 18,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/agents/server.py",
+              "agentorg/agents/sre.py",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/config.py",
+              "agentorg/common/llm.py",
+              "agentorg/log.py",
+              "agentorg/security/__init__.py",
+              "agentorg/security/_run.py",
+              "agentorg/state.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 1,
+            "files": [
+              "infra/Terraform/modules/state/main.tf"
+            ]
+          },
+          "scripts": {
+            "occurrences": 6,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 19,
+        "with_scripts_total": 25
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 18,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/agents/server.py",
+              "agentorg/agents/sre.py",
+              "agentorg/common/agent_client.py",
+              "agentorg/common/config.py",
+              "agentorg/common/llm.py",
+              "agentorg/log.py",
+              "agentorg/security/__init__.py",
+              "agentorg/security/_run.py",
+              "agentorg/state.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 1,
+            "files": [
+              "infra/Terraform/modules/state/main.tf"
+            ]
+          },
+          "scripts": {
+            "occurrences": 6,
+            "files": [
+              "scripts/measure_dependencies.py"
+            ]
+          }
+        },
+        "canonical_total": 19,
+        "with_scripts_total": 25
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'pydantic' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'pydantic' agentorg infra | wc -l"
+    },
+    "strands": {
+      "case_sensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 6,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/common/llm.py",
+              "agentorg/common/model.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 1,
+            "files": [
+              "infra/Terraform/modules/agentcore/main.tf"
+            ]
+          },
+          "scripts": {
+            "occurrences": 8,
+            "files": [
+              "scripts/bedrock_smoke_test.py",
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 7,
+        "with_scripts_total": 15
+      },
+      "case_insensitive": {
+        "per_tree": {
+          "agentorg": {
+            "occurrences": 9,
+            "files": [
+              "agentorg/agents/requirements.txt",
+              "agentorg/agents/sre.py",
+              "agentorg/common/llm.py",
+              "agentorg/common/model.py",
+              "agentorg/state.py"
+            ]
+          },
+          "infra": {
+            "occurrences": 2,
+            "files": [
+              "infra/Terraform/modules/agentcore/main.tf"
+            ]
+          },
+          "scripts": {
+            "occurrences": 8,
+            "files": [
+              "scripts/bedrock_smoke_test.py",
+              "scripts/measure_dependencies.py",
+              "scripts/measure_sbom.py"
+            ]
+          }
+        },
+        "canonical_total": 11,
+        "with_scripts_total": 19
+      },
+      "reproduce_case_sensitive": "grep -rhoE 'strands' agentorg infra | wc -l",
+      "reproduce_case_insensitive": "grep -rhoiE 'strands' agentorg infra | wc -l"
+    }
+  },
+  "spec_check": {
+    "bedrock": {
+      "spec_quoted": 33,
+      "measured_case_sensitive": 41,
+      "measured_case_insensitive": 81,
+      "reproduces_under_either_basis": false,
+      "scope": "agentorg + infra, whole files"
+    },
+    "amazonaws": {
+      "spec_quoted": 13,
+      "measured_case_sensitive": 6,
+      "measured_case_insensitive": 6,
+      "reproduces_under_either_basis": false,
+      "scope": "agentorg + infra, whole files"
+    },
+    "github.com": {
+      "spec_quoted": 5,
+      "measured_case_sensitive": 7,
+      "measured_case_insensitive": 7,
+      "reproduces_under_either_basis": false,
+      "scope": "agentorg + infra, whole files"
+    },
+    "openai": {
+      "spec_quoted": 1,
+      "measured_case_sensitive": 1,
+      "measured_case_insensitive": 7,
+      "reproduces_under_either_basis": true,
+      "scope": "agentorg + infra, whole files"
+    }
+  },
+  "import_sites": {
+    "pydantic": {
+      "module_level": [
+        "agentorg/agents/server.py:47",
+        "agentorg/agents/sre.py:47",
+        "agentorg/common/agent_client.py:78",
+        "agentorg/common/llm.py:33",
+        "agentorg/state.py:16"
+      ],
+      "in_function": [],
+      "distribution": "pydantic",
+      "module_level_count": 5,
+      "in_function_count": 0,
+      "blast_radius": "these modules die at import: ['agentorg/agents/server.py:47', 'agentorg/agents/sre.py:47', 'agentorg/common/agent_client.py:78', 'agentorg/common/llm.py:33', 'agentorg/state.py:16']"
+    },
+    "github": {
+      "module_level": [
+        "agentorg/github_ops.py:41"
+      ],
+      "in_function": [],
+      "distribution": "PyGithub",
+      "module_level_count": 1,
+      "in_function_count": 0,
+      "blast_radius": "these modules die at import: ['agentorg/github_ops.py:41']"
+    },
+    "boto3": {
+      "module_level": [
+        "infra/ingress/handler.py:93"
+      ],
+      "in_function": [
+        "agentorg/common/agent_client.py:161",
+        "agentorg/common/agent_client.py:181",
+        "agentorg/common/llm.py:122",
+        "agentorg/github_ops.py:1018",
+        "agentorg/github_ops.py:995",
+        "agentorg/log.py:162"
+      ],
+      "distribution": "boto3",
+      "module_level_count": 1,
+      "in_function_count": 6,
+      "blast_radius": "these modules die at import: ['infra/ingress/handler.py:93']"
+    },
+    "strands": {
+      "module_level": [],
+      "in_function": [
+        "agentorg/common/llm.py:155",
+        "agentorg/common/model.py:17",
+        "agentorg/common/model.py:33"
+      ],
+      "distribution": "strands-agents",
+      "module_level_count": 0,
+      "in_function_count": 3,
+      "blast_radius": "no module-level import; only the calling function fails"
+    }
+  },
+  "aws_services": {
+    "services": {
+      "bedrock-agentcore": [
+        "agentorg/common/agent_client.py:184"
+      ],
+      "bedrock-agentcore-control": [
+        "agentorg/common/agent_client.py:164",
+        "agentorg/github_ops.py:1021"
+      ],
+      "dynamodb": [
+        "agentorg/log.py:164"
+      ],
+      "events": [
+        "infra/ingress/handler.py:128"
+      ],
+      "secretsmanager": [
+        "infra/ingress/handler.py:136"
+      ]
+    },
+    "distinct_count": 5,
+    "unresolved_sites": [],
+    "note": "bedrock model invocation does NOT appear here: it goes through strands, not a boto3 client. A boto3-only inventory would miss the single most load-bearing dependency in the system."
+  },
+  "github_api_surface": {
+    "distinct_operations": 14,
+    "operations": {
+      "create_comment": [
+        386,
+        525
+      ],
+      "create_file": [
+        194
+      ],
+      "create_git_ref": [
+        173
+      ],
+      "create_pull": [
+        221
+      ],
+      "edit": [
+        939
+      ],
+      "get_branch": [
+        170,
+        613
+      ],
+      "get_check_runs": [
+        614
+      ],
+      "get_commit": [
+        614
+      ],
+      "get_contents": [
+        184
+      ],
+      "get_issue": [
+        386,
+        525,
+        938
+      ],
+      "get_pulls": [
+        229,
+        521,
+        780
+      ],
+      "get_repo": [
+        67
+      ],
+      "merge": [
+        794
+      ],
+      "update_file": [
+        185
+      ]
+    },
+    "raw_rest_call_indicators": 0,
+    "lines": 1132,
+    "reproduce": "grep -nE 'requests\\.|urlopen|_requester|/repos/' agentorg/github_ops.py",
+    "note": "zero raw REST indicators means the whole GitHub surface is these operations. A second integration has a countable target rather than an open-ended one."
+  },
+  "declared_dependencies": {
+    "pyproject.toml": {
+      "dependencies": [
+        {
+          "spec": "pydantic>=2.0",
+          "pin": "FLOOR_ONLY"
+        },
+        {
+          "spec": "strands-agents\",",
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "boto3\",",
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "PyGithub\",",
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "flask\",",
+          "pin": "UNPINNED"
+        }
+      ]
+    },
+    "agentorg/agents/requirements.txt": [
+      {
+        "spec": "strands-agents==1.52.0",
+        "pin": "EXACT"
+      },
+      {
+        "spec": "bedrock-agentcore==1.22.0",
+        "pin": "EXACT"
+      },
+      {
+        "spec": "pydantic==2.13.4",
+        "pin": "EXACT"
+      },
+      {
+        "spec": "boto3==1.43.75",
+        "pin": "EXACT"
+      },
+      {
+        "spec": "PyGithub==2.10.0",
+        "pin": "EXACT"
+      }
+    ],
+    "infra/ingress": {
+      "dependency_files": [],
+      "note": "no dependency file. handler.py imports stdlib plus boto3, and that boto3 comes from the Lambda runtime -- so it is UNPINNED and AWS chooses the version. Acceptable for three API calls; worth stating rather than discovering."
+    }
+  },
+  "scanner_pins": {
+    "image_pins": {
+      "gitleaks_version": "8.21.2",
+      "trivy_version": "0.74.0",
+      "semgrep_version": "1.172.0"
+    },
+    "ci_pins": {
+      "gitleaks_version": "8.21.2",
+      "trivy_version": "0.74.0",
+      "semgrep_version": "1.172.0"
+    },
+    "agree": true,
+    "drift": {},
+    "note": "the image pulls arm64 assets and CI pulls x64 ones at the SAME versions. That is a platform difference by design, not drift: AgentCore runs arm64 and GitHub's runners are x64.",
+    "reproduce": "grep -E 'ARG (GITLEAKS|TRIVY|SEMGREP)_VERSION' agentorg/agents/Dockerfile; grep -E '(GITLEAKS|TRIVY|SEMGREP)_VERSION:' .github/workflows/ci.yml"
+  },
+  "line_counts": {
+    "agentorg/security/": {
+      "measured": 1730,
+      "spec_quoted": 1727,
+      "delta": 3,
+      "basis": "python source only",
+      "explanation": ""
+    },
+    "agentorg/github_ops.py": {
+      "measured": 1132,
+      "spec_quoted": 1132,
+      "delta": 0,
+      "basis": "whole file",
+      "explanation": ""
+    },
+    "agentorg/agents/": {
+      "measured": 1058,
+      "spec_quoted": 1058,
+      "delta": 0,
+      "basis": "python source only",
+      "explanation": ""
+    },
+    "scripts/run_stage.py": {
+      "measured": 909,
+      "spec_quoted": 909,
+      "delta": 0,
+      "basis": "whole file",
+      "explanation": ""
+    },
+    "agentorg/graph.py": {
+      "measured": 697,
+      "spec_quoted": 697,
+      "delta": 0,
+      "basis": "whole file",
+      "explanation": ""
+    },
+    "agentorg/state.py": {
+      "measured": 448,
+      "spec_quoted": 300,
+      "delta": 148,
+      "basis": "whole file",
+      "explanation": "the Phase 0 contract batch added CostRecord, StageCost, ScoreRow, GeneratedTests and RetrievalRecord. Growth here is the plan working, not drift to correct."
+    }
+  }
+}

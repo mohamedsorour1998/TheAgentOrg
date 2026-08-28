@@ -1,0 +1,345 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-28T16:09:55+0300",
+    "component": {
+      "type": "container",
+      "bom-ref": "theagentorg-agent-image",
+      "name": "theagentorg-agent",
+      "version": "d6165c8"
+    },
+    "properties": [
+      {
+        "name": "agentorg:sbom_kind",
+        "value": "source-declared"
+      },
+      {
+        "name": "agentorg:not_an_image_scan",
+        "value": "declared components only. The transitive closure, the base image's OS inventory and the deployed digest are NOT here -- see gaps[] in sbom.json for the command that produces each."
+      },
+      {
+        "name": "agentorg:commit",
+        "value": "d6165c8"
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "container",
+      "bom-ref": "pkg:docker/public.ecr.aws/docker/library/python@3.12-slim",
+      "name": "public.ecr.aws/docker/library/python",
+      "version": "3.12-slim",
+      "purl": "pkg:docker/public.ecr.aws/docker/library/python@3.12-slim",
+      "properties": [
+        {
+          "name": "agentorg:pinned_by",
+          "value": "tag"
+        },
+        {
+          "name": "agentorg:platform",
+          "value": "linux/arm64"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/strands-agents@1.52.0",
+      "name": "strands-agents",
+      "version": "1.52.0",
+      "purl": "pkg:pypi/strands-agents@1.52.0",
+      "properties": [
+        {
+          "name": "agentorg:pin",
+          "value": "EXACT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/bedrock-agentcore@1.22.0",
+      "name": "bedrock-agentcore",
+      "version": "1.22.0",
+      "purl": "pkg:pypi/bedrock-agentcore@1.22.0",
+      "properties": [
+        {
+          "name": "agentorg:pin",
+          "value": "EXACT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pydantic@2.13.4",
+      "name": "pydantic",
+      "version": "2.13.4",
+      "purl": "pkg:pypi/pydantic@2.13.4",
+      "properties": [
+        {
+          "name": "agentorg:pin",
+          "value": "EXACT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/boto3@1.43.75",
+      "name": "boto3",
+      "version": "1.43.75",
+      "purl": "pkg:pypi/boto3@1.43.75",
+      "properties": [
+        {
+          "name": "agentorg:pin",
+          "value": "EXACT"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pygithub@2.10.0",
+      "name": "PyGithub",
+      "version": "2.10.0",
+      "purl": "pkg:pypi/pygithub@2.10.0",
+      "properties": [
+        {
+          "name": "agentorg:pin",
+          "value": "EXACT"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/gitleaks@8.21.2",
+      "name": "gitleaks",
+      "version": "8.21.2",
+      "purl": "pkg:generic/gitleaks@8.21.2",
+      "supplier": {
+        "name": "github.com/gitleaks/gitleaks"
+      },
+      "properties": [
+        {
+          "name": "agentorg:delivery",
+          "value": "release tarball, linux_arm64"
+        },
+        {
+          "name": "agentorg:ci_agrees",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:generic/trivy@0.74.0",
+      "name": "trivy",
+      "version": "0.74.0",
+      "purl": "pkg:generic/trivy@0.74.0",
+      "supplier": {
+        "name": "github.com/aquasecurity/trivy"
+      },
+      "properties": [
+        {
+          "name": "agentorg:delivery",
+          "value": "release tarball, Linux-ARM64"
+        },
+        {
+          "name": "agentorg:ci_agrees",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:pypi/semgrep@1.172.0",
+      "name": "semgrep",
+      "version": "1.172.0",
+      "purl": "pkg:pypi/semgrep@1.172.0",
+      "supplier": {
+        "name": "PyPI"
+      },
+      "properties": [
+        {
+          "name": "agentorg:delivery",
+          "value": "pip, into its own venv at /opt/semgrep-venv"
+        },
+        {
+          "name": "agentorg:ci_agrees",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:deb/debian/curl",
+      "name": "curl",
+      "version": "",
+      "purl": "pkg:deb/debian/curl",
+      "properties": [
+        {
+          "name": "agentorg:versioned",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:deb/debian/ca-certificates",
+      "name": "ca-certificates",
+      "version": "",
+      "purl": "pkg:deb/debian/ca-certificates",
+      "properties": [
+        {
+          "name": "agentorg:versioned",
+          "value": "false"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:deb/debian/git",
+      "name": "git",
+      "version": "",
+      "purl": "pkg:deb/debian/git",
+      "properties": [
+        {
+          "name": "agentorg:versioned",
+          "value": "false"
+        }
+      ]
+    }
+  ],
+  "_agentorg": {
+    "commit": "d6165c8",
+    "measured_at": "2026-08-28T16:09:55+0300",
+    "conditions": {
+      "sbom_kind": "source-declared, NOT an image scan",
+      "syft_available": false,
+      "docker_available": true,
+      "python": "3.14.7",
+      "note": "the image is linux/arm64 and built by CodeBuild. A true image SBOM needs the built image; the gaps section names the command."
+    },
+    "gaps": [
+      {
+        "gap": "the transitive dependency closure actually installed",
+        "why": "requirements.txt pins five DIRECT packages. strands-agents and boto3 pull dozens of transitive ones, and their versions are resolved at build time by pip, not declared anywhere in this repo.",
+        "command": "docker run --rm --platform linux/arm64 <account>.dkr.ecr.us-east-1.amazonaws.com/theagentorg-shared-security-agent:latest pip freeze"
+      },
+      {
+        "gap": "the base image's own OS package inventory",
+        "why": "python:3.12-slim ships a Debian userland this repo never lists.",
+        "command": "syft public.ecr.aws/docker/library/python:3.12-slim -o cyclonedx-json"
+      },
+      {
+        "gap": "the digest of the image actually deployed",
+        "why": "five ECR tags are deployed and a tag is mutable. Without a digest an SBOM describes an intention rather than an artifact.",
+        "command": "aws ecr describe-images --repository-name theagentorg-shared-security-agent --region us-east-1 --query 'imageDetails[].imageDigest'"
+      },
+      {
+        "gap": "known vulnerabilities in any of the above",
+        "why": "an SBOM is an inventory, not an assessment. trivy is already in the image and can scan the image it is in.",
+        "command": "trivy image --format cyclonedx <image reference>"
+      }
+    ],
+    "update_process": [
+      {
+        "step": 1,
+        "action": "Bump the version in BOTH places, in one commit",
+        "detail": "agentorg/agents/Dockerfile (ARG <TOOL>_VERSION) and .github/workflows/ci.yml (env <TOOL>_VERSION). They are two declarations of one fact; a commit that moves one is a build whose scanner differs from the one the suite was gated against.",
+        "verify": ".venv-main/bin/python scripts/measure_sbom.py  # agree: true"
+      },
+      {
+        "step": 2,
+        "action": "Re-measure the block rule's expected findings",
+        "detail": "scripts/scan_gate.py carries EXPECTED_BLOCKING, measured on gitleaks 8.21.2. A scanner update can move a reported LINE NUMBER, and the line numbers are the only field separating a real scan from the fixture.",
+        "verify": ".venv-main/bin/python scripts/scan_gate.py"
+      },
+      {
+        "step": 3,
+        "action": "Re-measure the provenance discriminator",
+        "detail": "tests/provenance.py's REAL_SCANNER_LINES is {3, 4} and FIXTURE_LINES is {4, 5}. If an update moves the real set onto {4, 5} the discriminator is GONE and every provenance assertion keeps passing while proving nothing. The sets must stay distinct -- that is the acceptance test for a scanner bump, not a green suite.",
+        "verify": ".venv-main/bin/python -m pytest tests/test_provenance.py -q"
+      },
+      {
+        "step": 4,
+        "action": "Rebuild the image and read the version tail",
+        "detail": "the Dockerfile ends its scanner layer with `gitleaks version && trivy --version && semgrep --version`. That tail catches a binary that downloads but cannot execute -- a BROKEN scanner, which blocks every run including the clean one, and is a different fault from an absent one.",
+        "verify": "the deploy workflow's build step; failure is the intended outcome"
+      },
+      {
+        "step": 5,
+        "action": "Re-run preflight against the deployed runtime",
+        "detail": "check 3 invokes the security runtime and asserts the real line numbers. It is the only check that distinguishes a real scan from the fixture, and a runtime reports READY before its endpoint serves the new version -- so a green deploy is not evidence.",
+        "verify": ".venv-main/bin/python scripts/preflight.py"
+      }
+    ],
+    "scanners": {
+      "gitleaks": {
+        "image_version": "8.21.2",
+        "ci_version": "8.21.2",
+        "agree": true,
+        "supplier": "github.com/gitleaks/gitleaks",
+        "delivery": "release tarball, linux_arm64",
+        "purl": "pkg:generic/gitleaks@8.21.2",
+        "on_this_machine": "8.30.1"
+      },
+      "trivy": {
+        "image_version": "0.74.0",
+        "ci_version": "0.74.0",
+        "agree": true,
+        "supplier": "github.com/aquasecurity/trivy",
+        "delivery": "release tarball, Linux-ARM64",
+        "purl": "pkg:generic/trivy@0.74.0",
+        "on_this_machine": "0.74.0"
+      },
+      "semgrep": {
+        "image_version": "1.172.0",
+        "ci_version": "1.172.0",
+        "agree": true,
+        "supplier": "PyPI",
+        "delivery": "pip, into its own venv at /opt/semgrep-venv",
+        "purl": "pkg:pypi/semgrep@1.172.0",
+        "on_this_machine": "1.173.0"
+      }
+    },
+    "declared_dependencies": {
+      "entries": [
+        {
+          "spec": "pydantic>=2.0",
+          "commented_out": false,
+          "pin": "FLOOR_ONLY"
+        },
+        {
+          "spec": "strands-agents\",          # the agent framework (Sorour)",
+          "commented_out": false,
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "boto3\",                   # AWS / Bedrock (Sorour)",
+          "commented_out": false,
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "PyGithub\",                # github_ops (Mariam)",
+          "commented_out": false,
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "flask\",                   # target_repo app (Reem)",
+          "commented_out": false,
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "Uncomment as each lane comes online:",
+          "commented_out": true,
+          "pin": "UNPINNED"
+        },
+        {
+          "spec": "fastmcp\",               # agent servers on AgentCore (Sorour, wk3)",
+          "commented_out": true,
+          "pin": "UNPINNED"
+        }
+      ],
+      "note": "the IMAGE installs requirements.txt (exact) then `pip install --no-deps .`, so these floating specifiers do not reach the container. They DO reach a local `pip install -e .[dev]`, so the development environment and the shipped image are not the same closure. Report a CVE against whichever you measured."
+    }
+  }
+}
