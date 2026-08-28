@@ -1789,6 +1789,40 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
+### A SECOND pattern, found FOUR times in Phase 3 alone — a correct answer nobody asks for
+
+> **A feature can be complete, tested, and reached by nothing. Every test passes. The
+> feature does not exist.**
+
+Distinct from the pattern below, and easier to ship. That one is about a check that cannot
+fail; this one is about working code with **no caller**. Reading either file reveals
+nothing: the module is right, the tests are right, and the wiring is absent.
+
+Four instances in one phase, all found by the lane *after* the one that built the thing:
+
+| Built by | What had no caller | Found by | Consequence if it had shipped |
+|---|---|---|---|
+| Lane C | `scoring.score_findings` + `render_scoring_table`, 75 tests | integrator | the judge's own question answered in code no PR could show |
+| Lane E | the usage payload crossing the remote seam | integrator | every `REMOTE_AGENTS` run reports zero cost, reading as free |
+| Lane B | `accessors.record_run` — the `run` table had no **writer** | **Lane I** | the UI's tenant-scoped run list shows an empty screen |
+| Lane G | `agents/testgen.py`, 459 lines, 28 tests | integrator | `RunState.generated_tests` is `None` on every run |
+
+And a fifth is open as of `c3ac5dd`: Lane H's retrieval is wired into no agent prompt,
+because the five prompts belong to Lane M. That one is *planned* rather than missed — the
+difference being that it is written down.
+
+**Why the lane structure produces this.** Ownership is drawn by FILE, so the lane that
+builds a capability frequently cannot own its call site. That is the right trade — it is
+what let fourteen lanes run without collisions — but it means **every lane's report must
+answer "what calls this?"**, and the integrator must treat "nothing yet" as a task rather
+than a note. Four of the five above were reported honestly by the lane itself; the value
+of that habit is the whole reason they were fixed in the same phase.
+
+**The check that catches it.** For each new module: `grep -rn <entry_point> agentorg/
+scripts/ --include='*.py' | grep -v <its own file> | grep -v tests/`. Empty output means
+the feature does not exist yet, whatever the suite says. Lane I ran exactly that on
+`record_run` and got two lines, both in Lane B's own tests.
+
 ### The pattern found TWELVE times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
