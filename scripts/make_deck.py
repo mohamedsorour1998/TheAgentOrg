@@ -103,7 +103,7 @@ from pptx.util import Emu, Inches, Pt
 # 116.88s -> 149.68s -> 102.83s for one unchanged test snapshot, purely load-dependent,
 # so "measured" is a value PLUS its conditions and spread. A cost quoted as a point
 # value would be the most repeated and least reproducible number on the deck.
-TESTS_PASSING = 1853     # pytest -q | tail -1   (4 skip in a worktree, 3 on main)
+TESTS_PASSING = 1860     # pytest -q | tail -1   (4 skip in a worktree, 3 on main)
 TEST_FILES = 73          # ls tests/test_*.py | wc -l
 WEB_TESTS = 166          # cd web && npm test   -> READ THE FILE COUNT: 10 files
 WEB_TEST_FILES = 10      # same command. `Tests` counts what RAN; `Test Files` does not

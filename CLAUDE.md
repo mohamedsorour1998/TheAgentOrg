@@ -3363,11 +3363,27 @@ for `tests/test_approve_server.py:266-289`'s reason.
 
 #### Known gaps, named rather than implied
 
-- **NO POSTGRES HAS EVER BEEN CONNECTED.** `agentorg/db/engine.py` is sqlite3-only,
-  Lane B's note says nothing in the suite connects to one, and `docker compose up` has
-  never run. **A sign-in flow that has never completed against a real Postgres is not
-  a working sign-in flow.** The Auth.js configuration typechecks and builds; that is a
-  different claim.
+- **~~NO POSTGRES HAS EVER BEEN CONNECTED~~ — OVERTAKEN by `471fc31` / `69ab1d3`, and
+  the corrected claim is narrower and better.** A real **PostgreSQL 16.15** now runs the
+  schema: independently re-verified 2026-08-28 by applying `schema.render_schema("postgres")`
+  to a fresh database — **7 tables, 6 RLS policies** — and driving the queue's Postgres
+  dialect (`enqueue OK … poisoned=True status='ready'`, `claim OK … poisoned= True`).
+  `agentorg/db/engine.py` is still sqlite3-only and **`migrations.migrate` cannot run on
+  Postgres at all**: it calls `connection.executescript`, which only sqlite3 has, so the
+  DDL must be applied through `render_schema` directly. That is a real gap the two fix
+  commits did not close.
+
+  **The sign-in flow has still never completed, for a better reason than a missing
+  database.** `69ab1d3` found the tenant lookup is **circular under RLS** — `membershipsFor`
+  reads `membership`, which carries a policy needing a bound tenant, and the bound tenant
+  is what that query exists to discover. Measured: `no tenant bound -> []`,
+  `tenant-zero bound -> [('tenant-zero',)]`.
+
+  **And the RLS is only as good as the ROLE.** As the superuser owning the tables the
+  policies isolate **nothing**; they refuse correctly only as a plain LOGIN role. So
+  "Postgres enforces reads" is true of a correctly-provisioned role and **false of the
+  connection a developer most easily makes.** `docker compose up` has still never run —
+  the Postgres above is a Homebrew service, not the compose stack.
 - **`repo` OAuth SCOPE IS ALL-OR-NOTHING.** There is no per-repository OAuth scope, so
   the in-scope list is enforced by this application and not by GitHub. Per-repository
   grants need a GitHub App (installation tokens, a different authorisation model).
