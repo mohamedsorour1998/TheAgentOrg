@@ -142,6 +142,31 @@ Three things worth keeping:
   the discriminator is a **pristine worktree at the same commit** — not a stash, which
   leaves the editable install pointing the same wrong way.
 
+### A GATE VERIFIED ONLY IN THE MAIN CHECKOUT IS NOT VERIFIED
+
+Three instances on 2026-08-28 alone, and together they cost more time than any code
+defect this phase. Every one passes in the main checkout, fails in every worktree, and
+reads as the lane's own regression.
+
+| What | Where it lives | Symptom in a worktree |
+|---|---|---|
+| `agentorg` resolution | the editable install's `MAPPING` | a subprocess writes state to the **shared** checkout — `cf5cb83` |
+| `terraform.tfvars` | gitignored (`.gitignore:14`) | a 4th skip appears in `test_ingress_terraform.py` |
+| the `+x` bit on a script | **the disk, not the index** | `ruff` reports `EXE001` and the lint gate fails |
+
+The third was mine and it is the clearest. `afb48d6` added
+`scripts/measure_dependencies.py` with a shebang; I ran `chmod +x` to satisfy `EXE001`
+and git recorded `100644`. So `ruff check agentorg scripts tests` printed **All checks
+passed!** on `main` and **Found 1 error** in every worktree — I had verified the gate in
+the one place where an untracked mode change made it pass, and would have shipped a lint
+break to four lanes believing it was green. Fixed with `git update-index --chmod=+x`.
+
+**The rule: state that lives on disk but not in the index is state a worktree does not
+inherit.** File modes, gitignored files, and editable-install resolution are the three
+found so far. Before telling a lane its failure is its own, reproduce in a pristine
+worktree — and before trusting a gate, run it somewhere other than the checkout you
+developed in.
+
 ---
 
 ## The architecture, in one pass
