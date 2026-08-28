@@ -210,7 +210,17 @@ jobs:
       # zip, and three of its entries -- tfplan, tfstate, tfstate-prev -- each
       # matched `github_pat_[A-Za-z0-9_]{20,}` exactly once. A raw grep of the
       # outer file finds nothing, which is why this survived review. Ten unexpired
-      # artifacts held it; all ten were deleted and the token rotated.
+      # artifacts held it; all ten were deleted.
+      #
+      # WHETHER THE TOKEN WAS ROTATED IS NOT KNOWN FROM IN HERE. This comment used
+      # to end "and the token rotated", while CLAUDE.md said it still needed
+      # rotating -- both written the same day, and nothing in the repository can
+      # settle it. A live token and a rotated one behave identically to any check
+      # we can run, and a PAT's creation date is visible only to the account that
+      # holds it. Treat it as compromised until an operator confirms the creation
+      # timestamp at github.com/settings/personal-access-tokens postdates
+      # 2026-08-22. Deleting the artifacts removed the distribution channel, not
+      # the exposure.
       #
       # THIS EXPOSURE IS NOT THE ONE THE MODULE'S COMMENTS ALREADY ACCEPT. That
       # one is S3 state, which needs AWS credentials to read. This one needed only

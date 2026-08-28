@@ -1925,10 +1925,25 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
   retention period — a different and much wider set. Same secret, different blast
   radius; do not let the accepted risk excuse this one.
 
-  **THE TOKEN STILL NEEDS ROTATING.** Deleting the artifacts removed the
-  distribution channel, not the exposure. Until it is rotated, treat that
-  `github_pat_` as compromised. That is the operator's action, not a code change,
-  and nothing in this repository can do it.
+  **WHETHER THE TOKEN WAS ROTATED IS UNRESOLVED IN THIS REPOSITORY, AND THE TWO
+  RECORDS DISAGREE.** `terraform.yml:213` says "all ten were deleted **and the token
+  rotated**"; this file said it still needed rotating. Both were written the same day.
+  Nothing in the repository can settle it — a PAT's creation date is visible only to
+  the account that holds it, and a live token and a rotated one behave identically
+  from in here.
+
+  So the safe reading is the pessimistic one: **treat that `github_pat_` as
+  compromised until an operator confirms otherwise.** Deleting the artifacts removed
+  the distribution channel, not the exposure. The confirmation is a human action —
+  check the token's creation timestamp at
+  `github.com/settings/personal-access-tokens` against 2026-08-22 — and it is one
+  click, which is why the disagreement should not have survived.
+
+  **The lesson is about the record, not the token.** Two files claiming opposite
+  things about a credential is worse than either claim alone: a reader who finds the
+  reassuring one stops looking. When a fix depends on an action outside the
+  repository, the repository can only record *that the action is required* and how to
+  verify it — never that it happened.
 - **`*.tfvars` is gitignored** (`.gitignore:14`), so a value set there exists only
   on the machine that wrote it while CI applies from a fresh checkout — it looks
   configured locally and the rule stays at zero targets. Use `TF_VAR_<name>` in the
