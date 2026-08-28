@@ -1035,3 +1035,87 @@ def test_a_run_through_the_real_pipeline_records_a_cost_for_every_stage(monkeypa
         "zero-rather-than-nothing guarantee is not reaching the real path"
     )
 
+
+
+# ── E3's WIRING, pinned over the AST — added by the integrator, not Lane E ────
+#
+# Lane E built the mechanism and could not wire it: `agents/server.py` and
+# `common/agent_client.py` are integrator-owned. Its tests above exercise
+# `usage_payload` / `absorb_usage_payload` thoroughly -- and NONE of them touches the
+# two call sites, so deleting both lines left the whole suite green. On the remote path
+# that is a run reporting zero cost because nobody asked, indistinguishable from a run
+# that genuinely spent nothing.
+#
+# That is this repository's signature defect: a check that cannot tell "did not run"
+# from "passed". The two tests below are the smallest thing that can tell them apart.
+
+def test_the_server_puts_usage_on_the_two_hundred_envelope():
+    """`agents/server.py` must send the key. Asserted over the AST, not the source text.
+
+    A substring check for `usage_payload` would be satisfied by the COMMENT explaining
+    why the key is there -- and CLAUDE.md records that exact failure twice in one lane,
+    in a codebase that is roughly 40% commentary. So this walks the dict literal and
+    reads its keys.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path("agentorg/agents/server.py").read_text()
+    tree = ast.parse(source)
+
+    envelopes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Dict)
+        and {k.value for k in node.keys if isinstance(k, ast.Constant)} >= {"agent", "result"}
+    ]
+    assert envelopes, (
+        "no dict literal in server.py carries both 'agent' and 'result'; the 200 "
+        "envelope has moved and this test would pin nothing"
+    )
+
+    keys = {k.value for env in envelopes for k in env.keys if isinstance(k, ast.Constant)}
+    assert "usage" in keys, (
+        f"the 200 envelope sends {sorted(keys)} and not 'usage'. Under REMOTE_AGENTS "
+        f"the model call happens in the container, so without this key the runner "
+        f"records no tokens at all -- and a zero-cost run reads as a free one."
+    )
+
+
+def test_the_client_absorbs_usage_before_it_validates():
+    """`agent_client` must call `absorb_usage_payload`, and BEFORE `_validate`.
+
+    Order is the requirement, not the call. A container that answered honestly and then
+    failed validation still spent those tokens; absorbing afterwards drops them for
+    exactly the runs worth investigating. Same shape as
+    `test_the_sre_stage_measures_ci_before_invoking_the_agent`, and pinned the same way
+    -- over the AST, because a substring check is satisfied by the comment above the
+    call.
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("agentorg/common/agent_client.py").read_text())
+
+    absorb_lines, validate_lines = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (node.func.attr if isinstance(node.func, ast.Attribute)
+                else getattr(node.func, "id", ""))
+        if name == "absorb_usage_payload":
+            absorb_lines.append(node.lineno)
+        elif name == "_validate":
+            validate_lines.append(node.lineno)
+
+    assert absorb_lines, (
+        "agent_client never calls llm.absorb_usage_payload, so the container's token "
+        "counts are dropped on arrival and every remote run reports zero cost"
+    )
+    assert validate_lines, (
+        "no _validate call found; this test's ordering assertion would be vacuous"
+    )
+    assert min(absorb_lines) < min(validate_lines), (
+        f"absorb_usage_payload is at line {min(absorb_lines)}, after _validate at "
+        f"{min(validate_lines)}. A response that fails validation still cost tokens; "
+        f"absorbing afterwards loses them for the runs most worth investigating."
+    )

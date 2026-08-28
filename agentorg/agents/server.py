@@ -195,6 +195,12 @@ class Handler(BaseHTTPRequestHandler):
             "agent": role,
             "result": result.model_dump(mode="json"),
             "source": llm.last_source() or "",
+            # The token counts, for the same reason `source` is here: the model call
+            # happened in THIS process, so the runner cannot see it. Absent is
+            # legitimate -- an older container omits the key and the caller's
+            # `absorb_usage_payload(None)` is a no-op recording nothing, which is
+            # distinct from a fixture fallback recording a zero ROW.
+            "usage": llm.usage_payload(),
         })
 
 

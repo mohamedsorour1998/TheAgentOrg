@@ -544,4 +544,15 @@ def call_agent(role: str, state: RunState, **kwargs) -> BaseModel:
     if source in (llm.SOURCE_MODEL, llm.SOURCE_FIXTURE):
         llm._record(source)
 
+    # The token counts, absorbed BEFORE `_validate` for the same reason `_record` is
+    # above it: a container that answered honestly and then failed validation still
+    # spent those tokens, and dropping them understates the bill for exactly the runs
+    # worth investigating. `absorb_usage_payload` validates its own rows, returns an
+    # accepted count and never raises -- it is not a verdict, so it gets no refusal
+    # of its own. An absent key records NOTHING, which is deliberately distinct from
+    # a fixture fallback's zero row: the first means the container could not report,
+    # the second means it reported that it spent nothing.
+    if isinstance(envelope, dict):
+        llm.absorb_usage_payload(envelope.get("usage"))
+
     return _validate(role, envelope)
