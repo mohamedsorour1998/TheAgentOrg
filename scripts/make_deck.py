@@ -93,14 +93,33 @@ from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 # ── verified numbers ──────────────────────────────────────────────────────────
-# Each carries the command that produced it. Re-run them before the session; the test
-# count in particular moves whenever anyone adds a test.
-TESTS_PASSING = 1102     # pytest -q | tail -1   (3 skip when scanners are on PATH)
-TEST_FILES = 41          # ls tests/test_*.py | wc -l
+# EVERY NUMBER HERE CARRIES THE COMMAND THAT PRODUCED IT, and all of them were
+# RE-MEASURED for the final deck at `d6165c8` on 2026-08-28. That is not ceremony:
+# every figure in the pre-final deck below was true when written and six of them were
+# stale within a day, because twelve lanes committed concurrently. The test count moved
+# 1102 -> 1853 and the file count 41 -> 73.
+#
+# Two of these are RANGES rather than point values, deliberately. CLAUDE.md records
+# 116.88s -> 149.68s -> 102.83s for one unchanged test snapshot, purely load-dependent,
+# so "measured" is a value PLUS its conditions and spread. A cost quoted as a point
+# value would be the most repeated and least reproducible number on the deck.
+TESTS_PASSING = 1853     # pytest -q | tail -1   (4 skip in a worktree, 3 on main)
+TEST_FILES = 73          # ls tests/test_*.py | wc -l
+WEB_TESTS = 166          # cd web && npm test   -> READ THE FILE COUNT: 10 files
+WEB_TEST_FILES = 10      # same command. `Tests` counts what RAN; `Test Files` does not
 TF_RESOURCES = 20        # grep -rhc '^resource ' infra/Terraform/modules/*/main.tf
+AGENTORG_LINES = 20475   # find agentorg -name '*.py' | xargs wc -l | tail -1
+WEB_LINES = 8769         # find web -name '*.ts' -o -name '*.tsx' | xargs wc -l
+RUNTIME_VERSION = 37     # scripts/preflight.py check 2 — all five READY at the SAME one
 CLEAN_MINUTES = 5        # measured, run 32585658981
 POISONED_MINUTES = 3     # measured, run 32586453254
 TRIGGER_SECONDS = 6      # issue created 16:45:09 -> run created 16:45:15
+
+# scripts/measure_cost.py --runs 3 --require-model, at d6165c8. A RANGE: the spread is
+# 30% across three consecutive runs of one unchanged ticket.
+COST_LOW = "1.3"         # cents. $0.013036
+COST_HIGH = "1.7"        # cents. $0.016931
+COST_INFRA_SHARE = "0.1" # percent. $0.00001245 of $0.0131 is 0.095%
 
 # The organiser's four required sections, as the kicker text that must appear.
 _REQUIRED = ("THE PROBLEM", "THE SOLUTION", "ARCHITECTURE", "PROGRESS", "WHAT IS NEXT")
@@ -316,8 +335,8 @@ def slide_title(prs):
     _text(slide, "AI agents that ship code the way an engineering team does —\n"
                  "with a safety check they cannot argue with.",
           left=MARGIN, top=Inches(3.82), width=Inches(10.4), size=24, color=DIM)
-    _text(slide, "RosettaTeam   ·   DevOps Hackathon, pre-final evaluation\n"
-                 "25 August 2026",
+    _text(slide, "RosettaTeam   ·   DevOps Hackathon, final evaluation\n"
+                 "28 August 2026",
           left=MARGIN, top=Inches(5.75), width=BODY_WIDTH, size=15, color=DIM)
     _transition(slide, kind="fade")
     _footer(slide, 1)
@@ -339,7 +358,7 @@ def slide_agenda(prs):
         ("The problem, and our solution",
          "why an AI pipeline needs a gate it cannot argue with"),
         ("Architecture", "how a ticket becomes a merged change"),
-        ("Progress to date", "what runs today, and what we measured"),
+        ("Progress to date", "what runs today, what it costs, and what does not"),
         ("Roadmap, then a live demo", "two tickets: one ships, one is refused"),
     ], start=1):
         _text(slide, f"{index:02d}", left=MARGIN, top=y, width=Inches(0.7),
@@ -785,6 +804,49 @@ def slide_progress(prs):
     _footer(slide, 11)
 
 
+def slide_platform(prs):
+    """Slide 12 — what the final phase added, and it is the slide that did not exist.
+
+    THE PRE-FINAL DECK PREDATES ALL OF IT. Twelve lanes landed a durable queue, tenancy,
+    deterministic scoring, cost instrumentation, a self-hosted path, integration
+    adapters, a control-plane API, generated tests, retrieval and a web product. A deck
+    that showed the same six progress slides would be describing last month's system.
+
+    ONE LINE PER CAPABILITY AND NOT ONE MORE. Ten items at 17pt is already the densest
+    slide in this deck; a second clause on each would make it a document. The bullets
+    say what a thing DOES rather than what it is called, because a judge does not know
+    what "Lane H" is and should not have to.
+    """
+    slide = _blank(prs)
+    _heading(slide, "From a pipeline to a platform", kicker="progress", size=38)
+    _text(slide, "The pre-final demo was one pipeline on one repository.",
+          left=MARGIN, top=Inches(2.35), width=Inches(11.0), height=Inches(0.4),
+          size=18, color=DIM)
+    left = _bullets(slide, [
+        "Runs queue, and a pause survives a restart.",
+        "Many customers on one deployment, with a suite that tries to breach it.",
+        "One severity table for three scanners, plus an audit row per finding.",
+        "Every run reports what it cost, at the published rate.",
+        "The same pipeline runs on your own hardware.",
+    ], top=Inches(3.05), size=17, gap=0.72, width=Inches(5.5))
+    right = _bullets(slide, [
+        "GitHub is one adapter, not the foundation.",
+        "A machine API to submit, watch and cancel — it cannot open a gate.",
+        "Tests written from the ticket, never from the change.",
+        "Agents read past decisions; that text cannot reach the verdict.",
+        "A web app: watch a run live, approve or refuse.",
+    ], top=Inches(3.05), size=17, gap=0.72, left=Inches(7.0), width=Inches(5.3))
+    note = _text(slide,
+        f"{AGENTORG_LINES:,} lines of pipeline and {WEB_LINES:,} of application, "
+        f"under {TESTS_PASSING} tests and {WEB_TESTS} more for the web.",
+        left=MARGIN, top=Inches(6.78), width=Inches(11.0), height=Inches(0.42),
+        size=16, color=CYAN)
+    _transition(slide)
+    _animate(slide, [s.shape_id for s in left] + [s.shape_id for s in right]
+             + [note.shape_id])
+    _footer(slide, 12)
+
+
 def slide_evidence(prs):
     slide = _blank(prs)
     _heading(slide, "The same request, twice", kicker="progress", size=38)
@@ -819,7 +881,7 @@ def slide_evidence(prs):
     _transition(slide)
     _animate(slide, [good.shape_id, good_body.shape_id, bad.shape_id, bad_body.shape_id,
                      close.shape_id])
-    _footer(slide, 12)
+    _footer(slide, 13)
 
 
 def slide_why_it_matters(prs):
@@ -833,26 +895,101 @@ def slide_why_it_matters(prs):
     ], top=Inches(2.85), size=21, gap=0.88)
     _transition(slide, kind="fade")
     _animate(slide, [s.shape_id for s in body])
-    _footer(slide, 13)
+    _footer(slide, 14)
+
+
+def slide_cost(prs):
+    """Slide 15 — the price of running every check on every change.
+
+    THE NUMBER IS SMALL AND THAT IS THE ARGUMENT. A judge's unspoken objection to
+    running five agents on every ticket is that it must be expensive. It is one and a
+    half cents, measured, and the infrastructure around it is three orders of magnitude
+    below the model.
+
+    THE THIRD COLUMN IS DELIBERATELY EMPTY, and saying so out loud is worth more than
+    filling it. A developer's hourly rate is not in this repository; a plausible figure
+    would become the most quoted number in the room and the least defensible. This slide
+    states the machine cost and hands the wage back to the audience, which is also the
+    only honest way to present it.
+    """
+    slide = _blank(prs)
+    _heading(slide, "What it costs to check everything", kicker="progress", size=38)
+    _text(slide, "Measured over three runs of one ticket, priced from the published "
+                 "rate card on the day it was read.",
+          left=MARGIN, top=Inches(2.35), width=Inches(11.0), height=Inches(0.44),
+          size=18, color=DIM)
+
+    stats = _stat(slide, f"{COST_LOW}–{COST_HIGH}¢",
+                  "per change, on the cloud —\nevery check, every agent",
+                  left=MARGIN, top=Inches(3.2), value_color=MINT, width=Inches(3.5))
+    stats += _stat(slide, f"{COST_INFRA_SHARE}%",
+                   "of that is infrastructure.\nThe rest is the model",
+                   left=Inches(4.9), top=Inches(3.2), width=Inches(3.5))
+    stats += _stat(slide, "zero",
+                   "on your own hardware —\nslower, same verdict",
+                   left=Inches(8.6), top=Inches(3.2), width=Inches(3.5))
+
+    note = _text(slide,
+        "We do not put a figure on the third comparison — a developer's hour. That "
+        "number is not ours to invent, and it would be the one everybody remembered.",
+        left=MARGIN, top=Inches(5.5), width=Inches(11.0), height=Inches(0.9),
+        size=18, color=CYAN)
+    _transition(slide)
+    _animate(slide, [s.shape_id for s in stats] + [note.shape_id])
+    _footer(slide, 15)
+
+
+def slide_limits(prs):
+    """Slide 16 — the limitations, volunteered.
+
+    THE PRE-FINAL EVALUATION'S STRONGEST MOMENT WAS VOLUNTEERING A LIMITATION BEFORE
+    BEING ASKED, and this slide is that, on purpose, immediately before the roadmap so
+    the roadmap reads as a response rather than as a wish list.
+
+    EACH ONE IS COSTED IN THE REPOSITORY, and the closing line says where. A limitation
+    merely admitted is weaker than one costed: the costing is what shows it is understood
+    rather than noticed.
+
+    THE HONEST SUMMARY IS THE LAST BULLET and it is the one to say aloud — the pattern is
+    "unexecuted", not "broken", and that distinction is what the whole project is about.
+    """
+    slide = _blank(prs, band=AMBER)
+    _heading(slide, "What does not work yet", kicker="progress", size=38)
+    body = _bullets(slide, [
+        "Sign-in has never completed — it needs a database nobody has started here.",
+        "A run does not yet record its own cost, though the meter works.",
+        "The queue that would replace our CI is tested and not yet switched on.",
+        "The browser tests are written and no browser has run them.",
+        "Any of our three approvals can be bypassed by a repository administrator.",
+    ], top=Inches(2.7), size=19, gap=0.72)
+    note = _text(slide,
+        "Sixteen limitations are written down, each with what removing it would take. "
+        "Every one is something unexecuted rather than something broken — and telling "
+        "those two apart is the whole point of this project.",
+        left=MARGIN, top=Inches(6.15), width=Inches(11.0), height=Inches(0.9),
+        size=17, color=INK)
+    _transition(slide, kind="fade")
+    _animate(slide, [s.shape_id for s in body] + [note.shape_id])
+    _footer(slide, 16)
 
 
 def slide_roadmap(prs):
     slide = _blank(prs)
     _heading(slide, "Roadmap to the final phase", kicker="what is next", size=38)
     items = _bullets(slide, [
-        "BROADEN THE CHECKS — dependency and licence scanning, and per-project thresholds.",
-        "HARDEN THE RECORD — durable run history, and a timeline a reviewer can read.",
-        "SCALE OUT — many repositories at once, and a queue so runs never contend.",
-        "PROVE IT AT VOLUME — ten times the sample behind the numbers on slide eight.",
+        "TURN ON WHAT IS BUILT — the queue, the database, and cost on every run.",
+        "CACHE THE CONTEXT — the agents re-read the same code five times and pay for it.",
+        "WIDEN THE CHECKS — dependency and licence scanning, per-project thresholds.",
+        "PROVE IT AT VOLUME — ten times the sample behind every number in this deck.",
     ], top=Inches(2.6), size=19, gap=1.08)
     note = _text(slide,
-        "Every item is a gap we have already written down. We would rather show you a "
-        "known limitation than discover one on stage.",
+        "Every item is a gap we have already written down and costed. We would rather "
+        "show you a known limitation than discover one on stage.",
         left=MARGIN, top=Inches(6.5), width=Inches(11.0), height=Inches(0.5),
         size=17, color=CYAN)
     _transition(slide)
     _animate(slide, [s.shape_id for s in items] + [note.shape_id])
-    _footer(slide, 14)
+    _footer(slide, 17)
 
 
 def slide_demo(prs):
@@ -864,7 +1001,7 @@ def slide_demo(prs):
                  "One ships itself. One is refused.",
           left=MARGIN, top=Inches(3.9), width=Inches(10.4), size=26, color=DIM)
     _transition(slide, kind="fade")
-    _footer(slide, 15)
+    _footer(slide, 18)
 
 
 def slide_close(prs):
@@ -881,13 +1018,14 @@ def slide_close(prs):
                  size=17, color=DIM)
     _transition(slide, kind="fade")
     _animate(slide, [close.shape_id, team.shape_id])
-    _footer(slide, 16)
+    _footer(slide, 19)
 
 
 SLIDES = [
     slide_title, slide_agenda, slide_team, slide_problem, slide_insight, slide_solution, slide_gate,
-    slide_diagram, slide_architecture, slide_gates_detail, slide_progress, slide_evidence,
-    slide_why_it_matters, slide_roadmap, slide_demo, slide_close,
+    slide_diagram, slide_architecture, slide_gates_detail, slide_progress, slide_platform,
+    slide_evidence, slide_why_it_matters, slide_cost, slide_limits, slide_roadmap,
+    slide_demo, slide_close,
 ]
 
 
@@ -1024,7 +1162,7 @@ def verify(path: pathlib.Path) -> int:
 
 def main() -> int:
     root = pathlib.Path(__file__).resolve().parent.parent
-    out = build(root / "docs" / "pitch" / "TheAgentOrg-prefinal.pptx")
+    out = build(root / "docs" / "pitch" / "TheAgentOrg-final.pptx")
     code = verify(out)
     # `file(1)` is the independent witness: it reads the archive's own magic rather than
     # trusting the library that wrote it.
