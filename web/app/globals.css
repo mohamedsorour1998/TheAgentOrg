@@ -199,3 +199,235 @@ textarea {
 .skip-link:focus-visible {
   transform: translateY(0);
 }
+
+/* The one keyframe in the app, used by the loading skeleton. The reduced-motion
+   block above already stills it -- that is why no component checks the media
+   query itself, and why adding an animation here cannot forget to. */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ── THE SHELL ────────────────────────────────────────────────────────────────
+ * A single column, capped, with the navigation as a horizontal rule of links.
+ * No sidebar: this product has six screens, and a sidebar wide enough to hold
+ * six labels costs a quarter of the width on the one screen that needs it most
+ * (the live run view, which is a vertical sequence).
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell-head {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-sunken);
+}
+
+.shell-head-inner,
+.shell-main,
+.shell-foot-inner {
+  max-width: 78rem;
+  margin: 0 auto;
+  padding: var(--gap-4) var(--gap-6);
+  width: 100%;
+}
+
+.shell-main {
+  flex: 1;
+  padding-top: var(--gap-8);
+  padding-bottom: var(--gap-12);
+}
+
+.shell-foot {
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: var(--step-caption);
+}
+
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--gap-4);
+}
+
+.nav a {
+  font-family: var(--mono);
+  font-size: var(--step-small);
+  color: var(--text-muted);
+  text-decoration: none;
+  padding: var(--gap-1) 0;
+  /* A 2px transparent border, not zero: the active state adds colour without
+     moving anything, so the nav does not shift as a page loads. */
+  border-bottom: 2px solid transparent;
+}
+
+.nav a:hover,
+.nav a[aria-current="page"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+/* The wordmark. Mono, tight, with the one cyan mark in the header. */
+.wordmark {
+  font-family: var(--mono);
+  font-size: var(--step-body);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wordmark span {
+  color: var(--accent);
+}
+
+/* ── TABLES ───────────────────────────────────────────────────────────────────
+ * Used by the scoring table and the run list. Hairline rules only, no zebra
+ * striping: striping encodes nothing, and on a dark surface it reads as two
+ * kinds of row.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--step-small);
+}
+
+table.data caption {
+  text-align: left;
+  color: var(--text-muted);
+  font-size: var(--step-small);
+  padding-bottom: var(--gap-3);
+  max-width: var(--measure);
+}
+
+table.data th {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: var(--step-caption);
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-strong);
+  padding: var(--gap-2) var(--gap-3) var(--gap-2) 0;
+  white-space: nowrap;
+}
+
+table.data td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--gap-3) var(--gap-3) var(--gap-3) 0;
+  vertical-align: top;
+}
+
+table.data tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* A row the deterministic rule refused. The left mark is the signal; the row is
+   not filled, because a filled row makes the text on it harder to read. */
+table.data tr[data-blocking="true"] td:first-child {
+  border-left: 3px solid var(--refused);
+  padding-left: var(--gap-3);
+}
+
+/* ── CARDS AND BUTTONS ────────────────────────────────────────────────────── */
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-raised);
+  padding: var(--gap-4) var(--gap-6);
+}
+
+.btn {
+  font-family: var(--mono);
+  font-size: var(--step-small);
+  letter-spacing: 0.02em;
+  padding: var(--gap-2) var(--gap-4);
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--text);
+  cursor: pointer;
+  /* 44px is the smallest reliably tappable target on a phone. */
+  min-height: 44px;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The two gate decisions. Coloured by outcome, never by prominence: an approve
+   button styled as the primary action is a nudge, and this is the one screen in
+   the product where a nudge is inappropriate. */
+.btn-approve:hover:not(:disabled) {
+  border-color: var(--shipped);
+  color: var(--shipped);
+}
+
+.btn-reject:hover:not(:disabled) {
+  border-color: var(--refused);
+  color: var(--refused);
+}
+
+.field {
+  display: block;
+  width: 100%;
+  padding: var(--gap-2) var(--gap-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: var(--step-body);
+}
+
+.field::placeholder {
+  color: var(--text-muted);
+}
+
+/* ── RESPONSIVE ───────────────────────────────────────────────────────────────
+ * One breakpoint. The layout is a single capped column, so the only thing that
+ * genuinely needs to change on a phone is the horizontal padding and any grid
+ * that assumed two columns.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: var(--gap-6);
+}
+
+.grid-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: var(--gap-6);
+}
+
+@media (max-width: 40rem) {
+  .shell-head-inner,
+  .shell-main,
+  .shell-foot-inner {
+    padding-left: var(--gap-4);
+    padding-right: var(--gap-4);
+  }
+}
