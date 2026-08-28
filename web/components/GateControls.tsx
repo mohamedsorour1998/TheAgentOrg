@@ -53,6 +53,9 @@ export function GateControls({
   const [confirming, setConfirming] = useState<Pending>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  // What was recorded, kept ONLY to announce it. The parent re-reads the run and
+  // owns the truth; this is the confirmation the person who clicked needs.
+  const [recorded, setRecorded] = useState<"approved" | "rejected" | null>(null);
   const [failure, setFailure] = useState<{ error: string; fix: string; detail?: string } | null>(
     null,
   );
@@ -60,6 +63,7 @@ export function GateControls({
   async function submit(decision: "approved" | "rejected") {
     setBusy(true);
     setFailure(null);
+    setRecorded(null);
     // The body is built here and nowhere else, so what crosses the wire is
     // visible in one place: three fields, and an optional reason.
     const body: ApprovalRequest = {
@@ -88,6 +92,7 @@ export function GateControls({
     }
     setConfirming(null);
     setReason("");
+    setRecorded(decision);
     onRecorded(result.value);
   }
 
@@ -198,6 +203,26 @@ export function GateControls({
           ) : null}
         </div>
       )}
+
+      {/* THE SUCCESS PATH IS ANNOUNCED, not only the failure path.
+          A failure already reaches a screen reader through `ErrorState`'s
+          `role="alert"`, so without this the refusal was LOUDER than the success:
+          a person recording a gate decision — the most consequential action in
+          the product — got two buttons silently returning and no confirmation
+          that it took. The verb matches the button that was pressed. */}
+      {recorded ? (
+        <p
+          role="status"
+          style={{
+            marginTop: "var(--gap-4)",
+            marginBottom: 0,
+            fontSize: "var(--step-small)",
+            color: recorded === "approved" ? "var(--shipped)" : "var(--refused)",
+          }}
+        >
+          {recorded === "approved" ? "Approval" : "Rejection"} recorded for {gate}.
+        </p>
+      ) : null}
 
       {failure ? (
         <div style={{ marginTop: "var(--gap-4)" }}>

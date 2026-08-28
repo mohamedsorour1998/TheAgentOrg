@@ -34,7 +34,7 @@ import Link from "next/link";
 import { CostPanel } from "@/components/CostPanel";
 import { getJson } from "@/components/fetching";
 import { EmptyState, ErrorState, Skeleton, Stat } from "@/components/primitives";
-import { renderUsd } from "@/components/vocabulary";
+import { renderUsd, renderWhen } from "@/components/vocabulary";
 import type { RunSummary } from "@/lib/contract";
 import type { CostView, RunListResponse } from "@/lib/endpoints";
 
@@ -260,7 +260,7 @@ export default function CostsPage() {
                 <Link href={`/runs/${run.run_id}`} style={{ color: "inherit" }}>
                   {run.ticket_id}
                 </Link>{" "}
-                · {run.created_at}
+                · <time dateTime={run.created_at}>{renderWhen(run.created_at)}</time>
               </p>
               {cost ? (
                 <CostPanel cost={cost} />

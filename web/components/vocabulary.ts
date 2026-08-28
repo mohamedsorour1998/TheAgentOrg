@@ -200,3 +200,41 @@ export function renderRate(rate: number | null): string {
   if (rate === null) return "not measured";
   return `${(rate * 100).toFixed(1)}%`;
 }
+
+/**
+ * A recorded timestamp, as a person reads it.
+ *
+ * LIVES HERE BECAUSE TWO SCREENS RENDER THE SAME FIELD. `RunSummary.created_at`
+ * appeared as a formatted date on the run list and as a bare ISO-8601 string on
+ * the costs screen -- the same timestamp reading as two different things depending
+ * on which screen you were looking at. That is the drift this module exists to
+ * prevent, arriving in a formatter rather than in a colour.
+ *
+ * A FIXED LOCALE, not the reader's. `toLocaleString(undefined, ...)` reads the
+ * runtime's locale, which differs between the server render and the browser, and
+ * React then reports a hydration mismatch on a date that was never wrong --
+ * `CostPanel`'s own number formatter carries the same note for the same reason.
+ *
+ * AN UNPARSEABLE VALUE RETURNS ITSELF rather than `Invalid Date`. The raw string
+ * is what somebody can act on; `Invalid Date` names the browser's problem instead
+ * of the data's. Callers keep the machine-readable form in `<time dateTime>`
+ * beside it.
+ */
+const WHEN = new Intl.DateTimeFormat("en-GB", {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  timeZone: "UTC",
+  timeZoneName: "short",
+});
+
+export function renderWhen(iso: string): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return iso;
+  // UTC, and it SAYS so. Every other timestamp in this product is the recorded
+  // UTC value, and a local-time render makes two people reading the same run
+  // disagree about when it happened.
+  return WHEN.format(new Date(t));
+}

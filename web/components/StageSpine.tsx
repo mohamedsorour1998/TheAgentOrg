@@ -82,6 +82,12 @@ function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
   }
 }
 
+/**
+ * The MARK's colour per phase. A border token is legitimate here -- a 2px ring at
+ * low contrast reads as "inactive", which is the intent.
+ *
+ * DO NOT USE THESE AS TEXT COLOURS. See `PHASE_TEXT` below.
+ */
 const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
   done: "var(--shipped)",
   running: "var(--accent)",
@@ -89,6 +95,34 @@ const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
   refused: "var(--refused)",
   pending: "var(--border-strong)",
   never: "var(--border)",
+};
+
+/**
+ * The WORD's colour per phase, and the two that differ are the whole reason this
+ * second table exists.
+ *
+ * MEASURED, against `--surface`:
+ *
+ *     pending  --border-strong #2c3a4f   1.67:1   <- a border token as text
+ *     never    --border        #1f2937   1.31:1   <- unreadable
+ *     --text-muted             #8b97ab   6.50:1
+ *
+ * The first version of this component used `PHASE_COLOUR` for both, so on a
+ * poisoned run every stage after the block rendered "did not run" at 1.31:1 --
+ * the words that exist SO THE SPINE DOES NOT READ AS BLANK were the ones nobody
+ * could read, and the demo's central beat lost its explanation on a projector.
+ *
+ * A border token and a text token are not interchangeable: 1.31:1 is correct for
+ * a hairline and illegible for a sentence. Keeping two tables is what stops the
+ * next edit collapsing them again.
+ */
+const PHASE_TEXT: Readonly<Record<Phase, string>> = {
+  done: "var(--shipped)",
+  running: "var(--accent)",
+  waiting: "var(--accent)",
+  refused: "var(--refused)",
+  pending: "var(--text-muted)",
+  never: "var(--text-muted)",
 };
 
 /** The word beside a stage. `never` says why, rather than staying blank. */
@@ -204,10 +238,15 @@ export function StageSpine({
                 <span
                   style={{
                     marginLeft: "var(--gap-3)",
-                    fontSize: "var(--step-caption)",
+                    // --step-small, not --step-caption. 11px muted secondary
+                    // prose is below the floor for a screen share, and this word
+                    // is the only thing saying what happened to the stage.
+                    fontSize: "var(--step-small)",
                     letterSpacing: "0.08em",
                     textTransform: "uppercase",
-                    color: colour,
+                    // PHASE_TEXT, never PHASE_COLOUR -- the latter holds border
+                    // tokens that measure 1.31:1 as text.
+                    color: PHASE_TEXT[phase],
                   }}
                 >
                   {open ? "your decision" : PHASE_WORD[phase]}

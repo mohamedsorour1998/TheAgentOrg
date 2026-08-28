@@ -212,7 +212,12 @@ function FindingsTable({ security }: { security: SecurityView }) {
       <p
         style={{
           marginTop: "var(--gap-3)",
-          fontSize: "var(--step-caption)",
+          // NOT --step-caption. This is the single sentence that stops a reader
+          // taking `app/auth.py:3` for a file position, and it was measured as
+          // the smallest muted type in the app -- 11px, below the floor for a
+          // screen share. The most important disclaimer must not be the least
+          // legible text.
+          fontSize: "var(--step-small)",
           color: "var(--text-muted)",
           maxWidth: "var(--measure)",
         }}

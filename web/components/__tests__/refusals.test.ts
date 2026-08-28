@@ -102,6 +102,66 @@ describe("the gate controls", () => {
   });
 });
 
+describe("the stage spine", () => {
+  // COMMENT-STRIPPED BUT NOT STRING-STRIPPED, and that distinction is the whole
+  // reason this reads a second form of the file.
+  //
+  // MEASURED: the first version of this suite asserted over `read(...)`, whose
+  // `stripComments` blanks string BODIES -- so `"var(--border)"` became `""`
+  // before the check ran, the assertion could not see the token it forbids, and
+  // the RED step came back INERT: 31 passed both with and without the defect.
+  // The helper protecting these tests from their own commentary erased the
+  // evidence. That is this repository's named pattern (a helper that cannot
+  // express the failing case) reaching the test that was written to avoid it.
+  //
+  // A CSS custom property only ever appears inside a string, so any test about
+  // one must keep strings. Comments still go, because the prose below explains
+  // `--border` at length and would satisfy the check on its own.
+  const withStrings = readFileSync(
+    join(WEB, "components", "StageSpine.tsx"),
+    "utf8",
+  )
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\/\/[^\n]*/g, " ");
+  const source = read("components", "StageSpine.tsx");
+
+  it("is not empty after stripping", () => {
+    expect(source).toContain("PHASE_TEXT");
+    // And the string-preserving form must still contain a token, or the
+    // assertion below cannot fail.
+    expect(withStrings).toContain("var(--");
+  });
+
+  /**
+   * MEASURED, and the reason this test exists rather than a comment.
+   *
+   * `PHASE_COLOUR` holds `--border-strong` and `--border` for the two inactive
+   * phases. Against `--surface` those measure 1.67:1 and 1.31:1 -- correct for a
+   * 2px ring, illegible as a sentence. The first version of this component used
+   * one table for both, so on a POISONED run every stage after the block rendered
+   * "did not run" at 1.31:1: the words that exist so the spine does not read as
+   * blank were the ones nobody could read, on the demo's central beat.
+   *
+   * A border token and a text token are not interchangeable. Two tables is what
+   * stops the next edit collapsing them, and this asserts the collapse did not
+   * happen.
+   */
+  it("colours the phase word from PHASE_TEXT, never from the mark's border tokens", () => {
+    const textTable = withStrings.match(/PHASE_TEXT[^=]*=\s*\{[^}]*\}/s);
+    expect(textTable, "PHASE_TEXT not found; this test would pin nothing").not.toBeNull();
+    // A border token as text is the defect. `--border` also matches
+    // `--border-strong`, so one check covers both.
+    expect(textTable?.[0]).not.toContain("--border");
+  });
+
+  it("does not use the mark's colour variable as a text colour", () => {
+    // The rendered word must read from the table, not from the `colour` binding
+    // that draws the ring.
+    expect(source).toMatch(/color:\s*PHASE_TEXT\[phase\]/);
+    expect(source).not.toMatch(/color:\s*colour\b/);
+  });
+});
+
 describe("the security panel", () => {
   const source = read("components", "SecurityPanel.tsx");
 

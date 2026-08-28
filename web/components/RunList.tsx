@@ -44,6 +44,7 @@ import {
   RUN_STATUS,
   VERDICT,
   VERDICT_ABSENT,
+  renderWhen,
 } from "@/components/vocabulary";
 import type { RunSummary } from "@/lib/contract";
 import type { RunListResponse } from "@/lib/endpoints";
@@ -51,27 +52,6 @@ import type { RunListResponse } from "@/lib/endpoints";
 /** Waiting for a human right now. `""` means the run is not paused. */
 function isAwaiting(run: RunSummary): boolean {
   return run.awaiting_gate !== "";
-}
-
-/**
- * An ISO-8601 instant, readably.
- *
- * An unparseable value returns the RAW STRING rather than "Invalid Date": the
- * raw value is what somebody can act on, and `Invalid Date` names the browser's
- * problem instead of the data's. The machine-readable form stays in `<time
- * dateTime>` beside it, so the cell is still sortable by anything reading the
- * markup.
- */
-function formatWhen(iso: string): string {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return iso;
-  return new Date(t).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 /**
@@ -281,7 +261,7 @@ export function RunList() {
                     dateTime={run.created_at}
                     style={{ color: "var(--text-muted)" }}
                   >
-                    {formatWhen(run.created_at)}
+                    {renderWhen(run.created_at)}
                   </time>
                 </td>
               </tr>
