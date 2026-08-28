@@ -67,6 +67,27 @@ three RUN, and the skip count is 0. `docs/plan/reem/demo_script.md` treats that
 inversion as an instrument check — `7 passed` from that file on a provisioned
 machine means the skips are broken.
 
+**A FOURTH SKIP FIRES IN A WORKTREE AND NOWHERE ELSE**, and it is correct behaviour
+both times. `test_ingress_terraform.py:722` skips when
+`infra/Terraform/environments/shared/terraform.tfvars` is absent — and that file is
+**gitignored** (`.gitignore:14`), so it exists in the main checkout and in no linked
+worktree, ever. Measured 2026-08-28, same commit, same interpreter:
+
+```
+main checkout     tests/test_ingress_terraform.py   30 passed
+a linked worktree                                   29 passed, 1 skipped
+```
+
+So the honest instrument is **3 skips on `main`, 4 in a worktree** — plus the scanner
+inversion above, which moves it the other way. A lane reporting `4 skipped` has not
+broken anything; a lane reporting `4 skipped` **on main** has.
+
+This is the same class as the `PYTHONPATH` failure below: a gitignored or
+install-resolved path behaves differently in a worktree, and the difference reads as a
+lane's regression. Only one test in the suite has this shape (`grep -rn "pytest.skip"
+tests/ | grep gitignored` returns one line), so it is a known constant rather than a
+hazard to hunt.
+
 Anything that looks like a crash on a projector outranks polish.
 
 ### One test failed in every worktree and nowhere else — FIXED in `cf5cb83`
