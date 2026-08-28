@@ -27,7 +27,7 @@ import logging
 from .. import fixtures_loader, repo_snapshot
 from ..common import config, llm
 from ..common.diff import added_files
-from ..security import run_all_scanners
+from ..security import run_all_scanners, scoring
 from ..state import (
     Finding,
     RunState,
@@ -265,6 +265,22 @@ def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
         findings=findings,
         blocking=blocking,
         explanation=_explain(verdict, blocking),
+        # THE ARITHMETIC, ONE ROW PER FINDING. Lane C built `score_findings` and
+        # could not call it: this file is not in its ownership row, so until now the
+        # scoring library was correct, tested, and reached by no deployed run.
+        #
+        # Emitted HERE and nowhere else, because this is the single place on the
+        # pipeline path where `compute_security_verdict` runs. A second call site
+        # would be a second answer to "why did this block", and the two would drift.
+        #
+        # `natives` is not passed: `Finding` does not carry the scanner's own
+        # severity word, so every mapped row records NATIVE_UNRECORDED rather than
+        # inventing one. That is a real limit and it is visible in the table rather
+        # than hidden -- closing it means an optional `Finding.native_severity`,
+        # which is a contract change and belongs in a batch.
+        scoring=scoring.score_findings(
+            findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+        ),
         # The only path on which compute_security_verdict actually ran.
         scan_provenance="scanners",
     )

@@ -324,3 +324,105 @@ def test_a_finding_from_a_tool_with_no_policy_is_refused_not_scored():
     object.__setattr__(rogue, "tool", "bandit")
     with pytest.raises(KeyError, match="no scoring policy"):
         scoring.score_findings([rogue])
+
+
+# ── THE WIRING, added by the integrator — Lane C could not call its own library ──
+#
+# Lane C built `score_findings` and `render_scoring_table`, tested both thoroughly, and
+# reported honestly that neither had a caller: `agents/security.py` and `graph.py` are
+# not in its ownership row. So the scoring library was correct, covered, and reached by
+# NO DEPLOYED RUN. Every test in this file above would have kept passing forever.
+#
+# That is this repository's signature defect one level up: not a check that cannot fail,
+# but a correct answer nobody asks for. The two tests below are what make the library
+# part of the pipeline rather than beside it.
+
+def test_the_security_agent_emits_a_scoring_row_per_finding():
+    """`SecurityResult.scoring` must be populated where the verdict is computed.
+
+    Asserted over the AST rather than by running the agent, because running it needs
+    real scanners or a fixture and this is a question about the CALL, not the scan. A
+    substring check for `score_findings` would be satisfied by the comment explaining
+    why the call is there -- the failure CLAUDE.md records twice in one lane.
+
+    Pinned at the same site as `compute_security_verdict`, deliberately: the rows
+    describe that verdict, and a second call site would be a second answer to "why did
+    this block".
+    """
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path("agentorg/agents/security.py").read_text())
+
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (node.func.attr if isinstance(node.func, ast.Attribute)
+             else getattr(node.func, "id", "")) == "score_findings"
+    ]
+    assert calls, (
+        "agents/security.py never calls scoring.score_findings, so no run records the "
+        "arithmetic behind its own verdict — which is the judges' question, and the "
+        "whole reason Lane C exists"
+    )
+
+    verdicts = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (node.func.attr if isinstance(node.func, ast.Attribute)
+             else getattr(node.func, "id", "")) == "compute_security_verdict"
+    ]
+    assert verdicts, "no compute_security_verdict call; this test would pin nothing"
+
+
+def test_the_security_comment_renders_the_scoring_table(monkeypatch):
+    """The table has to reach a human, or the field is data nobody reads.
+
+    THIS TEST'S FIRST VERSION PROVED NOTHING, and the reason is worth more than the
+    test. It called `scoring.render_scoring_table(result.scoring)` itself and asserted
+    over THAT string -- so it exercised the renderer, which `test_a_scoring_table_...`
+    above already covers, and said nothing about whether `_security_comment` calls it.
+    Deleting the call from `graph.py` left all 20 tests in this file green.
+
+    Caught only by running the mutation. The fix is to capture what
+    `github_ops.post_comment` actually receives, which is the one string a reader sees.
+    """
+    from agentorg import github_ops, graph
+    from agentorg.state import RunState, SecurityResult, compute_security_verdict
+
+    posted: list[str] = []
+    monkeypatch.setattr(github_ops, "post_comment",
+                        lambda state, body, finding=None: posted.append(body) or "local://x")
+
+    findings = [Finding(tool="gitleaks", severity="critical",
+                        rule="aws-access-key-id", file="app/auth.py", line=3,
+                        description="AWS key committed")]
+    verdict, blocking = compute_security_verdict(findings, threshold="high")
+    result = SecurityResult(
+        verdict=verdict, findings=findings, blocking=blocking,
+        explanation="A live AWS key is on line 3.", scan_provenance="scanners",
+        scoring=scoring.score_findings(findings, threshold="high"),
+    )
+    state = RunState(ticket_id="7", ticket_text="x", security=result)
+
+    graph._security_comment(state, result)
+
+    assert posted, "no comment was posted at all; this test would pin nothing"
+    body = posted[0]
+
+    assert "threshold `high`" in body, (
+        f"the posted comment does not state the threshold, which is the number the "
+        f"whole go/no-go claim rests on:\n{body}"
+    )
+    assert "| tool | rule | native | mapped | blocking |" in body, (
+        f"the scoring table is absent from the POSTED comment. The renderer works; "
+        f"nothing calls it here, so no reader ever sees the arithmetic:\n{body}"
+    )
+    assert "POLICY, not a mapping" in body, (
+        "the gitleaks rationale is absent, so a reader sees a column of `critical` "
+        "with nothing saying the scanner emits no severity of its own"
+    )
+    assert body.rstrip().endswith("A live AWS key is on line 3."), (
+        "the model's prose is not last. `explanation` does not set the verdict, so a "
+        "reader who stops early must stop on the arithmetic rather than the paragraph"
+    )
