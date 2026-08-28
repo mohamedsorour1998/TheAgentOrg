@@ -42,6 +42,39 @@ from .model import create_model
 # and show the fixture with no explanation.
 _FENCE = re.compile(r"```(?:\w+)?\s*(.*?)```", re.DOTALL)
 
+# `config.LLM_API_KEY`'s default, named rather than repeated as a literal in the two
+# places that compare against it. A second copy would drift from config.py's and the
+# drift would present as "the model is unavailable" with nothing saying why.
+_NO_KEY = "not-needed"
+
+# Hosts whose gateway needs no credential, because the request never leaves the
+# machine. `ollama serve` and a local vLLM both authenticate nobody, so requiring a
+# key there makes the documented self-hosted path unreachable -- see `available`.
+#
+# A HOSTNAME CHECK, NOT AN IP RANGE CHECK, deliberately narrow. `10.x` and `192.168.x`
+# are private but not local: a gateway there is somebody else's machine on the same
+# network, and a key sent to it crosses a wire. Widening this to "private address" is
+# how a credential-free request reaches a host the operator did not think about.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"})
+
+
+def _is_loopback(base_url: str) -> bool:
+    """True when `base_url`'s host never leaves this machine.
+
+    Parsed rather than pattern-matched: `http://127.0.0.1.evil.com/` contains the
+    loopback literal and is a remote host, and a substring check would send the
+    operator's key there while reporting the model as locally served.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(base_url).hostname or "").lower()
+    except ValueError:
+        # A malformed URL is not loopback. It will fail at the call with a message
+        # naming the URL, which is more useful than a silent "unavailable" here.
+        return False
+    return host in _LOOPBACK_HOSTS
+
 # WHICH PATH ANSWERED THE MOST RECENT CALL: the model, or a fixture.
 #
 # Module-level rather than a return value because `text()` and `structured()`
@@ -374,7 +407,34 @@ def available() -> bool:
     if config.LLM_DISABLED:
         return False
     if config.LLM_BASE_URL:
-        return bool(config.LLM_API_KEY) and config.LLM_API_KEY != "not-needed"
+        if config.LLM_API_KEY and config.LLM_API_KEY != _NO_KEY:
+            return True
+        # `LLM_API_KEY` IS STILL ITS DEFAULT, AND WHAT THAT MEANS DEPENDS ON THE HOST.
+        #
+        # A local gateway -- ollama, vLLM -- authenticates nobody, so `not-needed` is
+        # the honest value and refusing it makes the documented self-hosted path
+        # unreachable. A REMOTE gateway needs a real key, so the same value means
+        # "nobody configured this".
+        #
+        # MEASURED 2026-08-28, and this is why the branch exists at all: with only
+        # `LLM_BASE_URL=http://127.0.0.1:11434/v1` set, `available()` returned False,
+        # so every agent served its fixture and the whole run was green. A local
+        # gateway ignores the key, so nothing anywhere complained -- the naive
+        # self-hosted configuration was a fixture run wearing a model run's output.
+        #
+        # The loopback case is allowed; the remote case still refuses, and now says
+        # so. The WARNING is the load-bearing half: the previous version's silence is
+        # what made a whole lane's F1 unreproducible without a `--require-model` guard
+        # to catch it.
+        if _is_loopback(config.LLM_BASE_URL):
+            return True
+        logging.getLogger(__name__).warning(
+            "LLM_BASE_URL is %r but LLM_API_KEY is still %r, so no model call will be "
+            "attempted and every agent will serve its fixture. Set LLM_API_KEY, or "
+            "point LLM_BASE_URL at a loopback address if the gateway needs no key.",
+            config.LLM_BASE_URL, _NO_KEY,
+        )
+        return False
     try:
         import boto3
 

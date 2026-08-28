@@ -44,6 +44,28 @@ dev = [
     # asserts what a non-editable install actually ships.
     "python-pptx>=1.0,<2",
 ]
+# THE SELF-HOSTED PATH'S ONE DEPENDENCY, and it was missing entirely until Lane F
+# tried to reproduce F1 on a clean install.
+#
+# `config.LLM_BASE_URL` routes to an OpenAI-compatible gateway, and `strands` reaches
+# it through `openai`. Measured: `pip show strands-agents` lists boto3, botocore,
+# docstring-parser, httpx, jsonschema, mcp, opentelemetry-*, pydantic, pyyaml,
+# typing-extensions, watchdog -- NO openai. It was installed on the development host
+# by accident, so the seam appeared to work while being undeclared.
+#
+# ITS ABSENCE FAILED INTO A FIXTURE FALLBACK, which is why nobody noticed: a clean
+# install raises ModuleNotFoundError inside the model call, `llm.text()` catches it by
+# design, `structured()` returns None, every agent serves its fixture, and the run is
+# green. The documented self-hosted path was unreproducible and reported success.
+#
+# A SEPARATE EXTRA, not `dev` and not the base install, for the reason `python-pptx`
+# is dev-only: the five arm64 agent containers install
+# `agentorg/agents/requirements.txt` and reach Bedrock directly, so an OpenAI client
+# in there is one more import that can fail at runtime on arm64 for a code path those
+# containers never take. `pip install .[selfhost]` is the self-hoster's line.
+selfhost = [
+    "openai>=1.0,<3",
+]
 
 [tool.setuptools.packages.find]
 include = ["agentorg*"]

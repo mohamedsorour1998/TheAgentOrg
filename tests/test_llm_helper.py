@@ -10,7 +10,7 @@ patch the same pair for the same reason.
 
 import pytest
 
-from agentorg.common import llm
+from agentorg.common import config, llm
 from agentorg.state import PlanResult
 
 
@@ -162,3 +162,109 @@ def test_keyboard_interrupt_is_not_swallowed(monkeypatch):
     monkeypatch.setattr(llm, "_complete", interrupt)
     with pytest.raises(KeyboardInterrupt):
         llm.structured(PlanResult, "sys", "user")
+
+
+# ── A LOCAL GATEWAY NEEDS NO KEY — the config that silently served fixtures ────
+#
+# MEASURED 2026-08-28 by Lane F, trying to reproduce the documented self-hosted path on
+# a clean host. With only `LLM_BASE_URL=http://127.0.0.1:11434/v1` set, `available()`
+# returned False, so every agent served its fixture and the whole run was green:
+#
+#     LLM_BASE_URL   = 'http://127.0.0.1:11434/v1'
+#     LLM_API_KEY    = 'not-needed'      <- the default
+#     available()    = False
+#
+# A local gateway authenticates nobody, so it ignores the key and nothing complains.
+# The naive self-hosted configuration was a fixture run wearing a model run's output --
+# this repository's signature defect, in the one place the whole self-hosted claim rests.
+#
+# The brief given to that lane asserted the opposite ("`not-needed` is what a local
+# gateway wants"), which is why the lane needed its own `--require-model` guard to catch
+# it. That guard is what a test should have been.
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:11434/v1",
+    "http://localhost:11434/v1",
+    "http://[::1]:8000/v1",
+])
+def test_a_loopback_gateway_is_available_without_a_key(base_url, monkeypatch):
+    """The self-hosted path must work with the default key. This is F1's premise."""
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(config, "LLM_BASE_URL", base_url)
+    monkeypatch.setattr(config, "LLM_API_KEY", "not-needed")
+
+    assert llm.available() is True, (
+        f"{base_url} with the default key reports unavailable, so every agent serves "
+        f"a fixture and the self-hosted run is green while calling no model"
+    )
+
+
+def test_a_remote_gateway_without_a_key_refuses_AND_SAYS_SO(monkeypatch, caplog):
+    """Still refused — but the WARNING is the load-bearing half.
+
+    The refusal was always correct for a remote gateway: `not-needed` there means
+    nobody configured it. What was missing is that it happened in silence, so a run
+    that called no model was indistinguishable from one that did. The previous version
+    returned False with no log line at all.
+    """
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(config, "LLM_BASE_URL", "https://gateway.example.com/v1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "not-needed")
+
+    with caplog.at_level("WARNING"):
+        assert llm.available() is False
+
+    assert caplog.records, (
+        "a remote gateway with no key refused SILENTLY. That silence is the defect: "
+        "the run then serves fixtures everywhere and reports success"
+    )
+    assert "LLM_API_KEY" in caplog.text
+
+
+def test_a_hostname_that_merely_CONTAINS_the_loopback_literal_is_remote(monkeypatch):
+    """`http://127.0.0.1.evil.com/` is a remote host, and a substring check ships a key.
+
+    The loopback test parses the URL rather than matching a pattern. Without that, an
+    operator's key would be sent to somebody else's machine while the code reported the
+    model as locally served — and the run would look completely normal.
+    """
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://127.0.0.1.evil.com/v1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "not-needed")
+
+    assert llm.available() is False, (
+        "a host merely containing '127.0.0.1' was treated as loopback; a credential-"
+        "free request would go to a remote machine believing it stayed local"
+    )
+
+
+@pytest.mark.parametrize("host", ["10.0.0.5", "192.168.1.20", "172.16.0.9"])
+def test_a_private_but_not_local_address_still_needs_a_key(host, monkeypatch):
+    """Private is not local. A gateway on the LAN is somebody else's machine.
+
+    Deliberately narrow: widening the loopback set to "any private address" is how a
+    key-free request reaches a host the operator did not think about. Pinned per range
+    so a future "convenience" widening fails here rather than in an incident.
+    """
+    monkeypatch.setattr(config, "LLM_DISABLED", False)
+    monkeypatch.setattr(config, "LLM_BASE_URL", f"http://{host}:11434/v1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "not-needed")
+
+    assert llm.available() is False, (
+        f"{host} was treated as loopback. It is private but not local -- the request "
+        f"crosses a wire, so it needs a key like any other remote gateway"
+    )
+
+
+def test_LLM_DISABLED_still_wins_over_a_loopback_gateway(monkeypatch):
+    """The kill switch outranks the new branch, or conftest guard 1 stops working.
+
+    Guard 1 sets `config.LLM_DISABLED = True` for the whole suite. If the loopback
+    branch were checked first, a test that set a local base URL would make live calls
+    with the guard in place and nothing would report it.
+    """
+    monkeypatch.setattr(config, "LLM_DISABLED", True)
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setattr(config, "LLM_API_KEY", "not-needed")
+
+    assert llm.available() is False, "LLM_DISABLED was overridden by the loopback branch"
