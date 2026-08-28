@@ -141,3 +141,82 @@ an SBOM is an inventory, not an assessment. trivy is already in the image and ca
 trivy image --format cyclonedx <image reference>
 ```
 
+
+---
+
+## PHASE 4 — the digest, and a second closure the container SBOM cannot see
+
+### The gap above about digests is now closed, and the answer was better than expected
+
+The baseline listed *"the digest of the image actually deployed"* as unseeable and named
+the command. Run, 2026-08-28:
+
+```
+aws ecr describe-images --repository-name theagentorg-shared-security-agent \
+  --region us-east-1 --query 'reverse(sort_by(imageDetails,&imagePushedAt))[0]'
+
+digest  sha256:49ca588480c44f0088d8bc9639ff064486043647afa9e61a287ea6c830981224
+pushed  2026-08-28T16:14:02+03:00
+tags    ["d6165c827ed692c8db02bf64b116bfc18de75ec3", "latest"]
+size    269,313,081 bytes  (257 MiB)
+```
+
+**The image carries the full commit SHA as a tag, and it is `d6165c8` — this commit.**
+That is the link an SBOM needs and a `latest` tag cannot provide: a mutable tag
+describes an intention, while `sha256:49ca5884…` names an artifact and the commit tag
+names the source it was built from. `preflight.py` check 2 reports all five runtimes
+READY at **v37** against this build.
+
+Still unseeable, and the reason is unchanged: the **transitive** closure inside the
+image (five direct pins pull dozens resolved by pip at build time) and the base image's
+Debian userland. Both commands are in the section above; both need a Docker daemon,
+and there is none on this machine — re-measured, `command -v docker` finds the binary
+and `docker info` reports no daemon.
+
+### `web/` — 38 production packages, and none of the four Python gates sees any of them
+
+`web/` did not exist at the baseline. Measured, 2026-08-28:
+
+```
+npm ls --all --parseable | wc -l        406
+npm audit                              0 vulnerabilities  (info/low/moderate/high/critical all 0)
+npm audit metadata                     prod 38 · dev 411 · optional 93 · total 487
+```
+
+| Package | Version | Pin |
+|---|---|---|
+| `next` | `16.3.3` | EXACT |
+| `react` / `react-dom` | `19.2.8` | EXACT |
+| `next-auth` | `5.0.0-beta.32` | EXACT, **and a pre-release** |
+| `@auth/pg-adapter` | `1.11.3` | EXACT |
+| `pg` | `8.23.0` | EXACT |
+| `typescript` / `eslint` / `vitest` | `5.9.3` / `9.39.5` / `4.1.11` | EXACT, dev only |
+
+**Every direct dependency is exact-pinned with no range**, which is stronger than
+`pyproject.toml` manages for the local Python install (that file still carries
+`pydantic>=2.0` as FLOOR_ONLY and four unpinned names — see §3 above). And
+`package-lock.json` pins the whole 487-package closure by integrity hash, which is a
+guarantee `requirements.txt` does not offer for its own transitive set.
+
+**`0 vulnerabilities` is an assessment and it has a shelf life.** An SBOM is an
+inventory; `npm audit` is a point-in-time query against a database that changes daily.
+It was zero on 2026-08-28 and that says nothing about tomorrow.
+
+**`next-auth 5.0.0-beta.32` is the one row that needs a decision rather than a
+refresh.** A pre-release is load-bearing for authentication on `POST /api/approvals` —
+the only route in this repository that can open a security gate over a network. Exact
+pinning makes the version reproducible; it does not make a beta a release.
+
+### The scanner-update process above applies unchanged, and one step now has a second reason
+
+Step 3 — re-measure the provenance discriminator — is the acceptance test for a scanner
+bump. Phase 4 re-verified it survives more than a version change: `preflight.py` check
+3 still reads `LINES: [3, 4]` with `provenance: scanners` after Lane C rewrote all
+three scanner wrappers behind one shared severity table. So the same command now
+answers two questions, and neither a green suite nor a green deploy can answer either.
+
+**A web-dependency bump needs its own step 1, and it does not exist yet.** There is no
+equivalent of the two-places-one-fact check that `measure_sbom.py` performs for the
+scanner versions, because the web closure is declared in exactly one place. That is a
+smaller risk than the scanner case and is named rather than fixed.
+
