@@ -2,6 +2,7 @@
   "name": "theagentorg-web",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "The Agent Org web application. Lane I owns app/api and lib; Lane J owns the routes and components.",
   "scripts": {
     "dev": "next dev",
