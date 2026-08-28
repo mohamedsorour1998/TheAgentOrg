@@ -103,6 +103,94 @@ def test_pause_refuses_a_run_that_has_already_ended(backend):
         queue.pause(job.job_id, gate="gate2")
 
 
+def test_a_run_paused_THROUGH_pause_can_be_released_THROUGH_resume(backend):
+    """THE SEAM BETWEEN THE TWO FUNCTIONS, which nothing else in this file crosses.
+
+    ─────────────────────────────────────────────────────────────────────────
+    A MUTATION SURVIVED ALL 22 TESTS IN THIS FILE. `_sql.pause` was changed from
+    `awaiting_gate=gate` to `awaiting_gate=""` and the file stayed GREEN. Probed
+    directly, with an isolated DSN:
+
+        baseline   awaiting_gate after pause = 'gate2'   resume OK -> ready
+        mutated    awaiting_gate after pause = ''        resume RAISED LookupError
+
+    So a `pause` that forgets which gate it stopped at makes the run PERMANENTLY
+    UNRELEASABLE -- a human clicks approve and gets a LookupError -- and every test
+    passed anyway.
+    ─────────────────────────────────────────────────────────────────────────
+
+    THE CAUSE IS PRECISE, and it is this repository's named pattern rather than an
+    oversight. Every OTHER resume test builds its own paused row with
+    `enqueue(status="paused", awaiting_gate="gate1")`, setting the field DIRECTLY;
+    the tests that call `pause()` never feed its output to `resume()`. Each function
+    was well covered. The seam between them was not, and `awaiting_gate` is the only
+    thing crossing it -- so the one field both sides agree on was the one field no
+    test made them agree about.
+
+    `enqueue(status="paused")` stays where it is used: it is a legitimate way to get
+    a paused row cheaply, and several tests here need exactly that. What was missing
+    is this test -- pause through `pause`, release through `resume`, assert the
+    release SUCCEEDS -- and its value is that it is the only one in the file that
+    would notice.
+
+    THE JOB IS THE GATE'S OWN, and that matters for the assertion below. Read off
+    `worker._enqueue_successor:490-492`, the worker enqueues the *gate* stage
+    pre-paused, so every real caller of `pause` holds a job whose `stage` already IS
+    the gate. Writing this test against a `develop` job instead made it fail on
+    `stage == "gate2"` -- correctly, since `pause` does not rewrite `stage` and
+    should not: an approval must leave the stage alone so the gate stage runs and
+    records the decision. That was my test being wrong about the shape, not the code.
+    """
+    job = queue.enqueue("run-seam", "gate2", ticket_id="T-SEAM",
+                        ticket_text="carried across the seam")
+    queue.claim("worker-a")
+
+    paused = queue.pause(job.job_id, gate="gate2")
+    assert paused.status == "paused"
+    assert paused.awaiting_gate == "gate2", (
+        "pause() did not record WHICH gate it stopped at, so resume() -- which "
+        "addresses a paused job by (run_id, gate) -- can never find it. The run is "
+        "permanently unreleasable and a human clicking approve gets a LookupError."
+    )
+
+    # `awaiting()` is what an approval screen reads. A pause the screen cannot
+    # attribute to a gate is a pause nobody can act on.
+    assert [(waiting.run_id, waiting.awaiting_gate) for waiting in queue.awaiting()] \
+        == [("run-seam", "gate2")]
+
+    # THE RELEASE, THROUGH THE REAL PATH. No LookupError, and the job comes back
+    # claimable with the decision on it.
+    released = queue.resume("run-seam", gate="gate2", decision="approved",
+                            approver="reem@example")
+    assert released.status == "ready"
+    assert released.stage == "gate2"
+    assert released.decided_by == "reem@example"
+
+    claimed = queue.claim("worker-b")
+    assert claimed is not None, "the released job was not claimable"
+    assert claimed.job_id == job.job_id
+    assert claimed.ticket_text == "carried across the seam"
+
+
+def test_a_refusal_also_crosses_the_pause_resume_seam(backend):
+    """The same seam on the refusal side, which repoints the stage as well.
+
+    Worth its own test rather than a parameter: the approval path leaves `stage`
+    alone and the refusal path rewrites it, so a `pause` that lost `awaiting_gate`
+    would strand a refusal in a second way -- `REJECTION_STAGES[gate]` is looked up
+    from the gate `resume` was given, and the row it must find is the one `pause`
+    labelled.
+    """
+    job = queue.enqueue("run-seam-reject", "gate3")
+    queue.claim("worker-a")
+    queue.pause(job.job_id, gate="gate3")
+
+    released = queue.resume("run-seam-reject", gate="gate3", decision="rejected",
+                            approver="reem@example")
+    assert released.stage == "gate3-rejected"
+    assert released.status == "ready"
+
+
 def test_resume_is_the_only_exit_and_it_cannot_be_called_without_a_decision(backend):
     """There is no argument to any function here that advances a paused run without
     saying what the human said."""
@@ -223,15 +311,26 @@ def test_a_paused_run_survives_A_REAL_PROCESS_RESTART(queue_file):
         )
         return completed.stdout
 
-    # PROCESS 1 pauses a run at gate2, then exits.
+    # PROCESS 1 pauses a run at gate2 THROUGH `pause()`, then exits.
+    #
+    # IT CALLS `pause()` RATHER THAN `enqueue(status='paused')`, and that was a real
+    # gap: the most important test in the lane was named for a function it never
+    # invoked. A `pause` that failed to record `awaiting_gate` would strand the run
+    # across the restart -- which is precisely the failure this test exists to
+    # detect -- and the pre-paused row hid it, because it set the field itself.
     first = in_a_fresh_process(
         "from agentorg import queue\n"
-        "job = queue.enqueue('run-restart', 'gate2', status='paused',\n"
-        "                    awaiting_gate='gate2', ticket_id='POISON-1',\n"
+        "job = queue.enqueue('run-restart', 'gate2', ticket_id='POISON-1',\n"
         "                    ticket_text='survives', poisoned=True)\n"
-        "print('PAUSED', job.job_id, job.status)\n"
+        "queue.claim('worker-in-process-1')\n"
+        "paused = queue.pause(job.job_id, gate='gate2')\n"
+        "print('PAUSED', paused.job_id, paused.status, paused.awaiting_gate)\n"
     )
     assert "PAUSED" in first
+    assert "paused gate2" in first, (
+        f"process 1's `pause()` did not record which gate it stopped at, so no "
+        f"later process can release the run:\n{first}"
+    )
 
     # PROCESS 2 -- a different interpreter, nothing shared but the file -- sees the
     # pause, cannot claim it, and reads back the inputs it never received.
