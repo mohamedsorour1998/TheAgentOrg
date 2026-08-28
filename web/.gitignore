@@ -1,0 +1,19 @@
+# Node
+node_modules/
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# Auth.js and database secrets. NEVER COMMITTED.
+#
+# `AUTH_SECRET`, `AUTH_GITHUB_ID` and `AUTH_GITHUB_SECRET` are real credentials:
+# the OAuth client secret can mint tokens against somebody's repositories, and
+# `AUTH_SECRET` signs the session cookies -- leaking it lets anyone forge a
+# session, which on this application means approving a security gate.
+#
+# The repository root's .gitignore already covers `.env`; these are the Next.js
+# variants it does not match.
+.env*.local
+.env.development
+.env.production
