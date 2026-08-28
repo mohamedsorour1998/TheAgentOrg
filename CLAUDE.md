@@ -1520,7 +1520,7 @@ an audit trail.
 
 ## The test suite
 
-**61 test files** as of 2026-08-28, after Phase 1 plus Lanes D and K
+**64 test files** as of 2026-08-28, after Phase 1 and Phase 2
 (`ls tests/test_*.py | wc -l`), plus
 five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
@@ -2134,7 +2134,7 @@ Three things worth keeping:
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 25** — re-read 2026-08-28 with `preflight.py` check 2. The number climbs on
+**version 30** — re-read 2026-08-28 with `preflight.py` check 2. The number climbs on
 every deploy; what matters is that all five carry the SAME one. All five carry the
 **same** version: a split would mean a partial deploy, where some agents run new code
 and some old and no stage's output says
@@ -2152,13 +2152,19 @@ terraform fmt -check -recursive        exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
 ```
 
-**And again at `f8d978d`, with all five Phase 1 lanes merged:**
+**And again at `fb461bd`, with Phase 1 AND Phase 2 merged — nine lanes:**
 
 ```
-pytest -q                              1502 passed, 3 skipped in 139.33s
+pytest -q                              1714 passed, 3 skipped in 143.58s
 ruff / actionlint / terraform fmt      exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
+runtimes                               all five READY at v30
 ```
+
+`1131 → 1714` is **583 tests** across nine lanes. Preflight check 3 still reads
+`LINES: [3, 4]` with `provenance: scanners`, so the discriminator survived Lane C
+rewriting all three scanner wrappers AND Lane D moving every GitHub call behind an
+interface. **64 test files.**
 
 `1131 → 1502` is **371 tests** added by five lanes: queue (A), tenancy (B), scoring (C),
 cost (E) and evidence (L). The suite is 2.5 minutes and still needs no infrastructure —
