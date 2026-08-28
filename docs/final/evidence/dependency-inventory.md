@@ -321,3 +321,93 @@ holds a Dockerfile (155) and `requirements.txt` (46). Including those adds 40 an
 | Bedrock | load-bearing, **with a working second path** | every agent serves a fixture; **the security verdict is unaffected** — it is pure Python over scanner output |
 | pydantic | load-bearing, **no seam** | the contract, the server, the remote seam and the model helper die at import. The quietest and hardest dependency in the system |
 | AgentCore | load-bearing **by choice** | unset `REMOTE_AGENTS` and the pipeline runs in-process, on the path the whole suite already exercises |
+
+---
+
+## 8 · PHASE 4 — twelve lanes, and the dependency set did not move
+
+The baseline was measured at `9b2b1ee` over **31 modules**. At `d6165c8` the package
+is **76 modules** — 2.5× the code, eleven packages where there were four. The
+interesting number is the one that did not change.
+
+Same AST scan, both ends, third-party imports only (stdlib and first-party excluded):
+
+```
+5215ca5   31 modules   ['boto3', 'botocore', 'github', 'pydantic', 'starlette', 'strands']
+d6165c8   76 modules   ['boto3', 'botocore', 'github', 'pydantic', 'starlette', 'strands']
+```
+
+**Byte-identical sets.** Twelve lanes — a durable queue, multi-tenancy with encrypted
+secrets, a scoring policy, cost instrumentation, an integration interface, retrieval, a
+control-plane API and a sixth agent — added **zero** new third-party Python
+dependencies to the runtime package.
+
+That is not restraint; it is a **test doing it**.
+`test_agentcore_deploy_assets.py::test_requirements_covers_every_third_party_import_in_the_package`
+AST-walks `agentorg/`, so any import here becomes a pinned dependency of all five arm64
+images. Three lanes hit it and each recorded the same conclusion independently:
+
+| Lane | Wanted | Refused because |
+|---|---|---|
+| **H** (retrieval) | an embeddings client or a vector store | would ship a vector database to five agent containers. `search.py` is weighted token overlap instead — sets not counts, `keywords` at 3× body text, ties broken on `doc_id` |
+| **K** (control plane) | `starlette` + `uvicorn`, **both already installed** | `starlette` sits in that test's `_NOT_RUNTIME` list described as "dead code today", so importing it from a live module would make the exclusion a lie. Stdlib `http.server` instead |
+| **B** (tenancy) | `cryptography` for AES-GCM | absent from the declared closure — PyJWT requires it only under an extra and CI installs `.[dev]`, so it works locally and fails in CI. Stdlib encrypt-then-MAC over an HMAC-SHA256 keystream instead |
+
+**Lane B's is the one to read twice**, because it is the only case where the refusal
+cost a security property rather than convenience. The cipher is the right *shape* —
+per-record random nonce, scrypt subkeys, encrypt-then-MAC — **without a reviewed
+constant-time primitive.** Every row records which cipher wrote it, the way
+`scan_provenance` records scanner mode, so a KMS migration would be visible in the data.
+Binding it to KMS is a stated further step and is costed in `limitations.md`.
+
+`starlette` remains the anomaly in the table above: it is imported by exactly one module
+(`agentorg/common/health.py`) and was already so at the baseline. The measurement names
+it rather than tidying it away.
+
+### The coupling that DID move, and it moved the right way
+
+```
+9b2b1ee   modules touching a vendor SDK  4 of 31   MODULE-LEVEL  1
+d6165c8   modules touching a vendor SDK  5 of 76   MODULE-LEVEL  2
+```
+
+| Module | Hard (module level) | Deferred (inside a function) |
+|---|---|---|
+| `common/agent_client.py` | — | boto3, botocore |
+| `common/llm.py` | — | boto3 |
+| `github_ops.py` | **github** | boto3, botocore |
+| `integrations/__init__.py` | **github** | — |
+| `log.py` | — | boto3 |
+
+Vendor-touching modules went from **12.9%** of the package to **6.6%** — the
+denominator grew 2.5× while the numerator grew by one. And the one new module-level
+import is `integrations/__init__.py`, which is **Lane D's adapter registry**: the
+module whose entire purpose is that GitHub becomes one adapter behind one interface. A
+hard import there is the interface declaring what it ships, not a new coupling.
+
+### A NEW DEPENDENCY CLASS THE BASELINE HAD NO ROW FOR — `web/`
+
+The Phase 1 inventory covered `agentorg/` because that was all there was. `web/` is
+**53 files, 8,769 lines**, and it has its own closure that none of the four Python gates
+can see:
+
+| Package | Version | Severity | Blast radius |
+|---|---|---|---|
+| `next` | 16.3.3 | **load-bearing** | the entire product UI. No seam; it *is* the framework |
+| `react` / `react-dom` | 19.2.8 | **load-bearing** | as above |
+| `next-auth` | 5.0.0-**beta**.32 | **load-bearing, and on a beta** | sign-in stops working; `POST /api/approvals` is the first surface here that can open a gate over a network, and it takes `by` from the session this package issues |
+| `@auth/pg-adapter` + `pg` | 1.11.3 / 8.23.0 | **seam-bound** | sessions live in Postgres. Swappable for another adapter; the session *strategy* is not — a JWT strategy would make `DELETE /api/link/github` delete a row nothing reads while the cookie worked for 30 days |
+| `typescript` / `eslint` / `vitest` | 5.9.3 / 9.39.5 / 4.1.11 | dev only | three of the four web gates. Not shipped |
+
+**`next-auth 5.0.0-beta.32` is the sharpest single dependency fact in this document.**
+A pre-release version is load-bearing for authentication on the one route in this
+repository that can approve a security gate. It is named here rather than in a comment
+because a beta pin is a decision with an expiry date, and nothing in the repository
+tracks that date.
+
+**And the honest limit that outranks all five rows: no Postgres has ever been
+connected.** `agentorg/db/engine.py` is sqlite3-only, nothing in the suite connects to
+one, and `docker compose up` has never run — so the sign-in flow these packages exist
+to serve **has never completed**. The Auth.js configuration typechecks and builds;
+that is a different claim, and `limitations.md` costs the difference.
+
