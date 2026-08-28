@@ -247,6 +247,14 @@ gates must not.** Verified end to end with no Actions involved: a clean ticket r
 
 Two facts from building it that outlive the queue itself:
 
+**`QUEUE_BACKEND=postgres` NOW WORKS, and `.venv-main` HAS psycopg 3.3.4.** Both
+facts were false when the queue was written and several comments still say so —
+`_sql.py`'s own note that "psycopg is NOT installed on this host" is stale. The
+dialect was fixed on `main` (471fc31 / 69ab1d3) after its first execution refused its
+own INSERT, and re-verified independently: enqueue, claim, a refused second claim,
+pause at a gate, resume and complete all pass against PostgreSQL 16.15 with
+`poisoned` surviving as a real `bool`.
+
 - **SQS could not have done this, and the reason is correctness.** Its nearest thing to
   a pause is a visibility timeout **capped at 12 hours**, so a gate awaiting a human
   silently becomes claimable after half a day and the run merges with an approval nobody
@@ -1683,6 +1691,94 @@ GitHub ignores — and an ignored auth header on this endpoint answers **404, no
 401**, which reads as "the workflow does not exist" and sends the next person
 looking for a missing file.
 
+### `modules/platform` — where the queue worker runs (Lane N)
+
+Follows the other two: what costs nothing is always created, what SPENDS is
+count-gated behind `runtime_enabled`, which defaults **false**. Always created — an
+ECR repository `theagentorg-shared-worker`, a 14-day log group, and **two** IAM
+roles. Gated — the ECS cluster, an arm64 Fargate task definition, the service, an
+egress-only security group, and three plan-time preconditions.
+
+Measured with `terraform plan` against live state, 2026-08-28:
+
+```
+default                     Plan: 7 to add     (registry, log group, 2 roles + 2 policies, lifecycle)
+runtime_enabled, no inputs  3 preconditions FAIL at plan time
+runtime_enabled, configured Plan: 12 to add    0.01975 USD/hour, EXCLUDING the database
+```
+
+**TWO ROLES, NOT ONE, and collapsing them is the shortcut.** The *execution* role
+is what the ECS agent uses before the container starts (pull the image, write the
+log stream, read the DSN secret); the *task* role is what the container's own code
+holds. One role would let the worker's model-written code read every secret its task
+definition names. The task role is granted **no** Secrets Manager access at all.
+
+**IT CREATES NO DATABASE, and that is the decision worth reading.** The DSN arrives
+as a Secrets Manager ARN. `aws_db_instance` would create a master user that **owns**
+what it migrates — which is exactly the wrong role to connect as, see below — so
+doing it properly is a provisioning sequence, not a resource. A db.t4g.micro Single-AZ
+PostgreSQL is **$0.0160/hour ≈ $11.68/month** (AWS Pricing API, 2026-08-28) and would
+be this project's **first standing charge**; everything else here is per-invocation.
+
+**RLS IS A PROPERTY OF THE CONNECTION, NOT THE SCHEMA.** Measured on PostgreSQL
+16.15 — one table, two tenants, one policy, two roles:
+
+```
+as the TABLE OWNER, no tenant bound      2 of 2 rows visible
+as a plain application role, unbound     0 rows
+as a plain application role, tenant=t1   1 row
+```
+
+Postgres skips row-level security for a **superuser**, for **BYPASSRLS**, and for
+the **table owner**; `FORCE ROW LEVEL SECURITY` closes only the third. So one DSN
+choice decides whether the tenancy policies enforce anything — and `pg_policies`
+lists every one either way, so the schema reads as correct while a cross-tenant read
+returns rows. Nothing in the suite, in Terraform, or in a green apply can see it.
+Preflight check 7 is the only thing that can.
+
+**`SCANNERS_REQUIRED` IS ABSENT FROM THE TASK DEFINITION AND MUST STAY ABSENT.** The
+worker image carries no scanners, and that knob promotes ABSENT → FAULT: one
+`*-scanner-error` per tool at severity `high`, the block threshold, so **every** run
+blocks with `blocking=3` including the clean half of the demo.
+
+**No `deployment_circuit_breaker` with rollback, deliberately.** A worker
+crash-looping on a real defect would be rolled back and the deployment would report
+success for the version it did not run.
+
+`terraform validate` refuses an apostrophe in a security group description
+(`^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*-]*$`) — measured, so the reasoning lives in
+comments and the description stays plain.
+
+### The worker image — `infra/worker/` (Lane N)
+
+**A SECOND IMAGE, because `scripts/` IS NOT IN THE AGENT IMAGE'S BUILD CONTEXT.**
+`.dockerignore:51` is `scripts/`, measured by evaluating the patterns the way the
+docker client does:
+
+```
+scripts/worker.py       excluded_by=['scripts/']
+scripts/run_stage.py    excluded_by=['scripts/']
+agentorg/api/server.py  excluded_by=[]
+```
+
+So `infra/selfhost/docker-compose.yml:170`'s `command: ["python",
+"scripts/worker.py", "--forever"]` against `agentorg/agents/Dockerfile` starts a
+container whose **entrypoint file is not in the image** — the same shape as the
+missing `COPY fixtures ./fixtures`, which was measured on the first runtime that
+served traffic. `Dockerfile.dockerignore` beside the Dockerfile overrides the root
+one per docker's documented precedence; that precedence has **never been executed
+here** (no Docker daemon), so the Dockerfile *also* asserts `test -f
+scripts/worker.py` and `import psycopg` at build time. A documented rule nobody ran
+is a claim, not a check.
+
+**psycopg belongs here and NOT in `agents/requirements.txt`** — Lane A's ruling in
+`_sql.py:225-245`, and a test asserts it in both directions. The worker's pins are
+the agents' pins **plus** the driver, because `run_stage.py` drives all five agents
+in-process whenever `REMOTE_AGENTS` is false.
+
+**Note `.venv-main` HAS psycopg 3.3.4 installed** — CLAUDE.md and `_sql.py` both say
+it does not, and that is now stale.
+
 ### `modules/state`
 
 DynamoDB `theagentorg-runs`, PK `run_id`, SK `ts_event_id`, PAY_PER_REQUEST, PITR
@@ -1963,7 +2059,7 @@ scripts/ --include='*.py' | grep -v <its own file> | grep -v tests/`. Empty outp
 the feature does not exist yet, whatever the suite says. Lane I ran exactly that on
 `record_run` and got two lines, both in Lane B's own tests.
 
-### The pattern found FOURTEEN times across FIVE layers
+### The pattern found FIFTEEN times across FIVE layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -2129,6 +2225,49 @@ The instances, briefly:
   *"a mistyped path silently disables the gate"*, and **Semgrep returns exit code 0 on an
   internal crash**. That is the outside-world argument for `SCANNERS_REQUIRED` and for
   `unrunnable_findings` raising rather than returning `[]`.
+- **A TEST SATISFIED BY ITS OWN FILE'S COMMENTARY — the FIFTEENTH instance, and the
+  first where the prose was the AUTHOR'S OWN, in the same commit.** Two of Lane N's
+  blast-radius tests failed on their first run: the static-key scan matched
+  `deploy-platform.yml`'s header saying *"do not add an AWS_ACCESS_KEY_ID secret"*, and
+  the no-hand-built-resources scan matched a comment saying *"an `aws ecr
+  create-repository` here would work, and would mean the account holds a registry
+  Terraform does not know about"*.
+
+  **Both would have PASSED with a shorter header**, and both would have kept passing if
+  the workflow later DID either thing — a prose match is permanent. The fix is this
+  repository's standard one (assert over comment-stripped content, plus an
+  anti-vacuity check that the stripper still leaves the code), and the new part is the
+  tradeoff being *stated*: a key genuinely pasted into a comment now escapes that test.
+  That is the lesser hazard, because a test permanently satisfied by prose forbidding
+  the thing cannot detect the thing.
+
+  The general form, which is worse in this codebase than in most: **the more carefully
+  a file explains what it must not do, the more likely a test for that thing is
+  satisfied by the explanation.** Files here are 40–60% commentary by line.
+
+- **A DISJUNCTION WHOSE LAST TERM IS A LOOSE REGEX IS A TEST THAT CANNOT FAIL** — the
+  fifteenth instance, caught in Lane N's own new test before it was committed. It read:
+
+  ```python
+  assert f"EXIT_BLOCKED = {code}" in source or f"EXIT_REFUSED = {code}" in source
+      or re.search(<a loose regex for an equals sign and the number>, source)
+  ```
+
+  **`EXIT_REFUSED` does not exist** — the constant is `EXIT_REJECTED` — so the `4` case
+  was passing entirely on the third clause, which matches any `= 4` in a 900-line file.
+  The two specific clauses were decoration, one of them misspelled, and `8 passed` read
+  clean. Found by grepping `run_stage.py` for the real constant names rather than
+  trusting the green.
+
+  **A misspelled name inside an `or` chain is invisible**, because the chain succeeds
+  through another term. Same class as `pytest -k triger` exiting 0 — a selection that
+  silently matched nothing.
+
+- **`yaml.safe_load` PARSES A WORKFLOW'S `on:` KEY AS THE BOOLEAN `True`.** YAML 1.1
+  coerces `on`/`off`/`yes`/`no`, so `workflow["on"]` raises `KeyError` while
+  `workflow[True]` is the trigger block. `actionlint` is happy either way because
+  GitHub's own parser does not do this. Any test reading a workflow's triggers through
+  `safe_load` has this shape, and it is invisible until the test runs.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -2574,6 +2713,24 @@ terraform fmt -check -recursive        exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
 ```
 
+**Lane N, in a worktree at `69ab1d3` plus its own ten commits — Phase 4:**
+
+```
+pytest -q                              1928 passed, 4 skipped in 149.74s
+ruff check agentorg scripts tests      All checks passed!
+actionlint .github/workflows/*.yml     exit 0
+terraform fmt -check -recursive        exit 0
+preflight.py --skip-invoke             all SEVEN checks PASS, exit 0 (runtimes v39)
+terraform plan (default)               Plan: 7 to add, 0 to change, 0 to destroy
+terraform plan (runtime_enabled)       Plan: 12 to add   0.01975 USD/hour
+```
+
+`1861 → 1928` is **67 tests** across five files, and the `4 skipped` is the documented
+worktree constant. **An existing test caught this lane's new workflow on the first
+full-suite run** — `test_every_workflow_that_reaches_aws_is_one_we_expect` failed with
+`Extra items in the left set: 'deploy-platform.yml'`, which is that guard working
+exactly as designed; registering the name is the deliberate decision it asks for.
+
 **And again at `62bee51`, with Phases 1, 2 AND 3 merged — twelve lanes:**
 
 ```
@@ -2684,6 +2841,33 @@ has already happened here **while reporting green**:
 | 2 | Five runtimes, READY, one version? | Necessary, **not sufficient** — a runtime reports READY before its endpoint serves the new version. |
 | 3 | Does the security runtime return **real** scanner lines? | The only sufficient check, and the only field that separates a real scan from the fixture. |
 | 4 | Do all three Environments require a reviewer? | An Environment with no reviewer **does not pause — it runs**. |
+| 5 | Can the **WORKER's** task role invoke the model and reach the runtimes? | Check 1's defect on a SECOND principal. `modules/platform` writes its own `BedrockInvoke` from scratch and check 1 cannot see it — the two roles are separate resources that drift. |
+| 6 | Does the worker service run an **identifiable** image, with no scanner knob? | A redeploy **cannot** change which image a service runs — the task definition names it, and that is Terraform's. So a green deploy workflow and a stale service are compatible. `latest` FAILS. |
+| 7 | Does the queue's DSN name a role **RLS actually binds for**? | As the table OWNER a policy admits every row with no tenant bound; as a plain role, none. `pg_policies` lists every policy either way. |
+
+**Checks 5–7 are appended UNCONDITIONALLY and skip LOUDLY**, naming what they did not
+check. `runtime_enabled` defaults false and `QUEUE_DSN` defaults empty, so on any
+machine that has not deployed the worker all three skip — which makes the skip text
+the common case rather than the edge. A check omitted from the list and a check that
+passed are indistinguishable in the output, which is the defect this script exists to
+prevent, arriving through the script itself.
+
+Verified live 2026-08-28, all seven, exit 0 — runtimes at **v39**. Both new failing
+directions were also exercised: check 5 against a role that exists and lacks the grant
+reports **eight** `implicitDeny` decisions (the runtime role, which holds it, reports
+eight `allowed`), and check 7 against the owning superuser names all three escapes.
+
+**Checks 5–7 live in `scripts/preflight_platform.py` and `scripts/preflight_rls.py`**,
+imported inside `main()` — `preflight_rls` reaches for psycopg, which is the WORKER's
+dependency and not this repository's, so a module-scope import would make checks 1–4
+unrunnable without a Postgres driver; and both modules import `_aws`/`CheckFailed`
+from `preflight.py`, so a module-scope import is a cycle.
+
+**A FIRST RED STEP ON CHECK 5 CAME BACK INERT**, and the shape is worth keeping: I
+aimed it at `theagentorg-shared-github-ingress`, which does not exist, so it took the
+role-absent branch and printed `SKIPPED` — which reads as a pass. `aws iam list-roles`
+gave the real name (`...-ingress-role`). **A check with a legitimate skip branch will
+absorb a badly-aimed mutation and look like it caught nothing.**
 
 The line sets are **imported** from `tests/provenance.py`, never restated: a copy
 would be a second declaration of the fact this repository's whole verification
@@ -3800,7 +3984,12 @@ noise.**
 | `scripts/measure_{scorecard,sbom,cost}.py` | **Lane L.** The evolution scorecard's row, the container SBOM, and what one change costs. Each **exits non-zero when it cannot measure what it claims** — `--require-real-scanners` and `--require-model` are the two flags that stop a fixture-read figure wearing a real number's clothes |
 | `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **seventeen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
-| `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
+| `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders. **Still the demo's fallback and NOT being deleted** — `tests/test_fallback_path_survives.py` is that decision as eight tests |
+| `.github/workflows/deploy-platform.yml` | **Lane N.** Builds and pushes the WORKER image only, and its header says why the API and the web app are refused. The redeploy is dispatch-gated and its expression is tested by EVALUATION |
+| `infra/worker/` | The worker's arm64 image + its paired `.dockerignore`, because the root one strips `scripts/`. psycopg lives here and not in the agents' requirements |
+| `infra/Terraform/modules/platform/` | The ECS cluster, task definition and service — **count-gated off by default**. Two IAM roles, no database, and no API or web service (both refused with the measurement) |
+| `scripts/preflight_platform.py` | Preflight checks 5 and 6: the worker's own Bedrock grant, and whether its service runs an identifiable image |
+| `scripts/preflight_rls.py` | Preflight check 7: connects as the queue's DSN and asks Postgres whether RLS binds for that role. The only check here that opens a database connection |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
 | `infra/Terraform/` | All infrastructure. Nothing created by hand in the console |
 | `infra/ingress/handler.py` | The webhook Lambda (outside `agentorg/` on purpose) |

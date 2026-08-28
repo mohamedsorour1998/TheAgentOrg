@@ -111,3 +111,50 @@ module "state" {
   runtime_role_arns = [module.agentcore.runtime_role_arn, data.aws_iam_role.github_actions.arn]
   tags              = local.tags
 }
+
+################################################################################
+# Platform: where the queue worker runs. LANE N.
+#
+# The registry, the log group and two IAM roles are always created and cost
+# nothing. The ECS cluster, task definition and service are COUNT-GATED OFF --
+# `runtime_enabled` defaults false -- for two reasons, both measured:
+#
+#   * They are the project's FIRST HOURLY CHARGES. Everything else here is
+#     per-invocation (Lambda at reserved concurrency 2, DynamoDB PAY_PER_REQUEST,
+#     five AgentCore runtimes that cost nothing idle).
+#   * THE DSN'S DATABASE ROLE DECIDES WHETHER TENANT ISOLATION BINDS, and nothing
+#     in Terraform can inspect it. Measured 2026-08-28 on PostgreSQL 16.15, one
+#     table, one RLS policy, two roles:
+#
+#       as the TABLE OWNER, no tenant bound      2 of 2 rows visible
+#       as a plain application role, unbound     0 rows
+#
+#     Postgres skips RLS for a superuser, for BYPASSRLS, and for the table owner.
+#     A DSN naming the owner makes every policy decoration while `pg_policies`
+#     still lists each one.
+#
+# The module's main.tf carries the full reasoning, including why it creates no
+# database and why the API and the web app are deliberately absent.
+#
+# `image_retention_count` comes from the same root variable the agentcore module
+# reads, so the two registries cannot drift to different retentions.
+################################################################################
+module "platform" {
+  source = "../../modules/platform"
+
+  name                  = local.name
+  account_id            = local.account_id
+  image_retention_count = var.image_retention_count
+  tags                  = local.tags
+
+  # Off by default. Set through TF_VAR_platform_runtime_enabled in
+  # .github/workflows/terraform.yml -- NEVER in terraform.tfvars, which
+  # `.gitignore:14` ignores, so a value set there exists only on the laptop that
+  # wrote it while CI applies from a fresh checkout. That failure is measured: the
+  # ingress rule sat at zero targets while looking configured locally.
+  runtime_enabled      = var.platform_runtime_enabled
+  worker_image         = var.platform_worker_image
+  queue_dsn_secret_arn = var.platform_queue_dsn_secret_arn
+  subnet_ids           = var.platform_subnet_ids
+  vpc_id               = var.platform_vpc_id
+}

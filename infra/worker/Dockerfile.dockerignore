@@ -1,0 +1,85 @@
+# The build context for infra/worker/Dockerfile. LANE N.
+#
+# THIS FILE'S ONLY JOB IS TO NOT EXCLUDE `scripts/`. The repository root
+# `.dockerignore` line 51 excludes it -- correctly, for the five agent images,
+# which install a package and never shell out to a script. The worker does exactly
+# that: `agentorg/queue/runner.py:49` runs `python scripts/run_stage.py <stage>` as
+# a subprocess per stage, and `scripts/worker.py` IS the container's entrypoint.
+#
+# Docker's rule, quoted from docs.docker.com/build/concepts/context:
+#   "Place your ignore-file in the same directory as the Dockerfile, and prefix the
+#    ignore-file with the name of the Dockerfile"
+#   "A Dockerfile-specific ignore-file takes precedence over the .dockerignore file
+#    at the root of the build context"
+#
+# So this file REPLACES the root one for this build -- it does not merge with it.
+# Every exclusion the root file makes and this image also wants therefore has to be
+# restated below. That duplication is unavoidable given the precedence rule, and it
+# is why `infra/worker/Dockerfile` ALSO asserts `test -f scripts/worker.py` at build
+# time: two ignore files that must agree is exactly the shape this repository
+# distrusts, so the outcome is checked rather than the mechanism assumed.
+#
+# UNVERIFIED HERE. No Docker daemon runs on the machine this was written on
+# (`docker ps` answers "dial unix /var/run/docker.sock: connect: no such file or
+# directory"), so the precedence has not been executed. The build-time assertion is
+# what makes that honest instead of hopeful.
+
+# THE IMPORTANT ONE, copied from the root file's own note: build/lib/agentorg/
+# holds a STALE copy of several modules from before the packaging fix, missing the
+# agents/, common/ and security/ subpackages. Gitignored but present in a worktree,
+# so a build context would carry it. Nothing may read it as truth.
+build/
+dist/
+*.egg-info/
+
+# Never ship a virtualenv. `.venv-*` here carry EDITABLE installs whose .pth files
+# redirect `agentorg` imports back at a worktree that does not exist in a container
+# -- and if it did, it would defeat the non-editable install this image is built to
+# exercise.
+.venv/
+.venv-*/
+venv/
+
+# Secrets. `.env` holds a live GitHub token (gitignored). Excluded here as well so
+# no build context can carry it into a layer, where it would persist even if a
+# later stage deleted it.
+.env
+*.tfvars
+
+# `runs/` is ~10k gitignored files and grows on every test run. CLAUDE.md says
+# never to list it; shipping it into a layer is worse. Lane I measured what happens
+# when a build traces this directory: Turbopack pulled the whole repository into a
+# server bundle and three other gates could not see it.
+runs/
+runs-archive-*/
+
+# Caches: stale bytecode has served wrong bytes in this repo before, and a host
+# __pycache__ can shadow freshly installed source.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Not needed at runtime.
+#
+# `tests/` IS EXCLUDED AND THAT IS A DECISION, not a copy of the root file. The
+# worker's stages import nothing from there. But note `scripts/preflight.py` DOES
+# import `tests.provenance` -- so preflight cannot run inside this image, and it is
+# not meant to: it is a pre-demo check run by an operator against the deployed
+# account, not a container concern. If that ever changes, this line is what would
+# have to change with it, and the failure would be a clean ImportError naming
+# `tests.provenance` rather than a wrong answer.
+tests/
+target_repo/
+docs/
+tickets/
+infra/Terraform/
+infra/selfhost/
+web/
+.github/
+.superpowers/
+make_fixtures.py
+
+# Git metadata: large, and it would put the whole history in a layer.
+.git/
+.gitignore

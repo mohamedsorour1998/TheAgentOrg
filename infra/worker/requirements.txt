@@ -1,0 +1,77 @@
+# Runtime dependencies for the QUEUE WORKER container. LANE N.
+#
+# Pinned, not floating, for `agentorg/agents/requirements.txt`'s reason: an image
+# built in September must contain the same code as the one demonstrated in August,
+# and `>=` does not promise that.
+#
+# WHY THIS FILE IS SEPARATE FROM THE AGENTS' ONE, and it is the whole reason the
+# worker gets its own image. `agentorg/queue/_sql.py:225-245` records Lane A's
+# ruling verbatim:
+#
+#   "The alternative -- adding `psycopg` to `requirements.txt` -- is not available
+#    to this lane [...] It would also be the wrong answer. Shipping a Postgres
+#    driver into five arm64 agent containers that never open a database connection
+#    adds an import that can fail at runtime on arm64, for a code path no agent
+#    takes. [...] When a worker image exists, psycopg belongs in ITS requirements."
+#
+# So the two lists diverge in exactly one direction: this one is the agents' list
+# PLUS the driver. It is not a subset -- the worker runs `scripts/run_stage.py`,
+# which drives all five agents in-process whenever `REMOTE_AGENTS` is false (the
+# documented default and the demo's fallback), so every dependency an agent has is
+# a dependency of this container too.
+#
+# THE FIVE BELOW ARE COPIED FROM agentorg/agents/requirements.txt, AND THAT
+# DUPLICATION IS CHECKED RATHER THAN TRUSTED.
+# `tests/test_platform_deploy.py::test_the_worker_requirements_cover_every_agent_requirement`
+# parses both files and asserts this one is a superset at identical versions. Two
+# pinned lists that must agree is precisely the shape this repository distrusts --
+# CLAUDE.md's rule is that a second declaration needs something that detects a
+# change in the first -- so a version bumped in one file and not the other fails a
+# named test instead of producing a worker whose agents behave differently from the
+# deployed runtimes'.
+#
+# A `-r ../../agentorg/agents/requirements.txt` include was the alternative and is
+# refused: pip resolves that path relative to the requirements file, so it works
+# from a repo checkout and breaks inside a build context where the parent
+# directories were stripped by the paired ignore file. It would also make the
+# agents' file able to change this image's contents without anything here saying so.
+
+# The agent framework.
+strands-agents==1.52.0
+
+# AgentCore runtime SDK. Present because `agentorg/agents/server.py` is importable
+# from this image and `run_stage.py` reaches the agent modules; the worker never
+# serves HTTP itself.
+bedrock-agentcore==1.22.0
+
+# The frozen result contract in agentorg/state.py.
+pydantic==2.13.4
+
+# Bedrock, and every AWS call `run_stage.py` makes -- `call_agent`'s remote branch
+# constructs two boto3 clients.
+boto3==1.43.75
+
+# github_ops.py:35, module level and unconditional. See the agents' file.
+PyGithub==2.10.0
+
+# ── THE ONE LINE THE AGENTS' FILE MUST NOT HAVE ──────────────────────────────
+#
+# psycopg 3, the driver `agentorg/queue/_sql.py:_connect` reaches for by NAME
+# through `importlib.import_module` when `QUEUE_DSN` starts `postgres://` or
+# `postgresql://`. Absent, it raises a named refusal at the FIRST `claim()` -- which
+# is after the worker reports healthy and starts polling, so a missing driver
+# presents as a queue that accepts `QUEUE_BACKEND=postgres` and never claims a job.
+# The Dockerfile asserts the import at build time for that reason.
+#
+# `[binary]` IS LOAD-BEARING AND NOT A CONVENIENCE. Plain `psycopg` is the pure
+# Python package: it needs libpq and pg_config present at install time, which this
+# slim base image does not carry, so `pip install psycopg` succeeds and then
+# `import psycopg` fails at runtime looking for the C library -- a green build and a
+# dead worker. `psycopg[binary]` pulls `psycopg-binary`, which ships libpq inside
+# the wheel. Both are published at 3.3.4 -- read with `pip index versions psycopg`
+# and `pip index versions psycopg-binary` on 2026-08-28, not recalled.
+#
+# arm64 wheel availability is the risk this carries, and the Dockerfile's
+# `import psycopg` step is what turns it into a build failure rather than a runtime
+# one.
+psycopg[binary]==3.3.4

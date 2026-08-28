@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Is the deployed pipeline actually real? One command, four checks, exit 0 or 1.
+"""Is the deployed pipeline actually real? One command, SEVEN checks, exit 0 or 1.
 
 Run this before a demo. Every check answers a question whose WRONG answer has
 already happened once in this project, and every one of them reported green while
@@ -27,6 +27,30 @@ being wrong:
      -- An Environment with no required reviewer DOES NOT PAUSE. It runs. Before
         2026-08-22 gate1 had `protection_rules: []` and did exactly that.
 
+  5. Can the WORKER's task role invoke the model and reach the five runtimes?
+     -- CHECK 1'S DEFECT ON A SECOND PRINCIPAL. `modules/platform` writes its own
+        BedrockInvoke statement from scratch, and check 1 cannot see it -- it
+        simulates a different role. Verified both ways 2026-08-28: a role without
+        the grant reports eight implicitDeny decisions, the runtime role eight
+        `allowed`.
+
+  6. Does the worker service run an IDENTIFIABLE image, with no scanner knob?
+     -- A redeploy CANNOT change which image a service runs; the task definition
+        names it, and that is Terraform's. So a green deploy workflow and a stale
+        service are entirely compatible. `latest` fails here.
+
+  7. Does the queue's DSN name a role that RLS ACTUALLY BINDS FOR?
+     -- MEASURED 2026-08-28 on PostgreSQL 16.15: as the TABLE OWNER a policy admits
+        2 of 2 rows with NO tenant bound; as a plain role, 0. Postgres skips RLS for
+        a superuser, for BYPASSRLS and for the table owner, and `pg_policies` lists
+        every policy either way. Nothing in the suite, in Terraform or in a green
+        apply can see it -- it is a property of the CREDENTIAL.
+
+  Checks 5, 6 and 7 SKIP LOUDLY when the thing they check does not exist (the
+  default: `runtime_enabled` is false and `QUEUE_DSN` is empty), naming what was
+  NOT checked. They are never omitted from the run -- a check absent from the
+  output and a check that passed are indistinguishable.
+
 Exits 1 on the first failure, with a message naming what to do about it. Prints
 every check's evidence, so the output is the record rather than a claim about it.
 
@@ -42,7 +66,8 @@ and YAML indentation silently rewrites Python.
 Usage:
     .venv-main/bin/python scripts/preflight.py
     .venv-main/bin/python scripts/preflight.py --runtime-prefix theagentorg_
-    .venv-main/bin/python scripts/preflight.py --skip-invoke   # checks 1, 2, 4
+    .venv-main/bin/python scripts/preflight.py --skip-invoke   # every check but 3
+    QUEUE_DSN=postgresql://... .venv-main/bin/python scripts/preflight.py
 """
 
 from __future__ import annotations
@@ -532,6 +557,24 @@ def main(argv: list[str] | None = None) -> int:
              "REAL_SCANNER_LINES. For proving check 3 can fail without touching "
              "live infrastructure; never correct on a healthy system.",
     )
+    # ── checks 5-7, the platform. LANE N. ──
+    parser.add_argument(
+        "--ecs-cluster", default="theagentorg-shared-platform",
+        help="the ECS cluster check 6 looks for (default: "
+             "theagentorg-shared-platform). Absent is a LOUD SKIP, not a failure: "
+             "modules/platform's runtime_enabled defaults false.",
+    )
+    parser.add_argument(
+        "--ecs-service", default="theagentorg-shared-worker",
+        help="the ECS service check 6 looks for (default: "
+             "theagentorg-shared-worker)",
+    )
+    parser.add_argument(
+        "--queue-dsn", default="",
+        help="the DSN check 7 connects as, to ask Postgres whether RLS binds for "
+             "that role. Defaults to reading QUEUE_DSN from the environment. NEVER "
+             "printed: every line redacts the password.",
+    )
     args = parser.parse_args(argv)
 
     _say("preflight -- is the deployed pipeline actually real?")
@@ -554,6 +597,39 @@ def main(argv: list[str] | None = None) -> int:
         (4, "the three Environments each require a reviewer",
          lambda: check_the_gates_have_required_reviewers(args.repo)),
     )
+
+    # ── CHECKS 5 AND 6: THE PLATFORM THE QUEUE WORKER RUNS ON. LANE N, N4. ──
+    #
+    # IMPORTED HERE RATHER THAN AT MODULE SCOPE, deliberately and for two different
+    # reasons -- the same ruling `check_the_security_runtime_really_scans` makes about
+    # `agent_client`:
+    #
+    #   * `preflight_rls` reaches for `psycopg`, which is pinned in the WORKER's
+    #     requirements and not in this repository's dev extra. A module-scope import
+    #     would make checks 1-4 unrunnable on any machine without a Postgres driver.
+    #   * both modules import FROM this one (`_aws`, `CheckFailed`, `ACCOUNT`,
+    #     `REGION`), so a module-scope import here is a cycle.
+    #
+    # THEY ARE APPENDED UNCONDITIONALLY, and that is the point. Each SKIPS LOUDLY when
+    # the thing it checks does not exist -- naming what it did not check -- rather than
+    # being omitted from the list. A check absent from the run and a check that passed
+    # are indistinguishable in the output, which is the defect this whole script exists
+    # to prevent.
+    from scripts.preflight_platform import (
+        check_the_worker_role_can_invoke_the_model,
+        check_the_worker_service_matches_the_image_it_should_run,
+    )
+    from scripts.preflight_rls import check_the_dsn_role_is_bound_by_rls
+
+    checks.extend([
+        (5, "the WORKER's task role can invoke the model and reach the runtimes",
+         lambda: check_the_worker_role_can_invoke_the_model(config.BEDROCK_MODEL)),
+        (6, "the worker service runs an identifiable image, with no scanner knob",
+         lambda: check_the_worker_service_matches_the_image_it_should_run(
+             args.ecs_cluster, args.ecs_service)),
+        (7, "the queue's DSN names a database role that RLS actually binds for",
+         lambda: check_the_dsn_role_is_bound_by_rls(args.queue_dsn)),
+    ])
 
     for number, name, run in checks:
         try:

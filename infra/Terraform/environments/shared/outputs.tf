@@ -46,3 +46,27 @@ output "run_state_table_arn" {
   description = "The run-state table's ARN"
   value       = module.state.table_arn
 }
+
+################################################################################
+# The platform module. LANE N.
+################################################################################
+
+output "worker_repository_url" {
+  description = "The ECR repository deploy-platform.yml pushes the worker image to."
+  value       = module.platform.worker_repository_url
+}
+
+output "worker_task_role_arn" {
+  description = "The role the worker's own code assumes. scripts/preflight.py check 5 simulates Bedrock against this principal -- a green apply proves the policy was written, not that it permits the call."
+  value       = module.platform.worker_task_role_arn
+}
+
+output "worker_runtime_enabled" {
+  description = "Whether a worker service exists. A green apply with this FALSE created a registry and two roles and nothing that runs -- and the apply's exit code cannot tell you which happened. Same hazard as dispatch_target_enabled: a rule with no target fires into nothing while looking healthy."
+  value       = module.platform.worker_runtime_enabled
+}
+
+output "worker_hourly_usd_estimate" {
+  description = "Fargate ARM cost per hour for the running worker(s), EXCLUDING the database this module does not create."
+  value       = module.platform.worker_hourly_usd_estimate
+}
