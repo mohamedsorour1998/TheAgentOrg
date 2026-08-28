@@ -1963,11 +1963,15 @@ scripts/ --include='*.py' | grep -v <its own file> | grep -v tests/`. Empty outp
 the feature does not exist yet, whatever the suite says. Lane I ran exactly that on
 `record_run` and got two lines, both in Lane B's own tests.
 
-### The pattern found THIRTEEN times across four layers
+### The pattern found FOURTEEN times across FIVE layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
 > reveals that.**
+
+The fifth layer, added 2026-08-28, is **a claim about something outside this repository**.
+No test, gate or mutation can reach one, so the only instrument is checking — and the
+fourteenth instance measured that its errors have a **direction**.
 
 The instances, briefly:
 
@@ -2092,6 +2096,39 @@ The instances, briefly:
   perfect.** Both replacements were found by probing four candidates and keeping the two
   where the baseline visibly failed — `must_fix` naming the failure (3/8) and the hostile
   claim reaching the PR (8/8).
+
+- **A COMPETITIVE CLAIM READ OFF ONE DOC PAGE PER PRODUCT** — the fourteenth instance, and
+  the first outside the codebase entirely. Lane L's competitor matrix asserted that GitHub
+  Copilot runs no scanners, that Claude Code has no deterministic rule, and that *"nothing
+  found combines all three"* of multi-agent generation, a non-LLM block and human gates.
+  Commissioned research disproved **five** claims:
+
+  | Written | Actually |
+  |---|---|
+  | Copilot: scanning is *"something you add"* | it runs **CodeQL + secret scanning + Advisory DB**, no extra licence |
+  | Copilot: approval gates *"not described"* | Actions **do not run** on an agent push until a human clicks *Approve and run workflows* |
+  | Claude Code: no deterministic rule | **permission deny rules** are *"enforced by Claude Code, not by the model"* and survive `bypassPermissions` |
+  | *"Nothing found combines all three"* | Factory, OpenHands, GitLab Duo and Jules each have **two** of the three |
+
+  **Four of the five were wrong in the FLATTERING direction**, which is the whole finding:
+  a doc page describes what a vendor chose to put on it, so reading one page per competitor
+  is a measurement whose error has a *direction*. Nothing in this repository could have
+  caught it — there is no test, no gate and no mutation for a claim about somebody else's
+  product.
+
+  The fix has the same shape as every other instance: the claim became **narrower and
+  checkable**. Not "we are the only deterministic one" but a **seam distinction** — every
+  gate found guards a *tool call inside one agent's session*, ours guards a *pipeline stage
+  between agents*. And the strongest row turned out to be one the first draft had not
+  found: **every major vendor's LLM review is advisory, in writing, in their own docs**,
+  with Snyk's platform page arguing this repository's thesis verbatim — *"the generator
+  cannot be the validator."*
+
+  Three shipped products also carry **our own signature defect**: Cursor hooks are
+  *"fail-open by default"* on any exit code but 2, Claude Code's exit 1 does not block and
+  *"a mistyped path silently disables the gate"*, and **Semgrep returns exit code 0 on an
+  internal crash**. That is the outside-world argument for `SCANNERS_REQUIRED` and for
+  `unrunnable_findings` raising rather than returning `[]`.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -2666,8 +2703,8 @@ than carrying a second copy.
 
 ## The presentation — `scripts/make_deck.py`
 
-The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-prefinal.pptx`,
-16 slides, real transitions and click-advanced animations. One command, and it
+The pitch deck is **generated**, not hand-built: `docs/pitch/TheAgentOrg-final.pptx`,
+19 slides, real transitions and click-advanced animations. One command, and it
 self-checks:
 
 ```bash
@@ -2675,15 +2712,45 @@ self-checks:
 ```
 
 ```
-docs/pitch/TheAgentOrg-prefinal.pptx  (379 KB)
-  slides:      16
-  animated:    14
+docs/pitch/TheAgentOrg-final.pptx  (387 KB)
+  slides:      19
+  animated:    17
   layout:      clean
   sections:    all four covered
   transitions: all
   OK — motion, content rules and layout verified in the saved file
   file(1):     Microsoft OOXML
 ```
+
+`TheAgentOrg-prefinal.pptx` (16 slides, 14 animated) is kept unchanged as the Aug 25
+artifact. **Regenerating touches only the final file** — the generator's output path
+changed, so a `git status` showing the prefinal deck modified means somebody ran an older
+copy of the script.
+
+**Every constant was re-measured for the final deck, and six were stale** —
+`TESTS_PASSING` 1102 → 1853 and `TEST_FILES` 41 → 73, because twelve lanes committed
+concurrently. Two constants are deliberately **ranges** (`COST_LOW`/`COST_HIGH`): the
+cost spread is 30% across three consecutive runs of one unchanged ticket, so a point
+value would be the most repeated and least reproducible number on the deck.
+
+**THE WRAPPED-HEIGHT AUDIT TOOK FOUR PASSES ON ONE SLIDE, and the sequence is the
+lesson.** Slide 12 ("From a pipeline to a platform", ten capability bullets in two
+columns) went `2 collisions @0.09in` → `3 @0.03in` → `1 @0.12in` → `1 @0.00in` → clean.
+Two of those passes made the **copy shorter**, which is the right fix; the last moved a
+footnote by 0.16in, which is the right fix for an estimator deliberately crude enough to
+call itself a smoke alarm. A width-only check reports clean at every step of that
+sequence. **Do not chase a 0.00in collision by nudging geometry alone** — it means the
+slide is at its density limit, and the honest move is to cut a word.
+
+**The banned-phrase check is not vacuous, verified by RED.** Assigning the forbidden
+sentence to a real slide bullet produces `FAIL: banned phrase is back on a slide: 'no
+model in it'` and **exit 1**, with `layout: clean` beside it — so the four checks are
+independent. Reverted; the phrase is not in the deck.
+
+**The palette has not drifted.** Measured by parsing both files: all ten tokens agree
+between `make_deck.py`'s `RGBColor(...)` constants and
+`docs/pitch/preview/index.html`'s CSS custom properties. That check is worth re-running
+after any colour edit, because the preview is how the design was signed off.
 
 **Why generated.** Somebody has to be able to fix a typo at 11pm the night before and
 regenerate. And a hand-built `.pptx` lets a stale figure survive on a slide indefinitely
@@ -3333,11 +3400,31 @@ for `tests/test_approve_server.py:266-289`'s reason.
 
 #### Known gaps, named rather than implied
 
-- **NO POSTGRES HAS EVER BEEN CONNECTED.** `agentorg/db/engine.py` is sqlite3-only,
-  Lane B's note says nothing in the suite connects to one, and `docker compose up` has
-  never run. **A sign-in flow that has never completed against a real Postgres is not
-  a working sign-in flow.** The Auth.js configuration typechecks and builds; that is a
-  different claim.
+- **~~NO POSTGRES HAS EVER BEEN CONNECTED~~ — OVERTAKEN by `471fc31` / `69ab1d3`.** A
+  real **PostgreSQL 16.15** now runs the schema; the third-pattern section above is the
+  full account, including the RLS-depends-on-the-role finding. Independently re-verified
+  from this lane by applying `schema.render_schema("postgres")` to a fresh database —
+  **7 tables, 6 RLS policies** — and driving the queue (`enqueue OK … poisoned=True`,
+  `claim OK … poisoned= True`).
+
+  **ONE GAP THOSE TWO COMMITS DID NOT CLOSE: `migrations.migrate` CANNOT RUN ON POSTGRES
+  AT ALL.** It accepts `dialect="postgres"` and then calls `connection.executescript` at
+  three sites (`migrations.py:104`, `:119`, `:145`). Measured:
+
+  ```
+  sqlite3 Connection has executescript: True
+  psycopg Connection has executescript: False
+  ```
+
+  Its annotation is `connection: sqlite3.Connection`, so the parameter offers a dialect
+  the runner physically cannot reach — the DDL has to be applied through `render_schema`
+  directly, which is how every Postgres verification so far has done it. So the
+  **forward-only migration ledger, its checksum guard and its idempotency have never run
+  on Postgres**, and that is a different gap from the two that were fixed.
+
+  **The sign-in flow has still never completed**, for the circular-RLS reason `69ab1d3`
+  records, and `docker compose up` has still never run — the Postgres above is a Homebrew
+  service, not the compose stack.
 - **`repo` OAuth SCOPE IS ALL-OR-NOTHING.** There is no per-repository OAuth scope, so
   the in-scope list is enforced by this application and not by GitHub. Per-repository
   grants need a GitHub App (installation tokens, a different authorisation model).
@@ -3619,6 +3706,55 @@ wired run whose container fell back has a row per stage and `usd=0.0`. Nothing i
 `graph.py` or `run_stage.py` assigns `state.cost` or calls `build_cost_record` — zero and
 zero, measured by AST — so the block is empty on every run today.
 
+### The evidence (Lane L) — and the two things that surprised it
+
+`docs/final/evidence/` answers seven judge requirements with **evidence rather than
+code**. The four facts worth not re-deriving:
+
+**A DOCUMENT SET CAN HAVE NO CALLER, and this one did.** Lane L's Phase 1 evidence commit
+`4172bd4` was written on a worktree branch and **eleven of its twelve files were never
+merged** — measured, `git merge-base --is-ancestor 4172bd4 main` → NO. Only
+`measure_dependencies.py` landed, rewritten. So four judge requirements were answered on a
+branch no reader would ever find, while every gate stayed green. That is this file's
+second named pattern — *a feature complete, tested, and reached by nothing* — arriving in
+**documentation**, where the check that catches it in code (`grep` for the entry point)
+has no equivalent. **When a lane's deliverable is a document, "did it merge" is the
+wiring question.** Restored in `25ba200`.
+
+**`llm.last_source()` IS THE WRONG INSTRUMENT FOR A RUN, and it produced a false
+refusal.** It names the **last** call and a walk makes six or seven. Measured:
+
+```
+status promoted   last_source fixture
+  fixture=False in=5267 out=258   <- planner,   the model answered
+  fixture=False in=5374 out=589   <- developer, the model answered
+  fixture=False in=6444 out=230   <- reviewer,  the model answered
+  fixture=True  in=   0 out=  0   <- SRE, MaxTokensReachedException
+  fixture=False in=5228 out= 66   <- security,  the model answered
+  fixture=False in=5974 out=191   <- promote,   the model answered
+```
+
+Five of six calls reached Bedrock and the field said `fixture`, purely because the SRE was
+fourth and something ran after it. A guard reading it refuses a run that is 83%
+model-backed, and would equally **accept** a run whose last call alone succeeded. Read
+`llm.usage()` and count `not c.fixture` — Lane E's `record_fixture_fallback` writes a
+**zero-token row** rather than nothing, which is exactly what makes that count possible.
+Same class as `blocking=2`: a summary field that cannot separate the two cases it is asked
+about.
+
+**The `sre` agent hits `MaxTokensReachedException` on a clean walk, roughly one call in
+six.** Not a defect in this lane's code and not currently recorded anywhere else — the
+fallback is correct behaviour, it costs the SRE's advice, and it is why a run's
+`model_calls` is `5/6` or `6/7` rather than a fixed number.
+
+**The model is 99.9% of a run's marginal cost, and 95.5% of the token volume is input.**
+Measured: `$0.013036–$0.016931` per clean change against `$0.00001245` for Lambda +
+EventBridge + DynamoDB together. The cache hit rate is a measured **zero** with
+`cached_reported=False` — the provider says nothing about caching at all — so five agents
+re-send the same repository snapshot at **exactly 4×** the cached rate ($0.33 vs
+$0.0825/1M, verified arithmetic). **Any cost optimisation that is not a cache point is
+noise.**
+
 ---
 
 ## Where things live
@@ -3660,7 +3796,9 @@ zero, measured by AST — so the block is empty on every run today.
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
 | `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
 | `scripts/measure_prompts.py` | Lane M's gate: two prompt changes, one arm each, model-backed. A prompt edit is a behaviour change with no compiler, and `pytest` cannot see it |
-| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — 4 of 31 modules, **1** module-level. Replaced four grep counts that reproduced under no scope |
+| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — **5 of 76** modules, **2** module-level at `d6165c8`. Replaced four grep counts that reproduced under no scope |
+| `scripts/measure_{scorecard,sbom,cost}.py` | **Lane L.** The evolution scorecard's row, the container SBOM, and what one change costs. Each **exits non-zero when it cannot measure what it claims** — `--require-real-scanners` and `--require-model` are the two flags that stop a fixture-read figure wearing a real number's clothes |
+| `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **seventeen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
 | `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
