@@ -1,4 +1,4 @@
-"""Preflight checks 5 and 6 — the platform the queue worker runs on. LANE N, N4.
+"""Preflight checks 5 and 6 — the worker's IAM role and its deployed image. LANE N, N4.
 
 Imported by `scripts/preflight.py`, which owns the four original checks. Split into
 its own module for one reason: that file is 574 lines and this repository's measured
@@ -24,26 +24,23 @@ both wrong answers were measured on 2026-08-28 rather than imagined.
         so the worker's own Bedrock grant IS the fallback path -- and a denial there
         fails the way every model denial here has: silently, into fixtures.
 
-  6. Does the queue's DSN name a role that RLS ACTUALLY BINDS FOR?
-     -- MEASURED 2026-08-28 on PostgreSQL 16.15, one table, one policy, two roles:
+  6. Does the worker service run an IDENTIFIABLE image, with no scanner knob?
+     -- A REDEPLOY CANNOT CHANGE WHICH IMAGE A SERVICE RUNS. The task definition
+        names it, and that definition is Terraform's -- so `deploy-platform.yml` can
+        push an image, force a new deployment, report green, and restart the OLD
+        code. `latest` therefore FAILS here: it cannot say which commit is running.
 
-            as the TABLE OWNER, no tenant bound      2 of 2 rows visible
-            as a plain application role, unbound     0 rows
-            as a plain application role, tenant=t1   1 row
+        It also refuses `SCANNERS_REQUIRED=true` on this container, which carries no
+        scanners: that knob promotes ABSENT to FAULT, giving one `*-scanner-error`
+        finding per tool at severity `high` -- the block threshold -- so EVERY run
+        blocks with blocking=3, including the clean half of the demo.
 
-        Postgres skips row-level security for a superuser, for any role holding
-        BYPASSRLS, and for the TABLE OWNER. `FORCE ROW LEVEL SECURITY` fixes only the
-        third. So one DSN choice decides whether the tenancy policies enforce
-        anything, and `pg_policies` LISTS EVERY POLICY EITHER WAY -- the schema reads
-        as correct while a cross-tenant read returns rows.
-
-        No Terraform variable and no green apply can catch this. It is a property of
-        the credential, so it is checked against a live connection or not at all.
+  Check 7 lives in `preflight_rls.py`, because it is the only check in this
+  repository that opens a DATABASE connection and so carries a different dependency.
 
 WHY THESE ARE NOT PART OF CHECKS 1-4. Check 1 proves one role can call the model;
-this proves a DIFFERENT role can. Check 4 proves the human gates pause; check 6
-proves the TENANT boundary holds, which is a different guarantee with a different
-wrong answer. Collapsing either pair would mean one PASS standing for two facts.
+check 5 proves a DIFFERENT role can, and the two roles are separate resources that
+drift. Collapsing them would mean one PASS standing for two facts.
 
 BOTH ARE SKIPPED BY DEFAULT WHEN THE THING THEY CHECK DOES NOT EXIST, and the skip
 is LOUD. `modules/platform`'s `runtime_enabled` defaults false, so an unconfigured
@@ -223,7 +220,7 @@ def check_the_worker_service_matches_the_image_it_should_run(cluster: str,
             f"That is the DEFAULT and documented state: modules/platform's\n"
             f"runtime_enabled is false because these are the project's first hourly\n"
             f"charges and because the DSN's database role decides whether tenant\n"
-            f"isolation binds at all (see check 6).\n"
+            f"isolation binds at all -- see check 7).\n"
             f"NOTHING HERE CHECKED A RUNNING WORKER."
         )
 
