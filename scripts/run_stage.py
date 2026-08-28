@@ -85,6 +85,7 @@ import sys
 import typing
 
 from agentorg import gates, graph, integrations, log
+from agentorg.agents import testgen
 from agentorg.common import agent_client, config, llm
 from agentorg.state import HumanDecision, LogEvent, RunState
 from agentorg.tenancy import run_index
@@ -638,6 +639,32 @@ def _stage_develop(args: argparse.Namespace) -> int:
     for dev, review, attempt in loop_results:
         graph._develop_comment(state, dev, attempt)
         graph._review_comment(state, review, attempt)
+
+    # GENERATED TESTS, before the security verdict. Lane G built the agent and could
+    # not call it: this file is not in its ownership row, so `RunState.generated_tests`
+    # was None on every run and testgen was exercised only by its own 28 tests. Third
+    # instance this phase of a correct answer nobody asks for, after Lane C's scoring
+    # library and Lane E's usage payload.
+    #
+    # BEFORE security rather than after, because a failing generated test is a FACT the
+    # security comment's reader should already have, and because ordering the other way
+    # would put the pipeline's one binding verdict ahead of evidence that might explain
+    # it.
+    #
+    # `workdir=None`: the pipeline has no checkout to run against here, and testgen
+    # reports that honestly in `notes` rather than as `passed=0 failed=0`, which is the
+    # same tuple a green zero-test run produces. So this generates and does not execute
+    # -- G5's binding half needs a workdir, and wiring that needs the target repo
+    # checked out beside the run, which is not this change.
+    state.generated_tests = testgen.run(state)
+    # `passed`, not a new action word. `LogEvent.action` is a closed Literal in the
+    # FROZEN contract, and widening it for a log label would be a contract change to
+    # describe one stage's side work -- the exact thing the Phase 0 batch exists to
+    # avoid mid-phase. The generated tests' real state lives in `summary` and in
+    # `RunState.generated_tests`, where `binding` carries the only fact that can block.
+    _log(state, "system", "develop", "passed",
+         summary=f"{len(state.generated_tests.files)} generated test file(s), "
+                 f"binding={state.generated_tests.binding}")
 
     state.security = agent_client.call_agent("security", state)
     # scan_provenance answers "did the scanners run, or is this a fixture?" --

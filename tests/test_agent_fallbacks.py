@@ -15,7 +15,7 @@ import re
 import pytest
 
 from agentorg import fixtures_loader
-from agentorg.agents import developer, planner, reviewer, security
+from agentorg.agents import developer, planner, reviewer, security, testgen
 from agentorg.common import config
 from agentorg.graph import run_pipeline
 from agentorg.state import DevResult, Finding, PlanResult, RunState
@@ -800,6 +800,19 @@ def test_a_poisoned_run_blocks_even_when_the_model_removes_the_key(monkeypatch):
             return json.dumps({"verdict": "approve", "comments": [], "must_fix": []})
         if system_prompt == security.SYSTEM_PROMPT:
             return "The scanners found hardcoded AWS credentials."
+        if system_prompt == testgen.SYSTEM_PROMPT:
+            # A SIXTH AGENT NOW RUNS ON THIS PATH, and this stub is deliberately
+            # scripted per-agent rather than answering everything -- so wiring Lane G's
+            # testgen into `_walk` made this test fail with "unscripted agent reached
+            # the model". That is the guard WORKING: a new model call on the poisoned
+            # path is exactly what it exists to announce.
+            #
+            # Answered with an empty generation, because this test is about the block
+            # rule surviving a model that removes the key. A generated test that
+            # claimed a failure would give the run a second reason to be blocked, and
+            # the assertion below could no longer tell which one blocked it.
+            return json.dumps({"files": [], "passed": 0, "failed": 0,
+                               "binding": False, "source": "model", "notes": ""})
         pytest.fail(f"unscripted agent reached the model: {system_prompt[:60]!r}")
 
     def scanners_reading_only_added_lines(dev):
