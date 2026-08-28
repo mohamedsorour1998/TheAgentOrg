@@ -7,10 +7,11 @@ binaries. This document is the proof and the price, not a feature announcement.
 The headline, measured, and narrower than "it works":
 
 > A poisoned ticket is **blocked** by a pipeline whose model runs on this laptop,
-> with **no AWS hostname resolved or contacted**. The local model is **10× slower**
-> and **fails to produce parseable JSON far more often**, which sends agents to
-> their fixtures. The security verdict is **identical** — which it must be, because
-> no model is involved in computing it.
+> with **no AWS hostname resolved or contacted**. The local model is **an order of
+> magnitude slower** (28.9s against 132–495s over four runs) and **fails to produce
+> parseable JSON far more often**, which sends agents to their fixtures. The security
+> verdict is **identical** — which it must be, because no model is involved in
+> computing it.
 
 ---
 
@@ -47,7 +48,7 @@ reader who starts at the numbers would otherwise take a fixture run for a model 
 
 | Column | Finding |
 |---|---|
-| `wall_clock_s` | **10× slower**: 28.9–29.0s against 291.1–353.4s. A range, not a point — CLAUDE.md's measured trap is a "measured" number the next run could not reproduce. |
+| `wall_clock_s` | **28.9–29.0s against 291.1–353.4s** in the three-run table, and **132.1–495.2s** across all four local runs measured. So "roughly an order of magnitude" is the defensible statement and a specific multiple is not — the local spread is nearly 4× wide on its own. See the contamination note below. |
 | `source` | The local model produced **0 model-sourced runs out of 3**. Bedrock produced **2 of 3** — so this is a difference of degree, not of kind. |
 | `verdict` | **Identical, and this is the one that must not move.** Both sides `block`. |
 | `provenance` | Both `scanners`. Real gitleaks on both sides, at added-lines `[3, 4]` — the fixture reports `[4, 5]`. |
@@ -94,10 +95,13 @@ not *the local model cannot do this*.
 - **The clean ticket was not measured** on the local side. Only the poisoned one,
   because the block is the claim. A clean run's `promoted`-versus-`failed` split is
   the more interesting number and it is **unmeasured**.
-- **The local timings are contaminated.** Runs 1–3 competed with a diagnostic probe
-  against the same single-model server for part of their duration. An uncontended
-  earlier run of the same configuration measured **132.1s**, so treat 291–353s as an
-  upper bound and 132s as the floor. Neither is a clean measurement.
+- **The local timings vary by nearly 4×, and none is a clean measurement.** Four
+  runs of the same configuration: **132.1s**, **291.1s**, **353.4s**, **495.2s**.
+  Runs 2–4 competed with other work against the same single-model server. So 132s is
+  the floor and 495s an upper bound under contention — quote the range, never a
+  point. This is CLAUDE.md's own measured trap (116.88 / 149.68 / 102.83 for one
+  unchanged snapshot), and a 10× headline computed from a single pair would be the
+  same over-claim.
 
 ---
 
