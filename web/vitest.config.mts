@@ -15,6 +15,16 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  // NO `esbuild: { jsx: ... }` OVERRIDE, and that is a measured result rather than
+  // an omission: setting `jsx: "automatic"` here did NOT rescue a test importing a
+  // `.tsx` module. The real cause was `tsconfig.json` shipping `jsx: "preserve"`,
+  // which `next build` reports as a MANDATORY change to `react-jsx` (Next 16 uses
+  // the React automatic runtime). With the corrected value a probe test importing
+  // `Shell.tsx` passes, so no override is needed here at all.
+  //
+  // See `components/nav.ts` for why the failure is worth remembering: it presented
+  // as `Test Files 1 failed | 1 passed` with `Tests 15 passed (15)` — every test
+  // green, one whole file never executed. Read the FILE count.
   resolve: {
     alias: {
       "@": fileURLToPath(new URL(".", import.meta.url)),

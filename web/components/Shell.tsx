@@ -15,21 +15,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-/**
- * The six screens, in the order a person meets them.
- *
- * ONE DECLARATION -- `components/__tests__/nav.test.ts` asserts every route
- * directory under `app/(routes)/` appears here and vice versa, in both
- * directions. Lane I's `endpoints.ts` makes the same argument for its table: a
- * nav entry with no page is a promise, and a page with no nav entry is
- * unreachable except by typing the URL.
- */
-export const NAV = [
-  { href: "/runs", label: "Runs" },
-  { href: "/repositories", label: "Repositories" },
-  { href: "/costs", label: "Costs" },
-  { href: "/account", label: "Account" },
-] as const;
+import { NAV } from "@/components/nav";
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
