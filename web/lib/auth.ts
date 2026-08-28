@@ -154,7 +154,7 @@ function requireSecret(): string {
  */
 let pool: Pool | null = null;
 
-function sessionPool(): Pool {
+export function sessionPool(): Pool {
   if (pool === null) {
     const url = process.env.DATABASE_URL ?? "";
     if (!url.trim()) {

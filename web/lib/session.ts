@@ -86,31 +86,21 @@ function githubLoginFrom(user: { name?: string | null }): string | null {
 /**
  * Which tenant this login belongs to, or `null`.
  *
- * =========================================================================
- * NOT IMPLEMENTED, AND IT RETURNS `null` RATHER THAN A GUESS.
- * =========================================================================
- * Resolving this needs a query across `web_identity` -> `app_user` -> `membership`,
- * and the membership half is Lane B's `accessors.list_members` — which takes a
- * `TenantScope`, i.e. it answers "who is in THIS tenant" and cannot answer "which
- * tenant is this person in". That inversion is deliberate on Lane B's side: there
- * is NO tenant-scoped accessor that reads `app_user`, precisely so no caller can
- * enumerate the user base.
+ * Delegates to `web/lib/tenant.ts`, which carries the argument for why this one
+ * query is not tenant-scoped and cannot be: it is what PRODUCES the scope, the way
+ * Lane K's `auth.resolve()` produces the `Credential` everything scoped then
+ * carries.
  *
- * So the honest options are a new Lane B accessor (`tenant_for_user`, unscoped by
- * necessity, with a written `unscoped_reason`) or a direct read of `web_identity`
- * joined to `membership` from this layer. The second is available today and is
- * REFUSED: it would be this layer answering a tenancy question with its own SQL,
- * which is exactly what `web/lib/pipeline.ts` argues against at length.
- *
- * **Returning `null` means every authenticated route refuses with `no-tenant` until
- * this lands.** That is the fail-closed direction and it is visible immediately —
- * as opposed to returning tenant zero, which would work beautifully in the
- * single-tenant demo and silently hand every new signup the original deployment's
- * runs. The first failure is a person seeing "your account is not attached to an
- * organisation"; the second is a data breach that looks like a working product.
+ * `null` FOR A PERSON IN NO ORGANISATION, never tenant zero. That translation is
+ * correct for a RUN written before multi-tenancy and catastrophic for a SESSION: it
+ * would hand anybody who signs in the original single-tenant deployment's runs. The
+ * first failure is a person reading "your account is not attached to an
+ * organisation"; the second is a breach that looks like a working product.
  */
-async function tenantForLogin(_login: string): Promise<string | null> {
-  return null;
+async function tenantForLogin(login: string): Promise<string | null> {
+  const { membershipsFor, soleTenant } = await import("./tenant");
+  const { sessionPool } = await import("./auth");
+  return soleTenant(await membershipsFor(sessionPool(), login));
 }
 
 /**
@@ -125,10 +115,12 @@ async function tenantForLogin(_login: string): Promise<string | null> {
  * unlimited.
  */
 export async function repositoriesInScope(
-  _tenantId: string,
+  tenantId: string,
 ): Promise<readonly string[]> {
-  // Deliberately empty until the reader action lands, for `tenantForLogin`'s
-  // reason: an invented list would permit an approval against a repository nobody
-  // authorised, and it would do it silently.
-  return [];
+  const { readPipeline } = await import("./pipeline");
+  const answer = await readPipeline<{ repositories: { full_name: string }[] }>(
+    "runs",
+    { action: "list_repositories", tenant_id: tenantId },
+  );
+  return answer.repositories.map((row) => row.full_name);
 }

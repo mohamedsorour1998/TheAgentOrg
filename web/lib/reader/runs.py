@@ -55,6 +55,12 @@ from agentorg import gates, log, queue
 from agentorg.db import engine
 from agentorg.tenancy import accessors, tenant_zero
 
+# The five statuses `RunState.status` may hold -- `state.py:307`. Restated rather than
+# imported because importing `RunState` to read a Literal's members costs pydantic at
+# reader startup, and this list is checked against the contract by a test rather than
+# trusted. A status this reader does not recognise becomes `failed`, which REFUSES.
+_RUN_STATUSES = frozenset({"running", "blocked", "rejected", "promoted", "failed"})
+
 
 def _fail(message: str, detail: str = "") -> int:
     """Print a refusal and exit 0. See the module docstring."""
@@ -158,6 +164,99 @@ def list_runs(tenant_id: str) -> dict:
     return {"runs": runs, "indexed": True}
 
 
+def run_facts(tenant_id: str, run_id: str) -> dict:
+    """The facts an approval is decided over. Feeds `web/lib/authz.ts`.
+
+    FOUR FACTS, MEASURED HERE SO THE DECIDER CANNOT BE HANDED THEM BY A CALLER: which
+    tenant owns the run, which repository it targets, its status, and which gates it is
+    paused at right now.
+
+    `accessors.get_run` RAISES for a run this tenant does not own -- `CrossTenantAccess`
+    -- and for one that does not exist -- `NotFound`. `main` reports BOTH as "no such
+    run", because a run id is an unguessable uuid so telling them apart discloses that
+    somebody else's run exists.
+
+    TWO RECORDS ARE READ, AND THEY CAN DISAGREE. The run's own document carries
+    `status`; the queue's paused rows carry the open gates. `gates.resume` sets
+    `status="rejected"` and never un-sets it, so a run can be paused-at-a-gate
+    according to the queue and already-ended according to its state -- which is exactly
+    the gap `authz.decide` refuses. Both are returned; neither is derived from the
+    other.
+
+    AN UNREADABLE DOCUMENT YIELDS `failed`, NOT `running`. `failed` is terminal, so it
+    REFUSES the approval; `running` would permit one over a run whose state nobody
+    could read. Fail-closed, and the same direction `_summary` takes with a null
+    verdict.
+    """
+    path = _database_path()
+    if not path:
+        # No index means no ownership record, so ownership cannot be established --
+        # and an approval must not proceed on a run whose tenant is unknown. Reported
+        # as "no such run" rather than as a configuration error, deliberately: the
+        # caller learns only what they already tried.
+        raise accessors.NotFound("no run index is configured")
+
+    connection = engine.connect(path)
+    with engine.acting_as(tenant_id):
+        row = accessors.get_run(accessors.scope_for(connection, tenant_id), run_id)
+        repositories = accessors.list_repositories(
+            accessors.scope_for(connection, tenant_id))
+
+    state = _state_for(run_id)
+    status = getattr(state, "status", "") or ""
+    if status not in _RUN_STATUSES:
+        status = "failed"
+
+    return {
+        "run_id": row["run_id"],
+        "tenant_id": row["tenant_id"],
+        # WHICH REPOSITORY THIS RUN TARGETS. `RunState` carries no repository field --
+        # `state.py` is frozen and the deployment is single-repository today -- so the
+        # honest answer is the tenant's single connected repository when there is
+        # exactly one, and "" otherwise. "" fails `authz.decide`'s scope check, which
+        # REFUSES; a guess would permit an approval against a repository nobody named.
+        #
+        # This is a real limit, not a workaround: closing it needs an optional
+        # `RunState.repository` field, which is the frozen contract and another lane's
+        # file.
+        "repository_full_name": (
+            repositories[0]["full_name"] if len(repositories) == 1 else ""
+        ),
+        "status": status,
+        "awaiting_gates": _awaiting_by_run().get(run_id, []),
+    }
+
+
+def list_repositories(tenant_id: str) -> dict:
+    """Every repository this tenant has in scope. Feeds I5's per-repository check.
+
+    Reads Lane B's `repository` table through its SCOPED accessor -- the table that
+    already carries the isolation triggers and the Postgres RLS policy, and
+    `UNIQUE (tenant_id, full_name)` so two customers may both connect
+    `acme/auth-service`.
+
+    NO SECOND TABLE, deliberately: a `web_repository_scope` here would be a second
+    answer to "is this repository in scope", and that is the answer an approval reads.
+    Two tables that can disagree means an approval permitted by one and refused by the
+    other, with nothing recording which was consulted.
+
+    An empty list when nothing is configured, NOT an error, for `list_runs`' reason --
+    and `authz.decide` refuses against an empty list, so a tenant that has connected
+    nothing cannot approve anything.
+    """
+    path = _database_path()
+    if not path:
+        return {"repositories": [], "indexed": False}
+
+    connection = engine.connect(path)
+    with engine.acting_as(tenant_id):
+        rows = accessors.list_repositories(accessors.scope_for(connection, tenant_id))
+    return {
+        "repositories": [{"full_name": row["full_name"]} for row in rows],
+        "indexed": True,
+    }
+
+
 def _database_path() -> str:
     """The tenancy database, or "" when there is none.
 
@@ -223,6 +322,18 @@ def main() -> int:
     try:
         if action == "list_runs":
             answer = list_runs(tenant_id)
+        elif action == "list_repositories":
+            answer = list_repositories(tenant_id)
+        elif action == "run_facts":
+            run_id = request.get("run_id")
+            if not isinstance(run_id, str) or not log.is_safe_run_id(run_id):
+                # REFUSED BEFORE IT REACHES A PATH. `log.is_safe_run_id` is the same
+                # guard `queue.enqueue` and `adopt_run_id` apply, and it is applied
+                # here for the same reason: `gates.load` builds a path from this value.
+                # `approve_server` records that `gates._state_path` would happily
+                # resolve `../../etc/passwd` OUTSIDE runs/. The value is NOT echoed.
+                return _fail("no such run")
+            answer = run_facts(tenant_id, run_id)
         else:
             return _fail(f"unknown reader action {action!r}")
     except accessors.CrossTenantAccess:
@@ -241,9 +352,3 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-
-# `log` is imported for the decision-log read the detail endpoint needs and is
-# referenced here so a linter does not remove it before that lands. Named
-# explicitly rather than left as an unused import, because an import removed and
-# re-added is a diff nobody reads twice.
-_ = log
