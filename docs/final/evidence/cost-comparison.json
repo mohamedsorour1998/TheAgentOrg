@@ -1,0 +1,80 @@
+{
+  "model": "us.amazon.nova-2-lite-v1:0",
+  "price_row": {
+    "input_per_million": 0.33,
+    "output_per_million": 2.75,
+    "cache_read_per_million": 0.0825,
+    "read_on": "2026-08-28",
+    "source": "aws pricing get-products --service-code AmazonBedrock --region us-east-1"
+  },
+  "walks": [
+    {
+      "poisoned": false,
+      "status": "promoted",
+      "source": "fixture",
+      "model_calls": 5,
+      "fixture_calls": 1,
+      "seconds": 21.029,
+      "input_tokens": 28362,
+      "output_tokens": 1337,
+      "cached_tokens": 0,
+      "cached_reported": false,
+      "stages": 1,
+      "usd": 0.01303621
+    },
+    {
+      "poisoned": false,
+      "status": "promoted",
+      "source": "fixture",
+      "model_calls": 6,
+      "fixture_calls": 1,
+      "seconds": 16.648,
+      "input_tokens": 33623,
+      "output_tokens": 2122,
+      "cached_tokens": 0,
+      "cached_reported": false,
+      "stages": 1,
+      "usd": 0.016931090000000003
+    },
+    {
+      "poisoned": false,
+      "status": "promoted",
+      "source": "fixture",
+      "model_calls": 5,
+      "fixture_calls": 2,
+      "seconds": 16.884,
+      "input_tokens": 28404,
+      "output_tokens": 1356,
+      "cached_tokens": 0,
+      "cached_reported": false,
+      "stages": 1,
+      "usd": 0.013102319999999999
+    }
+  ],
+  "model_usd_range": [
+    0.01303621,
+    0.016931090000000003
+  ],
+  "model_usd_median": 0.013102319999999999,
+  "infra_usd_per_run": 1.2450000000000001e-05,
+  "infra_rows": [
+    {
+      "line": "Lambda invocation",
+      "quantity": 1,
+      "usd": 2e-07,
+      "rate": "AWS Lambda, $0.20 per 1M requests"
+    },
+    {
+      "line": "EventBridge event",
+      "quantity": 1,
+      "usd": 1e-06,
+      "rate": "Amazon EventBridge, $1.00 per 1M events"
+    },
+    {
+      "line": "DynamoDB write",
+      "quantity": 9,
+      "usd": 1.125e-05,
+      "rate": "DynamoDB on-demand, $1.25 per 1M WCU"
+    }
+  ]
+}
