@@ -112,6 +112,12 @@ class RunStatus(BaseModel):
     exit_code: int | None = None
     reclaimed: bool = False
     stages: list[dict] = Field(default_factory=list)
+    # BOTH, AND A KNOWN GAP. `None` means not priced and `0` rows means nothing
+    # was recorded; the two are different facts and `_cost_for` explains why this
+    # API cannot answer either yet. Declared rather than omitted so the shape is
+    # already right when a cost becomes reachable without importing `gates` --
+    # adding a field later changes a published schema, and a client generated from
+    # the old one would not know to read it.
     cost_usd: float | None = None
     cost_stages: int = 0
 
@@ -318,6 +324,37 @@ def _jobs_for_tenant(run_id: str, tenant_id: str) -> list[queue.Job]:
     return jobs
 
 
+def _cost_for(run_id: str) -> tuple[float | None, int]:
+    """A run's cost so far: `(usd_or_None, stages_priced)`. Today, always `(None, 0)`.
+
+    A KNOWN GAP, REPORTED AS ONE. `RunState.cost` is where a run's cost lives and
+    Lane E's `build_cost_record` populates it -- but reaching it means
+    `gates.load`, and `gates` is a module this package must not import at all:
+    `test_no_api_module_can_reach_a_gate_resume` forbids the import, not merely the
+    `resume` call. Moving the import inside a function to satisfy the test would be
+    the "double that cannot express the failing case" pattern applied to my own
+    guard, so it is not done.
+
+    The queue row carries no cost either -- `grep -n cost agentorg/queue/__init__.py`
+    finds only prose -- so the control plane genuinely cannot answer this yet.
+    Closing it needs a cost column on the job row (Lane A's file) or a read helper
+    that is not `gates` (nobody's yet).
+
+    WHY THE PAIR AND NOT ONE NUMBER, so the shape is right when it is wired:
+    `cost.total_usd` returns `None` when NOTHING could be priced and otherwise
+    UNDERSTATES by skipping unpriced rows, and CLAUDE.md's conclusion about the
+    remote seam is that the discriminator is "`len(state.cost.stages)`, never
+    `usd`" -- an unwired run has zero rows and `usd=None`; a wired run has a row per
+    stage even when that stage spent nothing, and `usd == 0.0` cannot separate
+    them.
+
+    `None` RATHER THAN `0.0`, for `CostRecord.usd`'s own reason: `None` means not
+    priced, `0.0` means priced and free. A control plane inventing the second would
+    tell a customer their run was free.
+    """
+    return None, 0
+
+
 def _status_from_jobs(run_id: str, tenant_id: str, jobs: list[queue.Job]) -> RunStatus:
     """Fold a run's jobs into one status. The LAST job decides the headline.
 
@@ -329,6 +366,7 @@ def _status_from_jobs(run_id: str, tenant_id: str, jobs: list[queue.Job]) -> Run
     `blocked` becomes indistinguishable from a crash on a surface a judge reads.
     """
     last = jobs[-1]
+    priced, stage_count = _cost_for(run_id)
     return RunStatus(
         run_id=run_id,
         tenant_id=tenant_id,
@@ -337,6 +375,8 @@ def _status_from_jobs(run_id: str, tenant_id: str, jobs: list[queue.Job]) -> Run
         awaiting_gate=last.awaiting_gate,
         exit_code=last.exit_code,
         reclaimed=any(job.reclaimed_from for job in jobs),
+        cost_usd=priced,
+        cost_stages=stage_count,
         stages=[
             {
                 "stage": job.stage,
