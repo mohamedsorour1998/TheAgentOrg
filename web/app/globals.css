@@ -1,0 +1,80 @@
+/*
+ * Global styles. THE PALETTE AND NOTHING ELSE.
+ *
+ * Shared scaffolding, created by Lane I because Lane I goes first. Lane J owns the
+ * visual design and should build on these custom properties rather than
+ * redeclaring the colours -- `scripts/make_deck.py` and
+ * `docs/pitch/preview/index.html` are already "the two places a colour lives", and
+ * CLAUDE.md records that they must change together or what is on screen stops
+ * being what was signed off. This is a third place, so the values are copied from
+ * the deck deliberately and are annotated as such.
+ *
+ * Dark because the delivery medium is a screen share where the viewer's own
+ * brightness is unknown. Near-black with a hint of blue, NOT flat grey, which
+ * reads as dead. Off-white text, NEVER pure white, which glares.
+ */
+
+:root {
+  /* The deck's palette. See scripts/make_deck.py's palette constants. */
+  --surface: #0b0f17; /* near-black, hint of blue */
+  --surface-raised: #131a25;
+  --text: #e8ecf3; /* off-white, never #fff */
+  --text-muted: #8b97ab;
+  --accent: #22d3ee; /* cyan: every structural mark */
+  --refused: #fb7185; /* rose: a stated failure */
+  --shipped: #6ee7b7; /* mint: a stated success */
+  --border: #1f2937;
+
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  /* 1.5 rather than a unitless default: long prose at 1.2 is measurably harder
+     to scan, and this stylesheet is the only place it can be set once. */
+  line-height: 1.5;
+}
+
+/* IDENTIFIERS ARE MONO. A run id is a uuid and a finding names a file and a line;
+   both are compared character by character by whoever is reading them. */
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--mono);
+}
+
+/* KEYBOARD FOCUS MUST BE VISIBLE. Browsers give focused elements an outline and
+   the single most common "cleanup" is removing it, which makes the whole app
+   unusable without a mouse. Stated here so nobody has to rediscover it -- Lane
+   J's J9 asks for exactly this. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* REDUCED MOTION IS HONOURED GLOBALLY, so an animation added later cannot forget.
+   A person with vestibular sensitivity is not an edge case, and the whole-app
+   version of this rule is the only one that cannot be omitted per component. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
