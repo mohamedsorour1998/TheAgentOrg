@@ -2402,6 +2402,21 @@ terraform fmt -check -recursive        exit 0
 preflight.py                           preflight OK   (all 4 checks PASS)
 ```
 
+**And again at `62bee51`, with Phases 1, 2 AND 3 merged — twelve lanes:**
+
+```
+pytest -q                              1854 passed, 3 skipped in 158.36s
+ruff / actionlint / terraform fmt      exit 0
+preflight.py                           preflight OK   (all 4 checks PASS)
+runtimes                               all five READY at v36
+web: tsc / eslint / vitest / build     0 · 0 problems · 10 files 166 tests · builds
+```
+
+`1131 → 1854` is **723 tests** across twelve lanes. **73 test files.** Preflight check 3
+still reads `LINES: [3, 4]` with `provenance: scanners` — the discriminator has now
+survived Lane C rewriting all three scanner wrappers, Lane D moving every GitHub call
+behind an interface, Lane H adding retrieval, and Lane M rewriting all six prompts.
+
 **And again at `fb461bd`, with Phase 1 AND Phase 2 merged — nine lanes:**
 
 ```
