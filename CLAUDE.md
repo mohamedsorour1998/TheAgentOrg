@@ -1167,7 +1167,7 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
-### The pattern found NINE times across four layers
+### The pattern found TEN times across four layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
@@ -1236,6 +1236,23 @@ The instances, briefly:
   the real validation over the real prompt and assert on the CLASS the agent passes,
   not on source text — a comment naming `SREAdvice` would satisfy a grep while the
   call still passed `SREResult`.
+
+- **AN INERT MUTATION READS EXACTLY LIKE A PASSING ONE** — the tenth instance, and the
+  first found in the RED step *itself* rather than in a test. Writing
+  `scripts/measure_dependencies.py`, the mutation chosen to prove its self-check works
+  was removing a `break` from an inner `ast.walk` loop. Output: **identical**, `1` hard /
+  `3` deferred, exit 0. That guard is unreachable on this codebase — no module nests a
+  `def` deeply enough under a non-`def` top-level statement for it to matter. Had it been
+  accepted, the self-check would have been recorded as verified without ever firing.
+
+  The mutation that moves the answer is dropping the **outer** barrier: `4` hard / `0`
+  deferred, `REFUSING`, exit 1. Both facts are now in that module's docstring, because
+  the discipline says *paste the failure* — and pasting **no** failure looks the same as
+  not having run the step.
+
+  **A RED step must be shown to change the output, not merely to have been applied.** If
+  a mutation leaves the result byte-identical, it did not test what you think; pick
+  another one and say so.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
@@ -1996,6 +2013,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
 | `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
+| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — 4 of 31 modules, **1** module-level. Replaced four grep counts that reproduced under no scope |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
 | `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
