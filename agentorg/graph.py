@@ -70,6 +70,7 @@ from .state import (
     SecurityResult,
     SREResult,
 )
+from .tenancy import run_index
 
 # ==========================================================================
 # EVERY STAGE'S OUTPUT REACHES THE TARGET REPO. See _comment.
@@ -469,6 +470,10 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
     finally:
         state.model_provenance = llm.last_source() or ""
         gates.save(state)
+        # The index follows the run to its ending, in the `finally` beside `gates.save`
+        # for the same reason that call is here: `_walk` has seven `return state` exits
+        # and a call at each would be seven chances to forget one.
+        run_index.update_status(state)
         # THE ENDING, REPORTED TO THE ISSUE THAT ASKED FOR IT, and closed.
         #
         # In the `finally` beside `gates.save` for the same reason that call is here:
@@ -492,6 +497,10 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     ask = _auto_gate if auto_approve else _cli_gate
 
     # 1. PLAN ---------------------------------------------------------------
+    # INDEX THE RUN AGAINST ITS TENANT. See run_stage.py's identical call and
+    # tenancy/run_index.py: a no-op unless TENANT_DB is set, and it never raises.
+    run_index.record_run(state)
+
     state.plan = agent_client.call_agent("planner", state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
     # ON THE ISSUE, necessarily: no PR exists yet. github_ops decides that from

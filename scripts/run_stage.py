@@ -87,6 +87,7 @@ import typing
 from agentorg import gates, graph, integrations, log
 from agentorg.common import agent_client, config, llm
 from agentorg.state import HumanDecision, LogEvent, RunState
+from agentorg.tenancy import run_index
 
 # The exact strings accepted, and nothing else. Lower-cased before lookup so
 # GitHub's `True`/`False` (which is what a boolean input renders as in some
@@ -309,6 +310,12 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     # GATED ON A TERMINAL STATUS. Every stage calls `_emit`, and most of them leave
     # the run `running`; reporting there would post an outcome comment after each of
     # seven jobs and close the issue before the work had finished.
+    # The index follows the run's status to its ending, so the UI does not show a
+    # blocked run as still running. Paired with the write at `plan`; `update_run_status`
+    # calls `_require` first, so it refuses a run this tenant does not own rather than
+    # inserting one -- an upsert here would be a cross-tenant write.
+    run_index.update_status(state)
+
     if state.status in _TERMINAL_STATUSES:
         integrations.host().report_outcome(state)
 
@@ -339,6 +346,14 @@ def _stage_plan(args: argparse.Namespace) -> int:
                      trigger=getattr(args, "trigger", "") or "manual")
     _log(state, "system", "plan", "opened",
          summary=f"run started for {state.ticket_id} (trigger: {state.trigger})")
+
+    # INDEX THE RUN AGAINST ITS TENANT, once, here. Lane B built `record_run` and the
+    # whole leak suite around the `run` table, and nothing on the pipeline path called
+    # it -- so Lane I's tenant-scoped run list read a table the pipeline never wrote.
+    # A no-op unless `TENANT_DB` is set, and it never raises: an index is not the run's
+    # record, and a run that did its work must not fail writing one. See
+    # tenancy/run_index.py.
+    run_index.record_run(state)
 
     state.plan = agent_client.call_agent("planner", state)
     _log(state, "planner", "plan", "proposed", summary=f"{len(state.plan.tasks)} tasks")
