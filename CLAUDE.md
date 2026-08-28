@@ -3649,6 +3649,55 @@ wired run whose container fell back has a row per stage and `usd=0.0`. Nothing i
 `graph.py` or `run_stage.py` assigns `state.cost` or calls `build_cost_record` — zero and
 zero, measured by AST — so the block is empty on every run today.
 
+### The evidence (Lane L) — and the two things that surprised it
+
+`docs/final/evidence/` answers seven judge requirements with **evidence rather than
+code**. The four facts worth not re-deriving:
+
+**A DOCUMENT SET CAN HAVE NO CALLER, and this one did.** Lane L's Phase 1 evidence commit
+`4172bd4` was written on a worktree branch and **eleven of its twelve files were never
+merged** — measured, `git merge-base --is-ancestor 4172bd4 main` → NO. Only
+`measure_dependencies.py` landed, rewritten. So four judge requirements were answered on a
+branch no reader would ever find, while every gate stayed green. That is this file's
+second named pattern — *a feature complete, tested, and reached by nothing* — arriving in
+**documentation**, where the check that catches it in code (`grep` for the entry point)
+has no equivalent. **When a lane's deliverable is a document, "did it merge" is the
+wiring question.** Restored in `25ba200`.
+
+**`llm.last_source()` IS THE WRONG INSTRUMENT FOR A RUN, and it produced a false
+refusal.** It names the **last** call and a walk makes six or seven. Measured:
+
+```
+status promoted   last_source fixture
+  fixture=False in=5267 out=258   <- planner,   the model answered
+  fixture=False in=5374 out=589   <- developer, the model answered
+  fixture=False in=6444 out=230   <- reviewer,  the model answered
+  fixture=True  in=   0 out=  0   <- SRE, MaxTokensReachedException
+  fixture=False in=5228 out= 66   <- security,  the model answered
+  fixture=False in=5974 out=191   <- promote,   the model answered
+```
+
+Five of six calls reached Bedrock and the field said `fixture`, purely because the SRE was
+fourth and something ran after it. A guard reading it refuses a run that is 83%
+model-backed, and would equally **accept** a run whose last call alone succeeded. Read
+`llm.usage()` and count `not c.fixture` — Lane E's `record_fixture_fallback` writes a
+**zero-token row** rather than nothing, which is exactly what makes that count possible.
+Same class as `blocking=2`: a summary field that cannot separate the two cases it is asked
+about.
+
+**The `sre` agent hits `MaxTokensReachedException` on a clean walk, roughly one call in
+six.** Not a defect in this lane's code and not currently recorded anywhere else — the
+fallback is correct behaviour, it costs the SRE's advice, and it is why a run's
+`model_calls` is `5/6` or `6/7` rather than a fixed number.
+
+**The model is 99.9% of a run's marginal cost, and 95.5% of the token volume is input.**
+Measured: `$0.013036–$0.016931` per clean change against `$0.00001245` for Lambda +
+EventBridge + DynamoDB together. The cache hit rate is a measured **zero** with
+`cached_reported=False` — the provider says nothing about caching at all — so five agents
+re-send the same repository snapshot at **exactly 4×** the cached rate ($0.33 vs
+$0.0825/1M, verified arithmetic). **Any cost optimisation that is not a cache point is
+noise.**
+
 ---
 
 ## Where things live
@@ -3690,7 +3739,9 @@ zero, measured by AST — so the block is empty on every run today.
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
 | `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
 | `scripts/measure_prompts.py` | Lane M's gate: two prompt changes, one arm each, model-backed. A prompt edit is a behaviour change with no compiler, and `pytest` cannot see it |
-| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — 4 of 31 modules, **1** module-level. Replaced four grep counts that reproduced under no scope |
+| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — **5 of 76** modules, **2** module-level at `d6165c8`. Replaced four grep counts that reproduced under no scope |
+| `scripts/measure_{scorecard,sbom,cost}.py` | **Lane L.** The evolution scorecard's row, the container SBOM, and what one change costs. Each **exits non-zero when it cannot measure what it claims** — `--require-real-scanners` and `--require-model` are the two flags that stop a fixture-read figure wearing a real number's clothes |
+| `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **sixteen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
 | `.github/workflows/run-pipeline.yml` | The cloud pipeline: 7 jobs + 3 recorders |
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
