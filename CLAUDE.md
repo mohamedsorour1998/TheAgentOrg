@@ -26,7 +26,8 @@ somewhere other than where you are editing.
    Those comments are the primary documentation; this file is an index to them.
 2. **Every test change carries a mandatory RED step.** Name the exact mutation,
    apply it, watch the exact named test fail, paste the failure, revert. A task
-   whose RED step was not run is **not done**.
+   whose RED step was not run is **not done**. **An inert mutation does not count** —
+   if the output is unchanged, the step tested nothing; say so and pick another.
 3. **Never end a turn with a mutation applied.** `git diff` as your last step.
 4. **Numbers in prose must come from a command whose output you paste**, never
    from recall.
@@ -34,6 +35,21 @@ somewhere other than where you are editing.
    session would otherwise re-derive — a measured trap, a corrected claim, a
    verified run — record it here. That is the standing instruction, not a
    suggestion.
+6. **Write one file per tool call, and commit it before starting the next.**
+   Measured 2026-08-28: two lanes each died **three times at the identical point**,
+   immediately after announcing a large test file — the API dropped the stream
+   mid-write. Splitting into files under ~200 lines, each run and committed before
+   the next began, got one lane from four total losses to `C1–C6` committed plus a
+   second file on disk in a single attempt. A batch of work that is not committed
+   does not exist.
+
+   The corollary bites harder here than in most repositories: **a death can leave a
+   RED-step mutation applied**, which violates rule 3 without anybody choosing to.
+   Lane C died mid-verification with `FAIL_CLOSED_SEVERITY = "low"` in the tree, and
+   because that value is validated at import, *every* test in the suite failed with a
+   `ValueError` — the whole worktree looked catastrophically broken and was one
+   `git checkout` from fine. **Check `git diff` in an abandoned worktree before
+   diagnosing anything.**
 
 ### Before you commit
 
