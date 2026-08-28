@@ -204,6 +204,30 @@ def cache_hit_rate(stages: list[StageCost]) -> float | None:
     shown -- not fresh input alone. Against fresh input alone the rate could exceed
     1.0, and a "142% cache hit rate" on a slide is the kind of number that ends a
     presentation early.
+
+    ── THE ONE DISTINCTION THAT DOES NOT REACH THIS LAYER, AND IT IS A GAP ──
+
+    `llm.Usage` separates "the provider said nothing about caching"
+    (`cached_reported=False`) from "the provider said zero" (`cached_tokens=0`,
+    `cached_reported=True`), and that separation survives the remote seam --
+    `usage_payload` carries the flag and a test pins it. IT STOPS HERE.
+    `StageCost` declares no `cached_reported` field, so both cases arrive as a row
+    with `cached_tokens=0` and this function answers 0.0 for each. MEASURED:
+
+        provider SAID NOTHING   usage.cached_reported=False  -> rate=0.0
+        provider SAID ZERO      usage.cached_reported=True   -> rate=0.0
+
+    Both readings lead to "no caching is happening", so no reported number is
+    WRONG -- but the two want different fixes, and a reader cannot tell which they
+    have. Silent means our SDK reading or the provider's support is the suspect;
+    zero means the provider measured and we simply set no cache point.
+
+    NOT CLOSED HERE BECAUSE `state.py` IS THE FROZEN CONTRACT AND ANOTHER LANE'S
+    FILE. The fix is one optional field -- `StageCost.cached_reported: bool =
+    False` -- which is exactly the additive shape the freeze permits, plus one line
+    in `build_cost_record` to carry `any(e.cached_reported for e in entries)`.
+    Recorded rather than worked around: inferring the flag from anything available
+    here would be a guess presented as a measurement.
     """
     shown = sum(row.input_tokens + row.cached_tokens for row in stages)
     if shown == 0:

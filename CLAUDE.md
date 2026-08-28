@@ -542,6 +542,56 @@ Four things worth knowing before touching it:
   runner. `absorb_usage_payload` never raises and records **nothing** for an absent
   payload rather than a zero row.
 
+  The two lines, verbatim. In `agents/server.py`, one key on the existing 200
+  envelope (currently `server.py:194-198`):
+
+  ```python
+  self._send(200, {
+      "agent": role,
+      "result": result.model_dump(mode="json"),
+      "source": llm.last_source() or "",
+      "usage": llm.usage_payload(),          # ← ADD THIS LINE
+  })
+  ```
+
+  In `common/agent_client.py`, immediately after the existing `llm._record(source)`
+  block and **before** `return _validate(...)` (currently `agent_client.py:543-547`):
+
+  ```python
+  source = envelope.get("source") if isinstance(envelope, dict) else None
+  if source in (llm.SOURCE_MODEL, llm.SOURCE_FIXTURE):
+      llm._record(source)
+
+  # ← ADD THESE TWO LINES
+  if isinstance(envelope, dict):
+      llm.absorb_usage_payload(envelope.get("usage"))
+
+  return _validate(role, envelope)
+  ```
+
+  **Before `_validate`, for the same reason `_record(source)` is**: a container that
+  answered honestly and then failed validation still spent the tokens, and a cost
+  record that drops them understates the bill for exactly the runs worth
+  investigating. **`absorb_usage_payload` needs no refusal of its own** — it is not a
+  verdict, it validates its own rows, returns a count, and never raises.
+
+  **Verifying it worked, and the distinction that matters.** Absent wiring and a
+  zero-cost run are different facts and the record already separates them, measured
+  three ways on the runner side:
+
+  ```
+  WIRING ABSENT (no key sent)            accepted=0  stages=0  usd=None
+      render -> "cost: no model calls recorded for this run"
+  WIRING PRESENT, container fell back    accepted=1  stages=1  usd=0.0
+  WIRING PRESENT, model answered         accepted=1  stages=1  usd=0.0085
+  ```
+
+  So the check is **`len(state.cost.stages)`, never `usd`**: an unwired run has
+  **zero rows** and `usd=None`, a wired run has a row per stage even when that stage
+  spent nothing. `usd == 0.0` cannot tell them apart, and `absorb_usage_payload`'s
+  return count is the same discriminator one layer down — `0` means nothing arrived,
+  not that nothing was spent.
+
 ### `agentorg/cost/` — what a run cost
 
 Three modules split by what can be wrong with each: `prices.py` (wrong when stale),
@@ -582,11 +632,49 @@ Flex and priority tiers are deliberately **absent** — the same query returns t
 would halve every reported figure.
 
 **THE CACHE HIT RATE IS ZERO, MEASURED.** Nothing in `agentorg/` sets a Bedrock cache
-point, so Nova reports no `cacheReadInputTokens` at all — meaning all five agents pay
-full price for the repository snapshot they re-send on every call, which is the
-largest silent cost in the design. `report.render` states that in words rather than
+point — `grep -rn 'cache_point\|cachePoint\|cache_control\|CachePoint' agentorg/ scripts/`
+returns nothing — so Nova reports no `cacheReadInputTokens` at all, meaning all five
+agents pay full price for the repository snapshot they re-send on every call. That is
+the largest silent cost in the design. `report.render` states it in words rather than
 leaving a reader to infer it from `0.0%`, because nobody reads a percentage as an
 alarm. `cache_hit_rate` returns `None` for a zero denominator, never `0.0`.
+
+**The alarm's condition is on the RENDERED STRING, not on `rate == 0.0`,** and that is
+a measured fix rather than a style choice. `_pct` formats to one decimal place, so
+every rate below 0.05% renders `0.0%` while comparing unequal to zero:
+
+```
+rate=1e-06   renders 0.0%   == 0.0? False
+rate=0.0004  renders 0.0%   == 0.0? False
+rate=0.0005  renders 0.1%   == 0.0? False
+```
+
+Against `rate == 0.0` a run with one cached token in a million printed `cache hit
+rate: 0.0%` with **no finding beside it** — so two runs showing the reader an identical
+number got different verdicts, and the one that looked fine was the one nobody was
+warned about. Pinned by `test_a_cache_rate_that_merely_ROUNDS_to_zero_still_carries_the_finding`,
+which asserts over `report._pct(rate)` rather than the float, because pinning it on
+the float is exactly what let the gap exist: the test and the code agreed with each
+other and neither agreed with the page.
+
+**`cached_reported` does NOT reach the cost record, and that is a known gap.**
+`llm.Usage` separates "the provider said nothing" from "the provider said zero", and
+that survives the remote seam — but `StageCost` declares no such field, so both arrive
+as `cached_tokens=0` and `cache_hit_rate` answers `0.0` for each. Measured:
+
+```
+provider SAID NOTHING   usage.cached_reported=False  -> rate=0.0
+provider SAID ZERO      usage.cached_reported=True   -> rate=0.0
+```
+
+No reported number is wrong — both mean no caching is happening — but the two want
+different fixes, and the record cannot say which you have. Left open because `state.py`
+is the frozen contract and another lane's file; the fix is one optional field
+(`StageCost.cached_reported: bool = False`) plus `any(e.cached_reported for e in
+entries)` in `build_cost_record`. `test_the_reported_flag_does_NOT_survive_the_fold_and_that_gap_is_pinned`
+**fails when the field is added**, and its message says what else to finish — a gap
+recorded only in a comment gets closed halfway, with the field added and nothing
+reading it, and nothing would say so.
 
 **Per-stage attribution needs one line per stage in `graph.py` / `run_stage.py`** —
 the integrator's files. Without it every model call in a run lands in a single `plan`

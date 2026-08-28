@@ -119,7 +119,23 @@ def render(cost: CostRecord | None) -> str:
     # cost is paid in full every time. Stated as a finding rather than left for a
     # reader to infer from a 0.0% in the line above, because nobody reads a
     # percentage as an alarm.
-    if rate == 0.0:
+    #
+    # THE CONDITION IS ON THE RENDERED STRING, NOT ON `rate == 0.0`, and that is a
+    # measured fix rather than a stylistic one. `_pct` formats to one decimal
+    # place, so every rate below 0.05% renders as `0.0%` while comparing unequal to
+    # zero:
+    #
+    #     rate=1e-06   renders 0.0%   == 0.0? False
+    #     rate=0.0004  renders 0.0%   == 0.0? False
+    #     rate=0.0005  renders 0.1%   == 0.0? False
+    #
+    # Against `rate == 0.0` a run with one cached token in a million printed
+    # `cache hit rate: 0.0%` with NO finding beside it -- so two runs showing the
+    # reader an identical number got different verdicts, and the one that looked
+    # fine was the one nobody was warned about. A rate that DISPLAYS as zero is a
+    # rate the reader treats as zero, so it is the display that must decide.
+    displays_as_zero = rate is not None and _pct(rate) == _pct(0.0)
+    if displays_as_zero:
         lines.append(
             "_NO CACHED READS: every call paid full price for the repository "
             "snapshot it re-sent. Nothing in agentorg/ sets a cache point._"

@@ -222,6 +222,54 @@ def test_an_absent_cache_key_is_recorded_as_unreported_not_as_zero():
     )
 
 
+def test_the_reported_flag_does_NOT_survive_the_fold_and_that_gap_is_pinned():
+    """Distinction 2 reaches `Usage` and the wire, and STOPS at `StageCost`.
+
+    Pinned as a KNOWN GAP rather than left for somebody to rediscover. `StageCost`
+    declares no `cached_reported` field -- it is Phase 0's frozen contract and not
+    Lane E's file -- so both halves of the distinction the test above establishes
+    arrive here as a row with `cached_tokens=0`, and `cache_hit_rate` answers 0.0
+    for each. MEASURED:
+
+        provider SAID NOTHING   usage.cached_reported=False  -> rate=0.0
+        provider SAID ZERO      usage.cached_reported=True   -> rate=0.0
+
+    Neither reported number is wrong -- both mean no caching is happening -- but the
+    two want different fixes, and the record cannot say which one a reader has.
+
+    THIS TEST IS WRITTEN TO FAIL WHEN THE GAP CLOSES, which is the point. A future
+    lane adding `StageCost.cached_reported: bool = False` (additive, so the freeze
+    permits it) will see this test go red, and its message says what to do: carry
+    `any(e.cached_reported for e in entries)` in `build_cost_record` and split the
+    rendering. A gap recorded only in a comment gets closed halfway -- the field
+    added and nothing reading it -- and nothing would say so.
+    """
+    from agentorg.state import StageCost as _StageCost
+
+    assert "cached_reported" not in _StageCost.model_fields, (
+        "StageCost has GAINED a `cached_reported` field. Good -- now finish the "
+        "job: carry `any(e.cached_reported for e in entries)` through "
+        "`build_cost_record`, and split `report.render`'s cache finding so "
+        "'the provider said nothing' and 'the provider measured zero' read "
+        "differently. Then delete this test."
+    )
+
+    def _folded(cached_reported: bool) -> float | None:
+        llm.reset_usage()
+        llm._record_usage(llm.Usage(stage="plan", model=MODEL, input_tokens=20000,
+                                    output_tokens=500, cached_tokens=0,
+                                    cached_reported=cached_reported))
+        return record.cache_hit_rate(record.build_cost_record().stages)
+
+    silent, measured = _folded(False), _folded(True)
+
+    assert silent == measured == 0.0, (
+        f"the fold's behaviour changed: silent={silent}, measured={measured}. If "
+        "these now differ, the gap has been closed somewhere else and this test "
+        "is stale"
+    )
+
+
 def test_the_cache_hit_rate_reports_the_zero_this_pipeline_actually_has():
     """E6's headline number, and today it is ZERO.
 
@@ -780,6 +828,49 @@ def test_a_run_with_no_cached_reads_renders_the_finding_in_words():
     assert "cache hit rate: 0.0%" in rendered, f"the rate is missing:\n{rendered}"
     assert "NO CACHED READS" in rendered, (
         f"a zero cache hit rate was not stated as a finding:\n{rendered}"
+    )
+
+
+def test_a_cache_rate_that_merely_ROUNDS_to_zero_still_carries_the_finding():
+    """The gap between `== 0.0` and what the reader actually sees on the page.
+
+    MEASURED, and this is a real defect the first version of `report.render` had.
+    `_pct` formats to one decimal place, so EVERY rate below 0.05% renders as the
+    string `0.0%` -- while `rate == 0.0` is False, which suppressed the alarm:
+
+        rate=1e-06      renders 0.0%    ==0.0? False
+        rate=0.0004     renders 0.0%    ==0.0? False
+        rate=0.0005     renders 0.1%    ==0.0? False
+
+    So a run with one cached token in a million rendered `cache hit rate: 0.0%`
+    with NO finding beside it, and a reader comparing it against a genuinely
+    uncached run saw the same number and a different verdict. Either reading is
+    wrong: a rate that displays as zero is a rate the reader will treat as zero,
+    and E6 exists precisely because nobody reads `0.0%` as an alarm on its own.
+
+    The condition is therefore on the RENDERED string, not on the float. Pinning
+    it on the float is what let the gap exist -- the test and the code agreed with
+    each other and neither agreed with the page.
+    """
+    # One cached token in ~1M shown: 1e-06, which is NOT 0.0 and renders as 0.0%.
+    barely = [StageCost(stage="plan", model=MODEL,
+                        input_tokens=999_999, output_tokens=10, cached_tokens=1)]
+
+    rate = record.cache_hit_rate(barely)
+    assert rate != 0.0, (
+        "this test needs a rate that is NOT exactly zero, or it pins nothing"
+    )
+    assert report._pct(rate) == "0.0%", (
+        f"this test needs a rate that RENDERS as 0.0%, or it pins nothing; got "
+        f"{report._pct(rate)!r}"
+    )
+
+    rendered = report.render(CostRecord(stages=barely, usd=0.33))
+
+    assert "NO CACHED READS" in rendered, (
+        "a cache hit rate that renders as `0.0%` carried no finding. The reader "
+        "sees a measured zero and is told nothing about it, which is the exact "
+        f"failure E6 exists to prevent:\n{rendered}"
     )
 
 
