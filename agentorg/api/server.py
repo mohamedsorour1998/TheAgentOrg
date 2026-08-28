@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -407,15 +408,46 @@ def serve(host: str = "127.0.0.1", port: int = 8100) -> ThreadingHTTPServer:
 
 
 def main() -> None:
-    """Serve until killed. Loopback, port 8100."""
+    """Serve until killed. Loopback by default; `API_HOST` widens it deliberately.
+
+    THE BIND ADDRESS IS READ FROM THE ENVIRONMENT, and Lane N found why by trying to
+    deploy this. `serve()` with no arguments binds `127.0.0.1`, so a container task would
+    report RUNNING and answer nothing — a green deploy for a service reachable by nobody,
+    which is this repository's signature defect wearing an orchestrator's badge.
+
+    THE DEFAULT STAYS LOOPBACK. `0.0.0.0` as the default would silently expose this API
+    on every interface of every machine that ever ran `python -m agentorg.api.server`,
+    including a laptop on a café network — and `approve_server.py`'s comment records that
+    loopback binding is one of only three things standing in for the authentication it
+    lacks. Widening a bind address must be an act, not an inheritance.
+
+    So a deployment sets `API_HOST=0.0.0.0` explicitly, in a task definition somebody
+    reviewed. `PORT` follows the same rule but is uncontroversial.
+
+    `.strip()` because a value arriving from a task definition or a Compose file carries
+    whatever whitespace the YAML gave it, and `socket.bind` on `"0.0.0.0 "` fails with
+    `gaierror` naming the address rather than the setting.
+    """
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
-    server = serve()
+    host = os.environ.get("API_HOST", "").strip() or "127.0.0.1"
+    port = int(os.environ.get("API_PORT", "").strip() or "8100")
+    server = serve(host=host, port=port)
     logging.getLogger(__name__).info(
         "control plane listening on http://%s:%s (%d routes; an empty key store "
         "means every authenticated route answers 401)",
         *server.server_address[:2], len(openapi.ROUTES),
     )
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # SAID OUT LOUD, once, at startup. Every authenticated route already refuses
+        # without a provisioned key, so this is not a hole -- but an operator who set
+        # API_HOST without reading the auth model should learn it here rather than from
+        # a judge.
+        logging.getLogger(__name__).warning(
+            "API_HOST=%s is not loopback: this control plane is reachable off-host. "
+            "Every authenticated route refuses without a provisioned M2M key, and no "
+            "route can approve a gate -- verify both before exposing it.", host,
+        )
     server.serve_forever()
 
 

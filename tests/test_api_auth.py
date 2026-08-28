@@ -410,3 +410,99 @@ def test_an_unknown_key_id_still_pays_for_a_hash():
         "the unknown-key-id branch does not hash, so it returns faster than a "
         "wrong secret against a real key id and reports which key ids exist"
     )
+
+
+# ── THE BIND ADDRESS — added by the integrator on Lane N's measurement ─────────
+#
+# Lane N tried to deploy this API and found it could not be. Measured over the AST:
+# `serve(host="127.0.0.1", port=8100)` and `main()` calling `serve()` with no arguments,
+# no environment read anywhere. A Fargate task would report RUNNING and answer nothing —
+# a green deploy for a service reachable by nobody, which is this repository's signature
+# defect wearing an orchestrator's badge.
+#
+# Lane N refused to fix it (Lane K's file) and reported the measurement instead. These
+# tests pin both halves of the fix: that the environment is read, and that the DEFAULT
+# stays loopback.
+
+def test_main_reads_the_bind_address_from_the_environment():
+    """`main` must not call `serve()` bare, or the API cannot be deployed at all.
+
+    Asserted over the AST rather than by serving: the question is whether the value comes
+    from the environment, and a substring check for `API_HOST` is satisfied by the
+    docstring that explains it — the failure CLAUDE.md records twice in one lane.
+    """
+    import ast
+    import pathlib
+
+    source = pathlib.Path("agentorg/api/server.py").read_text()
+    tree = ast.parse(source)
+    main = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+    assert main is not None, "no main() in api/server.py; this test would pin nothing"
+
+    serve_calls = [
+        node for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        and (node.func.attr if isinstance(node.func, ast.Attribute)
+             else getattr(node.func, "id", "")) == "serve"
+    ]
+    assert serve_calls, "main() never calls serve()"
+    assert any(kw.arg == "host" for call in serve_calls for kw in call.keywords), (
+        "main() calls serve() without a host, so the API binds 127.0.0.1 in every "
+        "deployment and a container task answers nobody while reporting RUNNING"
+    )
+
+    env_reads = [
+        node for node in ast.walk(main)
+        if isinstance(node, ast.Constant) and node.value in ("API_HOST", "API_PORT")
+    ]
+    assert env_reads, "main() reads no API_HOST/API_PORT; the host cannot be configured"
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (None, "127.0.0.1"),
+    ("", "127.0.0.1"),
+    ("   ", "127.0.0.1"),
+    ("0.0.0.0", "0.0.0.0"),
+    (" 0.0.0.0 ", "0.0.0.0"),
+])
+def test_the_default_bind_address_is_loopback(value, expected, monkeypatch):
+    """Widening a bind address must be an ACT, not an inheritance.
+
+    `0.0.0.0` as the default would silently expose this control plane on every interface
+    of every machine that ever ran `python -m agentorg.api.server`, including a laptop on
+    a café network. Blank and whitespace are the absent case, not a request to widen —
+    an Actions `env:` line with an unset variable arrives as `""`, and turning that into
+    a public bind is how a workflow edit becomes an exposure.
+
+    The `.strip()` cases are not decoration: a value from a task definition or a Compose
+    file carries whatever whitespace the YAML gave it, and `socket.bind` on `"0.0.0.0 "`
+    fails with a `gaierror` naming the address rather than the setting.
+    """
+    if value is None:
+        monkeypatch.delenv("API_HOST", raising=False)
+    else:
+        monkeypatch.setenv("API_HOST", value)
+
+    # DRIVES `main`, RATHER THAN REIMPLEMENTING ITS ARITHMETIC. The first version of
+    # this test computed `os.environ.get("API_HOST", "").strip() or "127.0.0.1"` itself
+    # and asserted on that — so changing the source default to "0.0.0.0" left it GREEN.
+    # It tested the expression in the test file, which is always correct by
+    # construction. `serve` is substituted so nothing binds a socket, and the host it
+    # was called with is the answer.
+    recorded: dict[str, object] = {}
+
+    def _capture(host="127.0.0.1", port=8100):
+        recorded["host"] = host
+        recorded["port"] = port
+        raise SystemExit(0)          # stop before serve_forever
+
+    monkeypatch.setattr(api_server, "serve", _capture)
+    with pytest.raises(SystemExit):
+        api_server.main()
+
+    assert recorded.get("host") == expected, (
+        f"API_HOST={value!r} bound {recorded.get('host')!r}, expected {expected!r}. "
+        f"A non-loopback DEFAULT exposes this control plane on every interface of every "
+        f"machine that runs it."
+    )
