@@ -19,6 +19,15 @@ EVERY FAILURE PATH HERE IS FAIL-CLOSED, AND ONE IS NOT
     in `_run.unrunnable_findings`, not here -- three copies of one
     security-relevant fork is how `common/diff.py` got its four drifting
     materialisers.
+
+SEVERITY IS A POLICY, NOT A MEASUREMENT
+    gitleaks reports no severity field, so every Finding below takes its
+    severity from `scoring.policy_severity("gitleaks")` -- a CONSTANT BY RULE,
+    `critical`, because a committed credential has no lesser grade. The rule
+    itself, the alternatives that were rejected, and what it costs the block
+    threshold are in `POLICY["gitleaks"]` in `security/scoring.py`. This wrapper
+    ASKS for the value rather than restating it, so the policy has one home a
+    reader can find and one place to change.
 """
 
 import json
@@ -29,6 +38,7 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
+from . import scoring
 from ._run import (
     ReportShapeError,
     error_finding,
@@ -187,7 +197,33 @@ def scan(dev: DevResult) -> list[Finding]:
             findings.append(
                 Finding(
                     tool="gitleaks",
-                    severity="critical",
+                    # WAS `severity="critical"`. Same value, and now the code
+                    # says what it is DOING: this is a POLICY -- a rule this
+                    # project applies -- not a measurement read off the report.
+                    # gitleaks emits no severity field at all (RuleID, File,
+                    # StartLine, Description, an entropy score, and nothing that
+                    # ranks the hit), so there is nothing to map and a severity
+                    # has to come from somewhere. A bare literal here states
+                    # neither of those facts, and a reader cannot tell a
+                    # deliberate rule from a forgotten TODO.
+                    #
+                    # The honest consequence, said where it applies: because the
+                    # value is constant and at the top of the scale, the block
+                    # threshold has ONE input to compare for this scanner rather
+                    # than four. It still runs -- it does not discriminate.
+                    #
+                    # `scoring.policy_severity`, not `map_severity`: the name
+                    # distinguishes "the scanner told us nothing and we have a
+                    # rule" from "we mapped what the scanner said". Called
+                    # through the MODULE, per this repo's standing rule for
+                    # anything a test may need to substitute -- `from .scoring
+                    # import policy_severity` binds the value at import, before
+                    # any test runs, and the coupling stops being observable.
+                    #
+                    # The rule, the rejected alternatives (entropy ranking,
+                    # per-rule severities) and the rationale a judge reads are in
+                    # `POLICY["gitleaks"]`; do not copy them here.
+                    severity=scoring.policy_severity("gitleaks"),
                     rule=report_text(leak, "RuleID", "unknown"),
                     file=_repo_relative(
                         report_text(leak, "File", "unknown"),

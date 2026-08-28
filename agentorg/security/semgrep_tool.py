@@ -6,7 +6,10 @@ WHAT TO BUILD:
     1. Write the changed files to a temp dir.
     2. Run semgrep with our rules and JSON output.
     3. Map each result to a Finding.
-    4. Map Semgrep severity -> our Severity.
+    4. Map Semgrep severity -> our Severity, through the ONE shared scoring
+       table in `scoring.py`. This wrapper holds no severity table of its own --
+       see `_map_severity` for the measured defect that table produced while it
+       was private to this file.
 
 EVERY FAILURE PATH HERE IS FAIL-CLOSED, AND ONE IS NOT
     `compute_security_verdict([])` returns `("pass", [])`, so this wrapper may
@@ -25,6 +28,7 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
+from . import scoring
 from ._run import (
     ReportShapeError,
     error_finding,
@@ -50,46 +54,46 @@ def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
 
 
 def _map_severity(severity: str | None) -> str:
-    """Map Semgrep severity onto our vocabulary, FAILING CLOSED on the unknown.
+    """Map Semgrep severity onto our vocabulary. THE TABLE LIVES IN `scoring.py`.
 
-    MEASURED 2026-08-22, when this table held only INFO/WARNING/ERROR and
-    defaulted to "low": semgrep 1.x also emits LOW/MEDIUM/HIGH/CRITICAL from
-    new-style rule metadata, and every one of those fell through to severity 0
-    against a block cutoff of 2 (`SEVERITY_ORDER["high"]`). A rule semgrep marked
-    CRITICAL could not block a change. Nothing caught it: no test read this
-    function, and scripts/scan_gate.py asserts only `any(f.tool == "semgrep")`,
-    which a `low` finding satisfies.
+    Kept as a function rather than inlined at the call site because it is the
+    named seam the correctness tests drive -- `tests/test_scanner_correctness.py`
+    calls it at six sites, and those tests are the regression net that proves
+    moving the table changed no answer.
 
-    THE DEFAULT IS "high", NOT "low", AND THAT IS THE WHOLE POINT. An
-    unrecognised value means semgrep said something this table has not seen.
-    Defaulting low means a future severity name silently stops blocking;
-    defaulting high means it blocks loudly and somebody fixes the table. Only one
-    of those is safe to be wrong about, and this project's signature defect is
-    the other one.
+    THE DEFECT THIS FUNCTION IS THE RECORD OF -- MEASURED 2026-08-22
 
-    THE DEFAULT ALSO CATCHES AN ABSENT FIELD, deliberately. `scan` reads this
-    through `report_text(extra, "severity", "")`, so a result whose `extra` omits
-    `severity` -- the shape of a truncated report -- arrives here as `""` and
-    takes the same fail-closed route. A report that does not say how bad a
-    finding is has not said it is harmless.
+        The table used to live HERE, privately, and it held only
+        INFO/WARNING/ERROR with a default of "low". semgrep 1.x also emits
+        LOW/MEDIUM/HIGH/CRITICAL from new-style rule metadata, so every one of
+        those names fell through to that default: severity `low`, order 0,
+        against a block cutoff of 2 (`SEVERITY_ORDER["high"]`). A RULE SEMGREP
+        MARKED CRITICAL COULD NOT BLOCK A CHANGE.
 
-    The mapping is not symmetric with trivy's and must not be "harmonised" into
-    one table: semgrep's ERROR is its top level and means `high`, while trivy
-    spells its top level CRITICAL. Both are listed here because semgrep emits
-    both vocabularies depending on how a rule declares its metadata.
+        Nothing caught it. No test read this function at all, and the one check
+        positioned to notice -- `scripts/scan_gate.py` -- asserted only
+        `any(f.tool == "semgrep")`, which a `low` finding satisfies. The gate was
+        green, the scanner ran, the finding was reported, and the verdict was
+        wrong.
+
+    THAT HISTORY IS WHY `scoring.FAIL_CLOSED_SEVERITY` IS `high`, and why that
+    module refuses at import when the constant drops below the shipped block
+    threshold: the failure above was a fail-OPEN default, and the import-time
+    check exists so the same mistake cannot be reintroduced quietly. It is also
+    why `test_an_unrecognised_semgrep_severity_fails_CLOSED` exists -- the
+    default is the part that was wrong, so the default is the part with a test on
+    it.
+
+    Read `scoring.POLICY["semgrep"]` for the table itself, `scoring.map_severity`
+    for the `.upper()` normalisation and the `None`/`""` route, and the
+    `scoring.py` module docstring for why one shared table replaced two private
+    ones. `scoring` is imported as a MODULE, not as a bare `map_severity` name:
+    a bare import binds before a test can substitute anything, which would make
+    this delegation unobservable -- the same rule this repository applies to
+    every `config` knob.
     """
 
-    mapping = {
-        "INFO": "low",
-        "LOW": "low",
-        "WARNING": "medium",
-        "MEDIUM": "medium",
-        "ERROR": "high",
-        "HIGH": "high",
-        "CRITICAL": "critical",
-    }
-
-    return mapping.get((severity or "").upper(), "high")
+    return scoring.map_severity("semgrep", severity)
 
 
 def scan(dev: DevResult) -> list[Finding]:

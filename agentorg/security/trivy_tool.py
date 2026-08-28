@@ -28,6 +28,12 @@ from pathlib import Path
 from ..common import config
 from ..common.diff import write_added_files
 from ..state import DevResult, Finding
+
+# THE MODULE, NOT THE NAME. `from .scoring import map_severity` would bind the
+# function at import time, before any test could substitute it -- the same trap
+# CLAUDE.md records for reading a config knob as a bare name. No cycle: scoring
+# imports `._run`, `..state` and `..common.config`, and no wrapper.
+from . import scoring
 from ._run import (
     ReportShapeError,
     error_finding,
@@ -52,31 +58,39 @@ def _write_diff_to_temp(dev: DevResult, temp_dir: str) -> None:
 def _map_severity(severity: str | None) -> str:
     """Map Trivy severity onto our vocabulary, FAILING CLOSED on the unknown.
 
-    The table itself is COMPLETE for trivy today -- UNKNOWN/LOW/MEDIUM/HIGH/
-    CRITICAL is trivy's whole vocabulary -- so unlike semgrep_tool's, whose
-    identical `or "low"` default was live and downgraded real CRITICAL findings
-    to severity 0, this default is latent. It is changed anyway because the trap
-    is the same shape one file over, and "the vocabulary is complete" is a claim
-    about the version installed today.
+    THE TABLE IS NOT HERE. It lives in `security/scoring.py`, as
+    `POLICY["trivy"]`, with one shared fail-closed default -- `FAIL_CLOSED_
+    SEVERITY` -- for all three scanners. This function stays because it is what
+    `scan` and `tests/test_scanner_correctness.py` call, and because the name
+    says which scanner's vocabulary is being read; the mapping itself is one
+    table in one file, so it cannot drift per wrapper. The argument behind each
+    value is in scoring.py, next to the value, rather than restated here.
 
-    Note trivy's own UNKNOWN is a MAPPED key, not a fall-through: trivy uses it
+    THE ONE FACT THAT IS SPECIFIC TO THIS WRAPPER: trivy's vocabulary is
+    COMPLETE today -- UNKNOWN/LOW/MEDIUM/HIGH/CRITICAL is all of it -- so the
+    fail-closed default is LATENT here rather than live. semgrep's was not: its
+    identical `or "low"` default was MEASURED downgrading real CRITICAL findings
+    to severity 0 against a cutoff of 2, so a rule semgrep marked CRITICAL could
+    not block a change. The default is shared anyway, because "the vocabulary is
+    complete" is a claim about the version installed today, and the trap already
+    fired once one file over.
+
+    Note trivy's own UNKNOWN is a MAPPED KEY, not a fall-through: trivy uses it
     for a CVE whose severity its data sources do not carry, which is a real
-    answer about a real finding and stays `low` as before. The default below is
-    for a value that is not in trivy's vocabulary at all -- a new severity name,
-    or an absent field arriving as `""` from
-    `report_text(vulnerability, "Severity", "")`. Those are not trivy saying
-    "unknown"; they are this table not recognising what trivy said.
+    answer about a real finding and stays `low`. The default is for a value that
+    is not in trivy's vocabulary at all -- a new severity name, or an absent
+    field arriving as `""` from `report_text(vulnerability, "Severity", "")`.
+    Those are not trivy saying "unknown"; they are the table not recognising what
+    trivy said. `POLICY["trivy"]` in scoring.py carries the full argument, next
+    to the key it is about.
+
+    Imported as `from . import scoring`, not `from .scoring import map_severity`:
+    a bare name binds at import, before any test can substitute it, which makes
+    the coupling unobservable -- the same reason every knob in this repository is
+    read through `config.<NAME>`.
     """
 
-    mapping = {
-        "UNKNOWN": "low",
-        "LOW": "low",
-        "MEDIUM": "medium",
-        "HIGH": "high",
-        "CRITICAL": "critical",
-    }
-
-    return mapping.get((severity or "").upper(), "high")
+    return scoring.map_severity("trivy", severity)
 
 
 def scan(dev: DevResult) -> list[Finding]:
