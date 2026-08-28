@@ -53,6 +53,7 @@ import argparse
 import contextlib
 import io
 import os
+import pathlib
 import sys
 from pathlib import Path
 
@@ -66,7 +67,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("RETRIEVAL_ENABLED", "true")
 
 from agentorg.agents import reviewer, security
-from agentorg.common import llm
+from agentorg.common import config, llm
 from agentorg.retrieval.measure import MISS_CASES, MISS_PLAN, MISS_TICKET, _diff
 from agentorg.state import (
     DevResult,
@@ -315,8 +316,17 @@ def _cites_the_failure(must_fix: list[str]) -> bool:
                 "429", "generated test"))
 
 
-def measure(trials: int) -> int:
-    """Two changes, two arms each. Exit 0 on a valid measurement, 1 on an invalid one."""
+def measure(trials: int, out: str | None = None) -> int:
+    """Two changes, two arms each. Exit 0 on a valid measurement, 1 on an invalid one.
+
+    `out` WRITES THE ARTIFACT, and it exists because a measurement that only prints is
+    not evidence. `tests/test_evidence.py` requires every `scripts/measure_*.py` to
+    accept `--out` for exactly that reason: the deck cites these numbers, and a number
+    whose only record was a terminal somebody has closed cannot be re-read by a judge.
+
+    This script printed and returned an exit code, which is why the test caught it the
+    moment that file was restored to main.
+    """
     print(f"M5 · one prompt change at a time    trials={trials}")
     print(f"model reachable: {llm.available()}   "
           f"RETRIEVAL_ENABLED={os.environ.get('RETRIEVAL_ENABLED')}\n")
@@ -394,6 +404,30 @@ only what the finding is and what fixes it.""")
     print(f"M2 CLAIM LAUNDERED     baseline {laundered['baseline']}/{trials}   "
           f"treated {laundered['treated ']}/{trials}   (LOWER is better)")
 
+    if out:
+        import json
+        import subprocess
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                                text=True, check=False).stdout.strip()
+        pathlib.Path(out).write_text(json.dumps({
+            # THE CONDITIONS, not only the numbers. test_evidence.py requires a commit
+            # on every published artifact, because a rate measured against a moving
+            # codebase is meaningless without the point it was measured at.
+            "commit": commit,
+            "model": config.BEDROCK_MODEL,
+            "trials": trials,
+            "retrieval_enabled": os.environ.get("RETRIEVAL_ENABLED"),
+            "m1_named_the_failure": {"baseline": cited["baseline"],
+                                     "treated": cited["treated "], "of": trials},
+            "m1_false_blocks": {"baseline": false_blocks["baseline"],
+                                "treated": false_blocks["treated "], "of": ctrl_n},
+            "m2_claim_laundered": {"baseline": laundered["baseline"],
+                                   "treated": laundered["treated "], "of": trials,
+                                   "lower_is_better": True},
+            "fixture_rows": fixture_rows,
+        }, indent=2) + "\n", encoding="utf-8")
+        print(f"\nwrote {out}")
+
     if fixture_rows:
         print(f"\nINVALID: {fixture_rows} call(s) came from the FIXTURE. "
               f"`fixtures/review_result.json` always approves, so a fixture arm measures "
@@ -423,10 +457,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=4,
                         help="calls per case per arm; the model is nondeterministic")
+    parser.add_argument("--out", default="docs/final/evidence/prompt-effects.json",
+                        help="where to write the artifact; every measure_* script takes one")
     args = parser.parse_args(argv)
     if args.trials < 1:
         parser.error("--trials must be at least 1")
-    return measure(args.trials)
+    return measure(args.trials, args.out)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import pathlib
 import statistics
 import sys
@@ -179,6 +180,21 @@ def one_walk(*, poisoned: bool) -> dict:
     }
 
 
+def _commit() -> str:
+    """This repository's HEAD, for the artifact's conditions block."""
+    import subprocess
+
+    return subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                          text=True, check=False).stdout.strip()
+
+
+def _now() -> str:
+    """UTC, ISO-8601. When this measurement was taken, not when it is read."""
+    import datetime
+
+    return datetime.datetime.now(datetime.UTC).isoformat()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3)
@@ -252,6 +268,32 @@ def main() -> int:
         return 1
 
     payload = {
+        # THE CONDITIONS FIRST. `tests/test_evidence.py` requires a commit on every
+        # published artifact, and the requirement is not bureaucratic: a cost measured
+        # against a moving codebase is meaningless without the point it was measured at,
+        # and this figure goes on a slide a judge may ask about weeks later.
+        #
+        # Under `_agentorg`, matching sbom.json — the CycloneDX schema owns the top level
+        # there, so the convention is a namespaced block rather than loose keys.
+        "_agentorg": {
+            "commit": _commit(),
+            "measured_at": _now(),
+            # A DICT, not a sentence — matching sbom.json, and `test_evidence.py`
+            # requires the shape. A prose blob is unreadable by anything: a judge asking
+            # "was the model on for that?" wants a field, not a phrase to parse.
+            "conditions": {
+                "runs": args.runs,
+                "walk": "in-process, the CLEAN ticket",
+                "offline": os.environ.get("OFFLINE") == "true",
+                "llm_disabled": os.environ.get("LLM_DISABLED") == "true",
+                "model": config.BEDROCK_MODEL,
+                "note": (
+                    "infra cost is a rate-card calculation, not a bill. The model "
+                    "figure is real only when llm_disabled is false — a fixture arm "
+                    "measures deserialisation."
+                ),
+            },
+        },
         "model": config.BEDROCK_MODEL,
         "price_row": {
             "input_per_million": model_row.input_per_million,

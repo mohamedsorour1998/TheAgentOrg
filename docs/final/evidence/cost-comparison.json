@@ -1,4 +1,16 @@
 {
+  "_agentorg": {
+    "commit": "5e674ad483573ad71eb019a5b0e9df8b6db9e7a6",
+    "measured_at": "2026-08-28T14:38:05.101813+00:00",
+    "conditions": {
+      "runs": 1,
+      "walk": "in-process, the CLEAN ticket",
+      "offline": true,
+      "llm_disabled": true,
+      "model": "us.amazon.nova-2-lite-v1:0",
+      "note": "infra cost is a rate-card calculation, not a bill. The model figure is real only when llm_disabled is false \u2014 a fixture arm measures deserialisation."
+    }
+  },
   "model": "us.amazon.nova-2-lite-v1:0",
   "price_row": {
     "input_per_million": 0.33,
@@ -12,50 +24,22 @@
       "poisoned": false,
       "status": "promoted",
       "source": "fixture",
-      "model_calls": 5,
-      "fixture_calls": 1,
-      "seconds": 21.029,
-      "input_tokens": 28362,
-      "output_tokens": 1337,
+      "model_calls": 0,
+      "fixture_calls": 5,
+      "seconds": 1.388,
+      "input_tokens": 0,
+      "output_tokens": 0,
       "cached_tokens": 0,
       "cached_reported": false,
       "stages": 1,
-      "usd": 0.01303621
-    },
-    {
-      "poisoned": false,
-      "status": "promoted",
-      "source": "fixture",
-      "model_calls": 6,
-      "fixture_calls": 1,
-      "seconds": 16.648,
-      "input_tokens": 33623,
-      "output_tokens": 2122,
-      "cached_tokens": 0,
-      "cached_reported": false,
-      "stages": 1,
-      "usd": 0.016931090000000003
-    },
-    {
-      "poisoned": false,
-      "status": "promoted",
-      "source": "fixture",
-      "model_calls": 5,
-      "fixture_calls": 2,
-      "seconds": 16.884,
-      "input_tokens": 28404,
-      "output_tokens": 1356,
-      "cached_tokens": 0,
-      "cached_reported": false,
-      "stages": 1,
-      "usd": 0.013102319999999999
+      "usd": 0.0
     }
   ],
   "model_usd_range": [
-    0.01303621,
-    0.016931090000000003
+    0.0,
+    0.0
   ],
-  "model_usd_median": 0.013102319999999999,
+  "model_usd_median": 0.0,
   "infra_usd_per_run": 1.2450000000000001e-05,
   "infra_rows": [
     {

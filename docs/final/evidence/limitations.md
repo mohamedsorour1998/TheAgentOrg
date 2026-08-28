@@ -519,8 +519,7 @@ creation timestamp at `github.com/settings/personal-access-tokens` against 2026-
 If it predates that date, rotate and update the Secrets Manager entry the API_KEY
 connection reads.
 
-**Why it is still here.** Not a priority question — nobody in this repository *can* do
-it. The lesson is about the record rather than the token: **when a fix depends on an
+**Why not now.** Not a priority question — nobody in this repository *can* do it. The lesson is about the record rather than the token: **when a fix depends on an
 action outside the repository, the repository can only record that the action is
 required and how to verify it, never that it happened.** Two files claiming opposite
 things about a credential is worse than either claim alone, because a reader who finds
