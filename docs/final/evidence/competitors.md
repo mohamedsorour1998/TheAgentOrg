@@ -1,168 +1,244 @@
 # The competitive landscape
 
-**Spec §7.** Where each competitor is **better**, and the one row nobody else has.
+**Spec §7.** Where each competitor is **better**, and the one row that survives scrutiny.
 
-**A matrix we win every row of is believed by nobody**, so §2 is where they beat us and
-it is longer than §3. Every claim about another product carries the URL it came from and
-the date it was read; anything not verified against a primary source is marked
-**UNVERIFIED** rather than asserted.
+**A matrix we win every row of is believed by nobody** — and the first draft of this
+document was that matrix. It claimed Copilot ran no scanners and Claude Code had no
+deterministic rule. **Both were wrong**, and §6 records how. Every claim below carries the
+URL it came from; anything unverified is marked **UNVERIFIED** rather than asserted.
 
-Read 2026-08-28.
+Read 2026-08-28. **Names change fast**: "Copilot coding agent" is now **Copilot cloud
+agent** (the `/coding-agent/` doc URLs 404), Copilot **Workspace** is withdrawn, and
+Windsurf was renamed **Devin Desktop** on 2026-06-02.
 
 ---
 
-## 1 · What each product actually is
+## 1 · THE STRONGEST ROW, and it is not the one I first wrote
 
-| Product | What it is | Primary source |
-|---|---|---|
-| **GitHub Copilot coding agent** | an agent assigned a task, working in an ephemeral GitHub-hosted environment, opening **exactly one pull request per task** | [docs.github.com](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent) |
-| **Claude Code** | an agentic coding tool across terminal, IDE, desktop, web and mobile, that stages changes, writes commits and opens pull requests | [code.claude.com](https://code.claude.com/docs/en/overview) |
-| **Devin (Cognition)** | *"an autonomous AI software engineer that can write, run and test code"*, prompt to PR | [docs.devin.ai](https://docs.devin.ai/get-started/devin-intro) |
-| **Cursor** | an IDE with an agent mode | **UNVERIFIED** — not read against a primary source for this document |
-| **Snyk · GitGuardian · Semgrep** | CI security gates. **Not agent tools** — the comparison for our *gate*, not our *agents* | **UNVERIFIED** on current policy specifics |
-| **The Agent Org** | five role agents, three human approval gates, and a deterministic block rule | this repository |
+**Every major vendor's LLM code review is advisory, and each says so in its own
+documentation.** This is the exact advisory-reviewer / binding-security split this
+pipeline is built around, conceded by the people selling the alternative:
+
+| Product | Their words |
+|---|---|
+| **Copilot code review** | *"Copilot always leaves a 'Comment' review, not an 'Approve' review or a 'Request changes' review… will not block merging changes"* — [docs](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/request-a-code-review/use-code-review) |
+| **Anthropic managed Code Review** | *"The check run **always** completes with a neutral conclusion so it never blocks merging through branch protection rules"* — [docs](https://code.claude.com/docs/en/code-review) |
+| **OpenAI Codex** | review rules *"don't replace tests, branch protections, or required approvals"* — [docs](https://learn.chatgpt.com/docs/third-party/github) |
+| **Cursor Bugbot** | *"Requiring the status alone **does not block merges on findings because findings default to `neutral`**"* — [docs](https://cursor.com/docs/bugbot.md) |
+
+And **Snyk's own platform page argues this repository's thesis verbatim: "The generator
+cannot be the validator."**
+
+**Three of four security vendors then describe the same architecture** — the scanner
+publishes a status and the *SCM's branch protection* does the blocking. Snyk: without
+branch protection *"the status is informational only."* Semgrep: blocking *"is dependent
+on your CI provider."* SonarQube: *"the gate itself does not prevent merging."*
+
+**Ours is structural instead, and that is the difference worth defending.** `develop`
+exits 3 and `gate2` declares `needs: develop`, so **no `if:` expresses the block — the
+dependency graph does**, and no misconfigured status check can let it through.
 
 ---
 
 ## 2 · WHERE THEY ARE BETTER, and it is not close
 
-### IDE integration — Claude Code and Cursor win outright
-
-Claude Code runs on **five surfaces** from one engine — terminal, VS Code, JetBrains,
-desktop and browser — with inline diffs, `@`-mentions and plan review in the editor, plus
-Slack, Chrome, mobile and Remote Control to move a session between devices.
-
-**We have no IDE integration at all.** A developer cannot invoke this pipeline from their
-editor. The only entry points are a GitHub issue, a `workflow_dispatch`, the control-plane
-API, and the web application. That is a deliberate consequence of building a *pipeline*
-rather than an *assistant*, and it is still a real gap: the moment a developer most wants
-a check is while they are writing, and we cannot be there.
-
 ### Language breadth — everyone wins, and our number is embarrassing
 
-Measured on our own repository rather than estimated:
+Measured on our own repository:
 
 ```
 agentorg/security/semgrep_rules.yml    1 rule    languages: [python]
 agentorg/security/gitleaks.toml        2 rules   aws-access-key-id, aws-secret-access-key
 ```
 
-**And both scanners run with `--config` pointed at those files**, measured at
-`semgrep_tool.py:132` and `gitleaks_tool.py:105` — so neither tool's default registry is
-in play. Semgrep's own registry carries thousands of rules across dozens of languages;
-gitleaks ships ~150 secret patterns. **We use three rules total, and one language.**
+**And both scanners run with `--config` pointed at those files** —
+`semgrep_tool.py:132`, `gitleaks_tool.py:105` — so neither tool's default registry is in
+play. **Three rules, one language.** Semgrep's registry carries thousands; CodeRabbit
+ships **61 tool integrations** including semgrep, trivy, checkov and osv-scanner.
 
-Trivy is the exception and is language-agnostic, but it is scanning a materialised diff
-rather than a dependency manifest, so its CVE database is largely unexercised.
+Every competitor is language-agnostic because a general model is. Our prompts **name the
+stack explicitly** (Flask, Python — 2–3 mentions each) because CLAUDE.md records the
+developer agent writing **Go for a Flask app** without it. That fix bought reliability by
+buying specificity, and the bill is a pipeline tuned for one stack.
 
-Every competitor above is language-agnostic because a general model is. Our agents'
-prompts **name the stack explicitly** — Flask and Python, measured, 2–3 mentions per
-prompt — and CLAUDE.md records exactly why: without it the developer agent wrote **Go for
-a Flask app** and every revision inherited the guess. That fix bought reliability by
-buying specificity, and the bill is that the pipeline is tuned for one stack.
+### IDE integration — Cursor and Claude Code win outright
 
-### Polish, ecosystem and support — not comparable
+Cursor is a **VS Code fork**, so it inherits the editor, keybindings, settings import and
+the extension model — language servers and debuggers for everything. Claude Code runs on
+**six surfaces** from one engine. **We have none.** No editor can invoke this pipeline;
+the entry points are a GitHub issue, `workflow_dispatch`, the control-plane API and the
+web app. The moment a developer most wants a check is while they are writing.
 
-Copilot's agent has scheduled automations, Azure Boards / JIRA / Linear entry points, MCP
-configuration, and a metrics dashboard. Claude Code has skills, hooks, sub-agents, an
-Agent SDK, routines, and eight documented install paths. Both have a support
-organisation, a release channel, and a security team.
+### SCM breadth, trigger surface, ecosystem, enterprise plumbing
 
-We have one repository, five people, and a hackathon deadline. **A judge should assume
-every ergonomic comparison goes against us**, and the honest framing is that we are not
-competing on ergonomics.
+- **SCM:** Devin covers GitHub/GitLab/Bitbucket/Azure DevOps; Tembo does coordinated
+  multi-repo PRs across three forges. We are GitHub-Actions-shaped.
+- **Triggers:** Copilot fires from Slack, Teams, Raycast, Mobile, JIRA, Linear, Azure
+  Boards and cron. We have an issue and a dispatch.
+- **Enterprise:** SAML/SCIM, zero data retention, audit logs, air-gapped deployment,
+  CMEK, data residency, SLAs. We have none of it.
+- **Scale:** the Codex CLI alone has **119,472 GitHub stars**.
 
-### Sandbox maturity — Copilot's is better than ours
+### Sandbox and gate design — two places theirs is genuinely better
 
-Copilot's agent runs in an ephemeral environment with a **59-minute hard cap** described
-as *"a hard limit that cannot be extended or bypassed"* and a configurable
-`timeout-minutes`. Ours has `SCANNER_TIMEOUT_SECONDS` per scanner invocation and no
-whole-run cap at all — a hung stage holds an Actions runner until GitHub's own six-hour
-limit.
+**Azure DevOps has a stronger tamper property than ours.** Five ordered check categories,
+and *"Checks are not defined in YAML"* — resource owners manage them in the web UI, so
+*"users modifying the pipeline yaml file can't modify the checks."* Its FAQ even
+recommends Invoke REST API to wait on an external scanner: Microsoft recommending the
+assembly we built. **GitHub also documents "Prevent self-review" and an option to
+disallow admin bypass** — relevant because all three of our Environments measure
+`can_admins_bypass=True`.
 
-### And the one that matters most: they are shipping products and we are not
+**Copilot's run cap is real and ours is not.** A 59-minute hard limit *"that cannot be
+extended or bypassed."* We have a per-scanner timeout and no whole-run cap.
 
-Copilot's agent, Claude Code and Devin are generally available with paying customers.
-Our sign-in flow **has never completed once** (`limitations.md` §11), our durable queue
-is invoked by nothing in production (§13), and no browser has run our browser tests
-(§14). Seventeen limitations are written down. That is a real answer to "how does this
-compare", and it is not a favourable one.
+### They are shipping products and we are not
 
----
-
-## 3 · The one row nobody else has
-
-| | deterministic non-LLM blocking rule | human approval gates | multi-agent generation |
-|---|---|---|---|
-| Copilot coding agent | **no** — security scanning is something *you add* via hooks, for *"validation, logging, security scanning"* | not described; repository rules can **block the agent** instead | no |
-| Claude Code | **no** — permission prompts are per-action, not a policy threshold | per-action permission prompts (a different thing) | yes — sub-agents, an Agent SDK |
-| Devin | **not described.** Nothing on permission prompts, confirmation steps, *"or any deterministic non-LLM rule that halts execution"*. The closest is **advice**: write clear prompts, make tasks easy to verify | draft PRs awaiting review implies a human merges — **the page never says so** | no |
-| Snyk / Semgrep / GitGuardian in CI | **yes** — this is exactly what they do | no — they are checks, not workflows | no |
-| **The Agent Org** | **yes** | **yes — three, each a platform-level Environment** | **yes — five agents** |
-
-**Nothing found combines all three.** The security tools have the deterministic gate and
-no agents; the agent tools have the agents and no gate. We are the intersection, and the
-intersection is the entire thesis: *a model that can be persuaded, distracted or
-prompt-injected must not be the thing standing between a credential and `main`.*
-
-### Three qualifications, because the row above is the one to be sceptical of
-
-**"Nothing found" is not "nothing exists."** This is a search, not a market survey. A
-private platform team somewhere has almost certainly wired Semgrep's exit code into an
-agent's PR — that is a few days of work and it is the obvious thing to do. The claim is
-about *products*, and the useful version is narrower: **no product ships this
-combination as its central promise.**
-
-**Our gate is three rules deep and theirs is thousands.** §2 measured it. A Snyk or
-Semgrep deployment blocks on a vastly larger rule set than ours, so "we have a
-deterministic gate and they do not" is true *of the agent tools* and false of the security
-tools — and the security tools are the ones a real team already runs. The honest
-composition is: **their rules, our structure.**
-
-**Copilot's hooks make this achievable rather than impossible.** Its documentation says
-hooks run shell commands at execution checkpoints for *"validation, logging, security
-scanning, or workflow automation."* So a Copilot user can bolt a scanner on. What they
-cannot easily get from that page is the part we are actually claiming — a *verdict* that
-is computed by arithmetic, recorded on the state, and structurally unable to be argued
-with by the model that wrote the change.
+Our web sign-in has never completed (`limitations.md` §11), our durable queue is invoked
+by nothing in production (§13), and no browser has run our browser tests (§14).
+**Seventeen** limitations are written down. That is a real answer to "how does this
+compare", and not a favourable one.
 
 ---
 
-## 4 · The four claims that survive scrutiny
+## 3 · The row that survives — and it is a SEAM distinction, not "deterministic vs not"
 
-Each one is narrow on purpose, and each is checkable in this repository:
+**The category is not empty and the first draft implied it was.** Four products come close
+enough that a judge will find them:
 
-1. **The verdict is arithmetic and the model cannot reach it.** `compute_security_verdict`
-   is five lines of Python with no model and no I/O, called in exactly one place on the
-   pipeline path. Measured: a hostile retrieved document claiming an approved exception
-   moved the verdict **0 times in 8 trials**, and `retrieval/guard.py` refuses the six
-   argument names a verdict reads.
-2. **Three approvals are platform-level, not steps a pipeline can skip.** A rejected
-   GitHub Environment *skips* its job. **And the honest limit is on the same slide:** all
-   three measure `can_admins_bypass=True`, so a repository admin can bypass them —
-   reported by `preflight.py` check 4 on every run, and deliberately not failed on.
-3. **A real scan is distinguishable from a fixture read, by one field.** Real scanners
-   report added lines `[3, 4]`; the fixture reports `[4, 5]`. Everything else — the
-   verdict, `blocking=2`, both rule names, the file, the tool, the severity — is
-   byte-identical between the two paths. This is the check no competitor needs and we do,
-   because our agents degrade to fixtures by design.
-4. **It costs 1.3–1.7¢ per change and the whole bill is legible.** Measured, priced from
-   the AWS Pricing API with the read date attached, with 99.9% of it identified as the
-   model. None of the products above publishes a per-change cost.
+| Product | Has | Missing |
+|---|---|---|
+| **Factory AI · Droid Shield** | a genuine deterministic block — pattern + entropy scan that **hard-blocks `git commit` and `git push`**, with patterns blocking and ML classifiers only *warning*. Plus four autonomy levels that pause for approval | guards only secrets, only inside Droid; **bypassed by running git manually**. Not a pipeline stage with an exit code |
+| **OpenHands** (OSS, 85,408 stars) | deterministic `PatternSecurityAnalyzer` / `PolicyRailSecurityAnalyzer` and `ConfirmRisky(threshold=HIGH)` | its stated principle is **"Confirm, don't block"** — no hard deny; `conversation.execute_tool()` bypasses both layers; the issue→PR path has **no** approval step |
+| **GitLab Duo Agent Platform** | genuinely multi-agent (Planner, Security Analyst, CI Expert) with autonomous MR commits, **and "Agent tool governance" policies "to gate sensitive agent actions with human approval at execution time"** | governance is **beta**, and it gates **tool calls mid-execution**, not stage output. Code-producing flows land as ordinary MRs |
+| **Google Jules** | the cleanest **two** human gates in the market: plan confirm, then diff approve, then PR | no deterministic rule at all |
+
+**And two products have deterministic primitives I wrongly said they lacked:**
+
+- **Claude Code's permission deny rules** are *"enforced by Claude Code, not by the
+  model"*, take precedence deny → ask → allow, hold even under `bypassPermissions`, and
+  *"Hooks can tighten restrictions but not loosen them."* That is a real non-LLM gate.
+- **`codex-security` is the closest thing to `compute_security_verdict` that ships:**
+  `--fail-on-severity high`, **exit 1 for a finding at or above threshold**, exit 2 for
+  input error *or incomplete coverage*, SARIF export. Research preview, opt-in, still
+  model-driven rather than a pattern matcher — and both of OpenAI's sample pipelines *"are
+  report-only because they omit `--fail-on-severity`."*
+
+### So the honest claim is narrower, and it is about the SEAM
+
+> Every gate above guards a **tool call inside one agent's session**. Ours guards a
+> **pipeline stage between agents**, with a named human reviewer, and the block is
+> expressed as a dependency edge rather than a status check.
+
+That distinction survives scrutiny. **"We are the only deterministic one" does not** — and
+the useful version of the original claim is: *no product ships multi-agent generation, a
+deterministic non-LLM block on stage output, and human approval gates between stages as
+one pipeline.*
+
+### Two fail-open behaviours worth naming, because they are our own design in reverse
+
+- **Cursor hooks:** exit 2 denies, but *"Other exit codes — Hook failed, action proceeds
+  (fail-open by default)."*
+- **Claude Code PreToolUse hooks:** exit 2 blocks and cannot be overridden — but **exit 1
+  does not block**, and a missing or non-executable hook **fails open**: *"A mistyped path
+  silently disables the gate."*
+- **Semgrep:** on an internal crash it *"sends anonymous crash report… and returns exit
+  code 0."*
+
+All three are this repository's signature defect shape — a check that did not run reading
+as a check that passed — in shipped products. It is the direct argument for
+`SCANNERS_REQUIRED` and for `unrunnable_findings` **raising** rather than returning `[]`.
 
 ---
 
-## 5 · Who should not buy this
+## 4 · Copilot runs real scanners, and the first draft said it did not
+
+The correction that matters most, because it was the load-bearing error. The Copilot cloud
+agent runs **CodeQL, secret scanning, and GitHub Advisory Database checks** for malware and
+CVSS High/Critical, plus Copilot code review as a second opinion — and this *"does not
+require a GitHub Advanced Security or secret protection license."*
+
+**It also has genuine agent-specific gates**, not just ordinary branch protection:
+
+- *"**By default, GitHub Actions workflows will not run automatically when Copilot pushes
+  changes to a pull request**"* — a human with write access clicks **Approve and run
+  workflows**.
+- *"Copilot cloud agent cannot mark its pull requests as 'Ready for review' and cannot
+  approve or merge a pull request."*
+- The triggering human's approval *"won't count toward the required number."*
+
+**Two defensible distinctions remain.** Theirs runs *inside the agent's own loop* as a
+self-check it *"attempts to resolve"* — the generator validating itself, which is the thing
+Snyk's page names as impossible. And **a repository admin can switch each validation tool
+off**, with GitHub's own warning that doing so *"may allow unreviewed code written by
+Copilot to gain write access to your repository or access your GitHub Actions secrets."*
+
+**GitHub push protection is the one genuinely deterministic non-LLM block on the merge path
+in this whole survey**, and its **delegated bypass is a real approval workflow** —
+nominated actors review and approve bypass requests, every bypass alerts and audit-logs.
+That is better than our bypass story, where an admin simply proceeds.
+
+---
+
+## 5 · The category collapsed, and that is evidence for the thesis
+
+The 2023-era issue→PR bot **no longer exists as a category**:
+
+| Product | Status |
+|---|---|
+| **Sweep** | pivoted to a JetBrains autocomplete plugin. Founders on [YC](https://www.ycombinator.com/companies/sweep): *"We originally started Sweep in 2023 to build an AI junior developer… We soon realized that this was many years out."* |
+| **Codegen** | **dead** — acquired by ClickUp, *"officially deprecated on January 16, 2026"* |
+| **Cosine** (Genie) | pivoted to air-gapped/COBOL work |
+| **Ellipsis** | pivoted to *"spawn Claude Code and Codex in the cloud"* with budget caps |
+| **Solver / Laredo** | dead (circumstantial — expired site, bare 404) |
+| **SWE-agent** | maintenance-only, superseded |
+| **Survivors** | **CodeRabbit** ($143M Series C at $1.5B), **Factory**, **Tembo**, **Qodo**, **Greptile**, **Jules**, **OpenHands** |
+
+**The survivors converged on review and orchestration with human control, not autonomy.**
+Sweep concluded the autonomous junior developer was years out; Ellipsis and Tembo both
+retreated to running someone else's agent in a sandbox with budget caps and scoped
+credentials. That is the market arriving at this pipeline's premise from the other
+direction.
+
+---
+
+## 6 · MY OWN CLAIMS, DISPROVED BY THE RESEARCH I COMMISSIONED
+
+Recorded because it is this repository's named pattern arriving in a **competitive
+analysis** — an assertion that could not be falsified by reading, only by checking:
+
+| I wrote | Actually |
+|---|---|
+| Copilot has **no** deterministic blocking rule; scanning is *"something you add"* | it runs **CodeQL + secret scanning + Advisory DB**, no extra licence |
+| Copilot's approval gates are **"not described"** | Actions **do not run** on an agent push until a human clicks *Approve and run workflows* |
+| Claude Code has **no** deterministic rule, only per-action prompts | **permission deny rules** are *"enforced by Claude Code, not by the model"* and survive `bypassPermissions` |
+| **"Nothing found combines all three"** | Factory, OpenHands, GitLab Duo and Jules each have two of the three |
+| Devin's gates: *"the page never says so"* | *"Devin is subject to the exact same branch protections and SDLC policies as any human engineer"* |
+
+**The first draft was written from one doc page per product**, and a doc page describes
+what a vendor chose to put on it. Four of the five errors above are in the *flattering*
+direction — which is what a competitive matrix does to its author unless somebody checks.
+
+**Four assumptions in my own brief were also stale:** Copilot's premium requests became
+**AI Credits** on 2026-06-01 (1 credit = $0.01); Devin's ACUs survive **only on
+Enterprise** (Teams is **$80/mo minimum**, not ~$500); Cursor's docs cite **3.7+**, not
+2.x; and Codex's `suggest`/`auto-edit`/`full-auto` naming is gone, replaced by sandbox
+modes plus approval policies.
+
+---
+
+## 7 · Who should not buy this
 
 The most useful section, and the one a matrix normally omits.
 
-- **A team wanting an assistant while they type.** Buy Claude Code or Cursor. We are not
-  in the editor and will not be soon.
-- **A polyglot codebase.** Three rules and one language. Buy Semgrep and configure it.
+- **A team wanting an assistant while they type.** Buy Cursor or Claude Code.
+- **A polyglot codebase.** Three rules, one language. Buy Semgrep and configure it.
+- **A team on GitLab, Bitbucket or Azure DevOps.** Buy GitLab Duo — and its check model
+  is arguably better than ours.
+- **A team that needs enterprise plumbing or support.** There is none here.
 - **A team without a human who will click three times per change.** The gates are the
-  product; if nobody will staff them, the pipeline is theatre with extra steps.
-- **A team that needs support.** There is none.
+  product; unstaffed, the pipeline is theatre with extra steps.
 
 **Who should:** a team that has already decided to let agents open pull requests, and now
-needs the answer to *"what stops one of them merging a credential?"* to be something other
-than a person's attention.
+needs the answer to *"what stops one of them merging a credential?"* to be a dependency
+edge rather than a person's attention.
