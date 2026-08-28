@@ -544,3 +544,71 @@ the reassuring one stops looking.
 None is blocked on a design that does not work. That is the honest summary and it is a
 better one than a shorter list would give: the pattern is *unexecuted*, not *broken*, and
 the difference is exactly the one this project spends its whole verification story on.
+
+---
+---
+
+# CORRECTION · §11 and §12 were overtaken while this document was being written
+
+**`main` advanced by two commits during Phase 4** — `471fc31` and `69ab1d3` — and both
+struck at entries above. A real **PostgreSQL 16.15** was connected for the first time, and
+it refused two things that had passed every structural test.
+
+**Re-verified independently rather than relayed**, because this document's own rule is
+that a number comes from a command whose output is pasted. Started the local service,
+created a database, applied the rendered DDL and drove the queue:
+
+```
+psql -tAc 'select version()'
+  PostgreSQL 16.15 (Homebrew) on aarch64-apple-darwin25.6.0
+
+schema.render_schema("postgres") applied to a fresh database
+  POSTGRES DDL APPLIED
+  tables:       ['app_user','budget','membership','organisation','repository','run','secret']
+  RLS policies: 6
+
+QUEUE_BACKEND=postgres QUEUE_DSN=postgresql:///laneL_verify
+  enqueue OK   job_id='c23eea4b…' run_id='laneL-verify-1' stage='plan' poisoned=True status='ready'
+  claim OK     laneL-verify-1 plan poisoned= True
+```
+
+So **all seven tables create, six RLS policies exist, and the queue's Postgres dialect
+enqueues and claims with `poisoned` surviving as a real `bool`.**
+
+| Entry | Was | Now |
+|---|---|---|
+| **§11** | *"no Postgres has ever been connected"* | **WRONG.** One has. The DDL executes and the RLS policies are real objects, not asserted strings |
+| **§12** | *"the Postgres queue dialect is never executed"* | **WRONG.** It executes, after `69ab1d3` fixed a `DatatypeMismatch` on the first INSERT |
+| **§13** | the queue has no caller in production | **UNCHANGED.** Executing a dialect is not deploying a path |
+
+### What is STILL true, and it is narrower than the two entries claimed
+
+- **The web sign-in flow has still never completed.** A schema existing is not a session
+  being issued, and `69ab1d3` records a *new* obstacle: the tenant lookup is **circular
+  under RLS** — `membershipsFor` reads `membership`, which carries an RLS policy needing a
+  bound tenant, and the bound tenant is what that query exists to discover. Measured
+  there: `no tenant bound -> []`, `tenant-zero bound -> [('tenant-zero',)]`. So §11's
+  *conclusion* survives its *premise* being wrong, for a better reason.
+- **`docker compose up` has still never run.** Re-measured after the rebase: `docker info`
+  reports no daemon. The Postgres above is a Homebrew service, not the compose stack, so
+  the container topology is still unexecuted.
+- **`config.QUEUE_BACKEND` still defaults to `memory`** while its own comment three lines
+  above says the durable backend is the deployed default. §12's contradiction stands.
+- **The RLS is only as good as the ROLE.** `69ab1d3` measured the sharpest thing here: as
+  the superuser owning the tables the policies isolate **nothing** — `attacker sees
+  [('run-t-attacker',…),('run-t-victim',…)]` — and refuse correctly only as a plain LOGIN
+  role. So "Postgres enforces reads" is true of a correctly-provisioned role and false of
+  the connection a developer most easily makes.
+
+### The lesson, which is the reason this correction is appended rather than edited in
+
+**Two entries in a limitations document went stale inside four hours, and the document was
+the last thing to know.** Both were measured true at `d6165c8` and false at `69ab1d3`. The
+originals are left in place above rather than rewritten, following this repository's own
+practice — `0d229dc` retains a wrong 2-of-5 measurement marked `[SUPERSEDED]` *"because
+the 2/5 is the evidence that the defect was real"*.
+
+Here the superseded text is evidence of something more useful than a defect: **it names
+exactly what nobody had run, and somebody then ran it and found two real bugs.** A
+limitation written down is a limitation somebody can close, and these two were closed by a
+different lane within hours of being recorded. That is the argument for the whole document.

@@ -956,16 +956,16 @@ def slide_limits(prs):
     slide = _blank(prs, band=AMBER)
     _heading(slide, "What does not work yet", kicker="progress", size=38)
     body = _bullets(slide, [
-        "Sign-in has never completed — it needs a database nobody has started here.",
+        "Sign-in has never completed — the tenant lookup is circular under our own rules.",
         "A run does not yet record its own cost, though the meter works.",
         "The queue that would replace our CI is tested and not yet switched on.",
         "The browser tests are written and no browser has run them.",
         "Any of our three approvals can be bypassed by a repository administrator.",
     ], top=Inches(2.7), size=19, gap=0.72)
     note = _text(slide,
-        "Sixteen limitations are written down, each with what removing it would take. "
-        "Every one is something unexecuted rather than something broken — and telling "
-        "those two apart is the whole point of this project.",
+        "Sixteen limitations are written down, each with what removing it would take. Two "
+        "were closed by another engineer within hours of being recorded — which is what "
+        "writing them down is for.",
         left=MARGIN, top=Inches(6.15), width=Inches(11.0), height=Inches(0.9),
         size=17, color=INK)
     _transition(slide, kind="fade")
@@ -977,7 +977,7 @@ def slide_roadmap(prs):
     slide = _blank(prs)
     _heading(slide, "Roadmap to the final phase", kicker="what is next", size=38)
     items = _bullets(slide, [
-        "TURN ON WHAT IS BUILT — the queue, the database, and cost on every run.",
+        "FINISH SWITCHING ON — the queue in production, and cost recorded on every run.",
         "CACHE THE CONTEXT — the agents re-read the same code five times and pay for it.",
         "WIDEN THE CHECKS — dependency and licence scanning, per-project thresholds.",
         "PROVE IT AT VOLUME — ten times the sample behind every number in this deck.",
