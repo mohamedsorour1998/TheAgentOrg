@@ -84,7 +84,7 @@ import argparse
 import sys
 import typing
 
-from agentorg import gates, github_ops, graph, log
+from agentorg import gates, graph, integrations, log
 from agentorg.common import agent_client, config, llm
 from agentorg.state import HumanDecision, LogEvent, RunState
 
@@ -310,7 +310,7 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     # the run `running`; reporting there would post an outcome comment after each of
     # seven jobs and close the issue before the work had finished.
     if state.status in _TERMINAL_STATUSES:
-        github_ops.report_outcome(state)
+        integrations.host().report_outcome(state)
 
 
 def _stage_plan(args: argparse.Namespace) -> int:
@@ -615,7 +615,7 @@ def _stage_develop(args: argparse.Namespace) -> int:
         _log(state, "reviewer", "review", "reviewed", verdict="changes_requested",
              summary=f"revision {state.revision_count}")
 
-    state.dev = github_ops.open_pr(state)
+    state.dev = integrations.host().open_pr(state)
     _log(state, "system", "develop", "opened", summary=f"PR {state.dev.pr_url}")
 
     # Now there is a PR, so the queue is flushed onto it -- in the order the
@@ -702,7 +702,7 @@ def _stage_sre(args: argparse.Namespace) -> int:
     # same reason. `ci_status` never raises, so this cannot fail the stage.
     #
     # BEFORE the call, not after: the value has to be on the state that gets sent.
-    state.ci_status_measured = github_ops.ci_status(state)
+    state.ci_status_measured = integrations.host().ci_status(state)
     print(f"ci_status={state.ci_status_measured}")
 
     state.sre = agent_client.call_agent("sre", state)
@@ -805,7 +805,7 @@ def _stage_promote(args: argparse.Namespace) -> int:
     # `promoted` MUST BE THE LAST ROW. `timeline._outcome` reads its banner off
     # the last row's action, so logging `merged` after it would render a shipped
     # run as `⇄ MERGED` and ★ PROMOTED would never appear.
-    ref = github_ops.merge_pr(state)
+    ref = integrations.host().merge_pr(state)
     _log(state, "system", "promote", "merged", summary=f"merged {ref}",
          artifact_ref=ref)
 

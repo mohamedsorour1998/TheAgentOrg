@@ -57,7 +57,7 @@ import os
 import typing
 from collections.abc import Callable
 
-from . import gates, github_ops, log
+from . import gates, integrations, log
 from .common import agent_client, config, llm
 from .security import scoring
 from .state import (
@@ -111,7 +111,7 @@ def _comment(state: RunState, stage: str, lines: list[str]) -> str:
     worse by catching the conftest guard that keeps the suite off the live API.
     """
     body = f"{COMMENT_HEADER}{stage}\n\n" + "\n".join(lines)
-    return github_ops.post_comment(state, body)
+    return integrations.host().post_comment(state, body)
 
 
 def _bullets(items: list[str]) -> list[str]:
@@ -483,7 +483,7 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
         # `report_outcome` never raises, so this cannot swallow an exception `_walk`
         # was propagating -- a `finally` that raises replaces the original error, and
         # losing a real traceback to a failed comment would be the worse trade.
-        github_ops.report_outcome(state)
+        integrations.host().report_outcome(state)
 
 
 def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
@@ -546,7 +546,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
              summary=f"revision {state.revision_count}")
 
     # 4. OPEN PR (Mariam's seam) -------------------------------------------
-    state.dev = github_ops.open_pr(state)
+    state.dev = integrations.host().open_pr(state)
     _log(state, "system", "develop", "opened", summary=f"PR {state.dev.pr_url}",
          )
 
@@ -641,7 +641,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     # when there is one. Harmless on the local path -- `sre.run` prefers the field and
     # measures only when it is blank, so the answer is identical either way, taken one
     # call earlier.
-    state.ci_status_measured = github_ops.ci_status(state)
+    state.ci_status_measured = integrations.host().ci_status(state)
     state.sre = agent_client.call_agent("sre", state)
     _log(state, "sre", "sre", "reviewed", verdict=state.sre.verdict)
     # Before the no_go branch, for the same reason the security comment is before
@@ -688,7 +688,7 @@ def _walk(state: RunState, *, poisoned: bool, auto_approve: bool) -> RunState:
     # `promoted` MUST BE THE LAST ROW. `timeline._outcome` reads its banner off
     # the last row's action, so logging `merged` after it would render a shipped
     # run as `⇄ MERGED` and the ★ PROMOTED banner would never appear.
-    ref = github_ops.merge_pr(state)
+    ref = integrations.host().merge_pr(state)
     _log(state, "system", "promote", "merged", summary=f"merged {ref}",
          artifact_ref=ref)
 

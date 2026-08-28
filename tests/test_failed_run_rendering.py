@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from agentorg import gates, graph, log, timeline
+from agentorg import gates, github_ops, graph, log, timeline
 from agentorg.agents import sre as sre_agent
 from agentorg.state import HumanDecision, RunState, SREResult
 
@@ -151,7 +151,7 @@ def test_a_revision_cap_run_does_not_render_as_BLOCKED_in_the_cloud(monkeypatch,
     from agentorg.agents import developer, reviewer
 
     module = _stage_module()
-    monkeypatch.setattr(module.github_ops, "post_comment",
+    monkeypatch.setattr(github_ops, "post_comment",
                         lambda state, body, finding=None: "local://x")
     monkeypatch.setattr(reviewer, "run", _never_approves)
     monkeypatch.setattr(developer, "run", _developer_per_pass)
@@ -230,7 +230,7 @@ def test_an_sre_no_go_run_has_an_ENDING_in_the_cloud(monkeypatch, tmp_path):
     `RunState.status`.
     """
     module = _stage_module()
-    monkeypatch.setattr(module.github_ops, "post_comment",
+    monkeypatch.setattr(github_ops, "post_comment",
                         lambda state, body, finding=None: "local://x")
     monkeypatch.setattr(sre_agent, "run", _no_go)
 

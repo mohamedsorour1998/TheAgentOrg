@@ -73,6 +73,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agentorg import github_ops
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 RUN_PIPELINE = WORKFLOWS / "run-pipeline.yml"
@@ -1069,8 +1071,8 @@ def _cloud_run(monkeypatch, tmp_path, *, poisoned="false", reject_at=None,
 
     # Patched on github_ops as a module attribute, because that is how graph.py's
     # comment helpers reach it -- resolved at call time.
-    monkeypatch.setattr(module.github_ops, "post_comment", _record)
-    monkeypatch.setattr(module.github_ops, "_note_locally", _record_note)
+    monkeypatch.setattr(github_ops, "post_comment", _record)
+    monkeypatch.setattr(github_ops, "_note_locally", _record_note)
 
     if never_approves:
         # The SHIPPED fixtures approve on the first pass -- measured:
@@ -2142,13 +2144,24 @@ def test_the_sre_stage_measures_ci_before_invoking_the_agent():
         if not isinstance(node, ast.Call):
             continue
         source = ast.unparse(node)
-        if "github_ops.ci_status" in source and measure_line is None:
+        # MATCHED ON `.ci_status(` RATHER THAN ON `github_ops.ci_status`, because Lane
+        # D's port moved the call to `integrations.host().ci_status(state)` and the
+        # literal spelling stopped existing. The PROPERTY this test pins is unchanged
+        # and still load-bearing: whoever measures, it must happen before the agent is
+        # invoked, or the state sent to the container is blank.
+        #
+        # This is the failure mode CLAUDE.md names as "when you change a mechanism,
+        # tests referencing the old one do not fail -- they stop testing." Here it DID
+        # fail, because the first assertion below refuses a matcher that matched
+        # nothing. Without that guard the port would have silently disarmed the one
+        # test standing between the SRE stage and a permanent `CI unknown`.
+        if ".ci_status(" in source and measure_line is None:
             measure_line = node.lineno
         if "call_agent" in source and "'sre'" in source.replace('"', "'"):
             call_line = node.lineno
 
     assert measure_line is not None, (
-        "_stage_sre never calls github_ops.ci_status, so the container measures it "
+        "_stage_sre never measures ci_status, so the container measures it "
         "instead -- and the container has no token, so the answer is always `unknown`"
     )
     assert call_line is not None, "_stage_sre does not invoke the sre agent at all"

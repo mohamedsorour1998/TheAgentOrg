@@ -46,7 +46,7 @@ from pathlib import Path
 
 import pytest
 
-from agentorg import approve_server, gates, log
+from agentorg import approve_server, gates, github_ops, log
 from agentorg.common import config
 from agentorg.state import RunState
 
@@ -76,7 +76,7 @@ def _args(**kw):
 
 
 def _no_comments(module, monkeypatch):
-    monkeypatch.setattr(module.github_ops, "post_comment",
+    monkeypatch.setattr(github_ops, "post_comment",
                         lambda state, body, finding=None: "local://x")
 
 
@@ -225,7 +225,7 @@ def _hermetic(monkeypatch, tmp_path):
 
 
 def _no_comments(module, monkeypatch):
-    monkeypatch.setattr(module.github_ops, "post_comment",
+    monkeypatch.setattr(github_ops, "post_comment",
                         lambda state, body, finding=None: "local://x")
 
 
