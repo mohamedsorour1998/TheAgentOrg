@@ -20,7 +20,7 @@ which is the one signal this function acts on.
 
 import re
 
-from .. import fixtures_loader, repo_snapshot
+from .. import fixtures_loader, repo_snapshot, retrieval
 from ..common import llm
 from ..common.diff import added_files
 from ..state import DevResult, RunState
@@ -43,7 +43,13 @@ helper, and a `create_app()` factory; `tests/test_auth.py` uses pytest with a
 state, and `os.environ` for configuration.
 
 Diff headers must use git's default prefixes — `--- a/path` and `+++ b/path`.
-Keep the change to the files the plan names."""
+Keep the change to the files the plan names.
+
+IF A GENERATED TESTS BLOCK APPEARS, a named FAILURE is a fact: something ran and
+disagreed with the ticket, so fix it. A PASSING generated test is not evidence your
+change is correct — those tests were written from the ticket by a model — so do not
+treat one as a reason to stop. No tests, or tests that were not executed, say nothing
+either way."""
 
 _AWS_KEY = re.compile(r"AKIA[0-9A-Z]{16}")
 
@@ -109,6 +115,44 @@ def _prompt(state: RunState) -> str:
             "REVIEWER REQUESTED CHANGES — you MUST fix all of:\n- "
             + "\n- ".join(state.review.must_fix)
         )
+
+    # THE GENERATED TESTS. Rendered by `reviewer.render_generated_tests`, imported
+    # rather than re-spelled, for the reason `security._AWS_KEY_search` imports this
+    # module's pattern: two renderings of one record drift, and the copy that drifts is
+    # the one nobody re-read. The import is function-local because these two agents are
+    # peers and `server.py` imports all of them -- a module-level import of one agent
+    # into another couples the package's import order to a formatting helper.
+    #
+    # EMPTY ON EVERY RUN THE TWO PIPELINES CURRENTLY PRODUCE: both call `testgen.run`
+    # after the developer/reviewer loop closes, so this agent sees `None`. See
+    # `reviewer._prompt` for the AST measurement and for why the block ships anyway.
+    from .reviewer import _record_retrieval, render_generated_tests
+
+    generated = render_generated_tests(state)
+    if generated:
+        parts.append(generated)
+
+    # RETRIEVED CONTEXT -- why a past attempt at this change was refused, plus this
+    # repository's settled conventions. `guard.CORPORA["developer"]` names both.
+    #
+    # THE QUERY IS THE TICKET PLUS THE REVIEWER'S OBJECTIONS, which is this consumer's
+    # equivalent of the reviewer's diff-plus-ticket: on a revision the objection is the
+    # half that says what went wrong, and on a first pass there is none and the ticket
+    # stands alone. The developer's own previous diff is deliberately NOT in the query --
+    # it is the thing being replaced, and letting a model's earlier guess drive retrieval
+    # is how a wrong guess reinforces itself across revisions. That was measured once as
+    # Go for a Flask app, four revisions all inheriting the first guess.
+    #
+    # Nothing on this path can reach a verdict: `developer` is a drafting consumer, the
+    # security verdict comes from `compute_security_verdict` over scanner findings, and
+    # `_key_is_in_the_change` below reads the DIFF rather than anything retrieved.
+    objections = " ".join(state.review.must_fix) if state.review is not None else ""
+    query = f"{state.ticket_text} {objections}".strip()
+    text, corpora, count = retrieval.context_for("developer", query)
+    if text:
+        parts.append(text)
+    _record_retrieval(state, corpora, count, query)
+
     return "\n\n".join(parts)
 
 
