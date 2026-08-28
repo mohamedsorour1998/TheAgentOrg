@@ -426,3 +426,144 @@ def test_the_security_comment_renders_the_scoring_table(monkeypatch):
         "the model's prose is not last. `explanation` does not set the verdict, so a "
         "reader who stops early must stop on the arithmetic rather than the paragraph"
     )
+
+
+# ── THE FIXTURE PATHS SCORE TOO — a gap found in Phase 2, not Phase 1 ─────────
+#
+# `agents/security.py` has three returns: the real scan, `fixture-fallback` (a scanner
+# raised) and `fixture-stub` (nobody asked for a scan). The first version of the scoring
+# wiring set `scoring=` on the REAL path only, so the two fixture paths kept the
+# fixtures' own `scoring=[]`. MEASURED:
+#
+#     fixture block: verdict=block  blocking=2  findings=3  scoring rows=0
+#     rendered: "_no findings were scored, so there is no arithmetic to show._"
+#
+# A run that blocked a change over three findings told the reader there was no
+# arithmetic -- on the path where a SCANNER HAD FAILED, which is the run whose audit
+# trail matters most. The fixtures predate `SecurityResult.scoring`, and no test caught
+# it: every scoring test builds its own findings, and every fixture test asserts on the
+# verdict.
+#
+# Fixed by moving the scoring into `_with_provenance`, which all three returns now pass
+# through -- the same consolidation, for the same reason, that put provenance there.
+
+@pytest.mark.parametrize("provenance", ["fixture-fallback", "fixture-stub"])
+def test_a_fixture_path_still_records_the_arithmetic(provenance):
+    """A blocked fixture run must show why it blocked, not "nothing was scored".
+
+    Both fixture paths, because they are different facts -- a scanner that RAISED
+    versus a scan nobody asked for -- and CLAUDE.md is explicit that collapsing them
+    hides a broken gate behind a demo setting. Whichever one produced the verdict, the
+    reader gets the arithmetic.
+    """
+    from agentorg import fixtures_loader
+    from agentorg.agents import security
+
+    result = security._with_provenance(
+        fixtures_loader.security(block=True), provenance
+    )
+
+    assert result.verdict == "block", "the fixture's verdict was altered"
+    assert result.findings, "this test needs a fixture WITH findings, or it pins nothing"
+    assert len(result.scoring) == len(result.findings), (
+        f"{provenance} produced {len(result.scoring)} scoring rows for "
+        f"{len(result.findings)} findings; a blocked run cannot show its arithmetic"
+    )
+
+    body = "\n".join(scoring.render_scoring_table(result.scoring))
+    assert "no findings were scored" not in body, (
+        f"a run that blocked {len(result.blocking)} finding(s) told the reader there "
+        f"was no arithmetic to show:\n{body}"
+    )
+    assert result.scan_provenance == provenance, (
+        "scoring the findings overwrote the provenance; those are separate facts and "
+        "the whole verification story rests on the second"
+    )
+
+
+def test_the_rows_agree_with_the_verdict_on_every_path():
+    """The count in the table must equal `blocking`, or the audit trail contradicts it.
+
+    THE FIXTURE CANNOT EXPRESS THE FAILING CASE, AND THAT IS WHY THIS TEST DOES NOT
+    STOP HERE. Measured while writing it: scoring the fixture's findings against
+    `threshold="critical"` instead of the configured `high` flagged the SAME 2 rows,
+    so the obvious mutation was inert and this assertion looked stronger than it is.
+    The reason is the fixture's own data --
+
+        severities: ['critical', 'critical', 'low']
+
+    -- which has nothing between `high` and `critical`, so no threshold in that gap
+    changes the answer. A perfectly sound assertion, over a sample that cannot
+    disagree with it: the pattern CLAUDE.md has now found ten times.
+
+    So the fixture half stays (it is the real shape a fallback run produces) and
+    `test_a_threshold_disagreement_between_rows_and_verdict_is_caught` below supplies
+    findings that CAN separate the two thresholds.
+    """
+    from agentorg import fixtures_loader
+    from agentorg.agents import security
+
+    for block in (True, False):
+        result = security._with_provenance(
+            fixtures_loader.security(block=block), "fixture-fallback"
+        )
+        flagged = [row for row in result.scoring if row.blocking]
+
+        assert len(flagged) == len(result.blocking), (
+            f"block={block}: {len(flagged)} rows say blocking but the verdict lists "
+            f"{len(result.blocking)}. The table and the decision disagree."
+        )
+
+
+def test_a_threshold_disagreement_between_rows_and_verdict_is_caught():
+    """`_with_provenance` must score at the CONFIGURED threshold, not a typed-in one.
+
+    Two attempts at this test were inert before it bit, and both failures are worth
+    more than the assertion:
+
+    1. The fixture-based test above cannot fail. Its severities are
+       `['critical', 'critical', 'low']`, so nothing sits between `high` and
+       `critical` and no threshold in that gap changes the flagged count.
+    2. A version of THIS test that called `scoring.score_findings` directly was also
+       inert -- it verified the library, which is already covered, and never touched
+       the threshold `_with_provenance` passes. The mutation lived in code the test
+       did not execute.
+
+    So it drives `security._with_provenance`, with a finding at `severity="high"`:
+    exactly at the configured cutoff and below `critical`, so scoring at the wrong
+    threshold drops it from the table while the verdict still blocks on it. The result
+    is a rendered table contradicting the decision it claims to explain -- and it
+    would be read as that decision's reasoning.
+    """
+    from agentorg.agents import security
+    from agentorg.state import SecurityResult, compute_security_verdict
+
+    findings = [
+        Finding(tool="gitleaks", severity="critical", rule="aws-access-key-id",
+                file="app/auth.py", line=3, description="key"),
+        Finding(tool="trivy", severity="high", rule="CVE-2024-0001",
+                file="requirements.txt", line=1, description="vulnerable dep"),
+        Finding(tool="semgrep", severity="low", rule="style", file="app/auth.py",
+                line=9, description="nit"),
+    ]
+    verdict, blocking = compute_security_verdict(findings, threshold="high")
+    assert verdict == "block" and len(blocking) == 2, (
+        f"this test needs 2 blocking at threshold 'high', got {len(blocking)}; the "
+        f"sample no longer separates 'high' from 'critical' and would pin nothing"
+    )
+
+    scored = security._with_provenance(
+        SecurityResult(verdict=verdict, findings=findings, blocking=blocking),
+        "scanners",
+    )
+    flagged = sum(row.blocking for row in scored.scoring)
+
+    assert flagged == len(blocking), (
+        f"the table flags {flagged} row(s) and the verdict blocks {len(blocking)}. "
+        f"_with_provenance scored against a different threshold than the verdict "
+        f"used, so the audit trail contradicts the decision it explains."
+    )
+    assert {row.threshold for row in scored.scoring} == {"high"}, (
+        f"rows record threshold {{{', '.join(sorted({r.threshold for r in scored.scoring}))}}}, "
+        f"not the configured 'high' — a reader would audit against the wrong cutoff"
+    )

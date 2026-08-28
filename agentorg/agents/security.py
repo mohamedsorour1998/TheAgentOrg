@@ -198,8 +198,41 @@ def _with_provenance(result: SecurityResult, provenance: ScanProvenance) -> Secu
     This exists because the fixture paths and the scanner path build their
     results in three different places, and provenance that each of them sets by
     hand is provenance one of them will eventually forget to set.
+
+    ── AND THE SCORING ROWS, FOR EXACTLY THE SAME REASON ──
+
+    MEASURED before this was here: `fixtures_loader.security(block=True)` returns
+    `verdict=block`, `blocking=2`, `findings=3` and **`scoring=[]`** -- so a
+    fixture-fallback run blocked a change and told the reader
+
+        _no findings were scored, so there is no arithmetic to show._
+
+    on a run that had three findings. The arithmetic went missing on precisely the
+    path where a scanner had FAILED, which is the run whose audit trail matters
+    most. The fixtures predate `SecurityResult.scoring` and no test caught it: every
+    scoring test builds its own findings, and every fixture test asserts on the
+    verdict.
+
+    Scored HERE rather than in the two fixture branches for the reason the paragraph
+    above gives about provenance: a value each branch sets by hand is a value one
+    branch forgets. `score_findings` is pure -- it reads the findings and the
+    threshold and calls `compute_security_verdict` per finding -- so scoring a
+    fixture's findings states what the block rule did with them. It does not claim a
+    scanner ran; `scan_provenance` is the field that answers that, and it is set on
+    the same line.
+
+    `natives` is not passed: `Finding` does not carry the scanner's own severity
+    word, so every mapped row records NATIVE_UNRECORDED rather than inventing one. A
+    real limit, visible in the rendered table rather than hidden. Closing it means an
+    optional `Finding.native_severity`, which is a contract change and belongs in a
+    batch.
     """
-    return result.model_copy(update={"scan_provenance": provenance})
+    return result.model_copy(update={
+        "scan_provenance": provenance,
+        "scoring": scoring.score_findings(
+            result.findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+        ),
+    })
 
 
 def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
@@ -260,27 +293,19 @@ def run(state: RunState, use_real_scanners: bool = True) -> SecurityResult:
     verdict, blocking = compute_security_verdict(
         findings, threshold=config.SECURITY_BLOCK_THRESHOLD
     )
-    return SecurityResult(
-        verdict=verdict,
-        findings=findings,
-        blocking=blocking,
-        explanation=_explain(verdict, blocking),
-        # THE ARITHMETIC, ONE ROW PER FINDING. Lane C built `score_findings` and
-        # could not call it: this file is not in its ownership row, so until now the
-        # scoring library was correct, tested, and reached by no deployed run.
-        #
-        # Emitted HERE and nowhere else, because this is the single place on the
-        # pipeline path where `compute_security_verdict` runs. A second call site
-        # would be a second answer to "why did this block", and the two would drift.
-        #
-        # `natives` is not passed: `Finding` does not carry the scanner's own
-        # severity word, so every mapped row records NATIVE_UNRECORDED rather than
-        # inventing one. That is a real limit and it is visible in the table rather
-        # than hidden -- closing it means an optional `Finding.native_severity`,
-        # which is a contract change and belongs in a batch.
-        scoring=scoring.score_findings(
-            findings, threshold=config.SECURITY_BLOCK_THRESHOLD
+    # THROUGH `_with_provenance`, like both fixture paths, so the scoring rows have
+    # ONE call site for all three returns. The first version of this set `scoring=`
+    # here and left the fixtures at `[]`, which is how a fixture-fallback block came
+    # to render "no findings were scored" over three findings.
+    #
+    # `scan_provenance="scanners"` is the argument rather than a field: this is the
+    # only path on which `compute_security_verdict` actually ran over a real scan.
+    return _with_provenance(
+        SecurityResult(
+            verdict=verdict,
+            findings=findings,
+            blocking=blocking,
+            explanation=_explain(verdict, blocking),
         ),
-        # The only path on which compute_security_verdict actually ran.
-        scan_provenance="scanners",
+        "scanners",
     )
