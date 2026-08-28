@@ -1,0 +1,424 @@
+# The platform deploy — build the worker image, push to ECR, redeploy the service.
+# LANE N, task N1. OWNER: Lane N.
+#
+# ZERO STATIC AWS KEYS. Every AWS step assumes github-actions-role through GitHub's
+# OIDC provider, exactly as `deploy.yml` and `terraform.yml` do. If a step here
+# cannot authenticate, fix the role trust; do not add an AWS_ACCESS_KEY_ID secret.
+#
+# ── THIS BUILDS THE WORKER AND NOTHING ELSE, AND THAT IS THE POINT ───────────
+#
+# N1 names three things to deploy: the queue worker, the API and the web app. Only
+# the worker is here, and the other two are REFUSED with the measurement rather than
+# left as an oversight. CLAUDE.md's central lesson is that "deployed" and "verified"
+# were separate facts here for most of a week; a workflow that pushed an image which
+# cannot serve traffic would repeat it with a green checkmark.
+#
+#   THE API BINDS LOOPBACK AND CANNOT BE TOLD OTHERWISE. Measured over the AST of
+#   `agentorg/api/server.py`:
+#
+#       serve() defaults: ['host', 'port'] ["'127.0.0.1'", '8100']
+#       main() calls serve() with args=[] kwargs=[]
+#       any env read of a HOST/PORT in api/server.py? []
+#
+#   A container binding 127.0.0.1 inside its own network namespace is reachable by
+#   nothing. So a task definition for it would deploy, report RUNNING, satisfy any
+#   "is the service up" check, and answer no request -- this repository's signature
+#   failure shape. The fix is one keyword argument in Lane K's file. Its key store,
+#   idempotency store and config store are also in-process, so a second task would
+#   share no keys with the first.
+#
+#   THE WEB APP CANNOT BE BUILT WITHOUT FOUR SECRETS AND A POSTGRES. `next build`
+#   refuses without `DATABASE_URL`, `AUTH_SECRET`, `AUTH_GITHUB_ID` and
+#   `AUTH_GITHUB_SECRET` -- Lane I's fail-closed design firing at BUILD time, which
+#   is correct behaviour. Beyond the four, its tenant lookup is currently CIRCULAR
+#   under RLS: `membershipsFor` reads the RLS-scoped `membership` table to find the
+#   tenant RLS needs bound, so `/api/session` answers `signed_in: true` with
+#   `tenant_id: null` and every authenticated route 401s (`web/lib/tenant.ts:126`
+#   records the three options and why two are wrong). Deploying a sign-in flow that
+#   has never completed once, against a database role model nobody has chosen, is
+#   the opposite of what N1 asks for.
+#
+# When those land, this workflow gains a job -- not a comment.
+#
+# ── WHY workflow_dispatch AND NOT push ───────────────────────────────────────
+#
+# `deploy.yml` triggers on a push to main under a paths filter, and that is right for
+# it: it updates five runtimes that already exist. This workflow's apply half REPLACES
+# A RUNNING SERVICE, and the resources it targets are count-gated off by default
+# (`infra/Terraform/modules/platform`), so on most commits there is nothing to
+# redeploy and the run would be noise that reads as coverage. Dispatch also means the
+# person turning the gate on is the person who reads the cost figure.
+
+name: deploy-platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      redeploy_service:
+        description: "After pushing the image, force a new deployment of the ECS worker service. Requires the service to exist."
+        type: boolean
+        default: false
+
+# Two runs pushing the same tag and redeploying the same service concurrently is how
+# a half-updated service happens. Never cancel mid-deploy: a cancelled run can leave
+# an image pushed and a service half-rolled, which is worse than a queued wait. Same
+# ruling as `deploy.yml`.
+concurrency:
+  group: deploy-platform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  # Not secret: readable in the account and printed in plan output. Inline so a
+  # reader can see what this workflow assumes without opening settings.
+  AWS_ROLE: arn:aws:iam::339712964409:role/github-actions-role
+  # The repository `modules/platform` creates. Same literal as that module's
+  # `"${var.name}-worker"`, and `tests/test_platform_deploy.py` asserts the two agree
+  # -- two places holding one name is exactly what drifts silently.
+  ECR_REPO: theagentorg-shared-worker
+  ECS_CLUSTER: theagentorg-shared-platform
+  ECS_SERVICE: theagentorg-shared-worker
+
+jobs:
+  # Credential-free, and it fails the run before any image is built. `deploy.yml`'s
+  # preflight job exists for the same reason and catches the packaging declaration;
+  # this one catches the two facts THIS image depends on.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # THE ENTRYPOINT MUST BE IN THE BUILD CONTEXT, AND THE ROOT .dockerignore
+      # EXCLUDES IT. This is the defect that made a separate worker image necessary:
+      # `.dockerignore` line 51 is `scripts/`, so the agent image's context strips
+      # both `scripts/worker.py` and `scripts/run_stage.py`. Measured by evaluating
+      # the patterns the way the docker client does.
+      #
+      # `infra/worker/Dockerfile.dockerignore` overrides it per docker's documented
+      # precedence, and the Dockerfile asserts the result with `test -f` at build
+      # time. This step is the third layer: it fails in ten seconds with no AWS
+      # credentials and no builder, so a broken pairing does not cost a full build.
+      - name: The paired ignore file must not exclude the worker scripts
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import fnmatch
+          import pathlib
+          import sys
+
+          paired = pathlib.Path("infra/worker/Dockerfile.dockerignore")
+          if not paired.is_file():
+              sys.exit(
+                  "infra/worker/Dockerfile.dockerignore is missing. Without it the "
+                  "root .dockerignore applies, and its 'scripts/' line strips the "
+                  "worker's own entrypoint from the build context."
+              )
+
+          patterns = [
+              line.strip()
+              for line in paired.read_text().splitlines()
+              if line.strip() and not line.startswith("#")
+          ]
+          # ANTI-VACUITY: a file that parsed to zero patterns would satisfy every
+          # assertion below while excluding nothing, which is the same shape as a
+          # matcher that can match nothing.
+          assert patterns, "the paired ignore file parsed to zero patterns"
+
+          required = ["scripts/worker.py", "scripts/run_stage.py"]
+          for candidate in required:
+              hit = [
+                  pattern
+                  for pattern in patterns
+                  if fnmatch.fnmatch(candidate, pattern)
+                  or candidate.startswith(pattern.rstrip("/") + "/")
+              ]
+              if hit:
+                  sys.exit(
+                      f"{candidate} is excluded by {hit} in the paired ignore file. "
+                      f"The worker image would build green and die on a missing file."
+                  )
+
+          # And the control: the file must still exclude what it is meant to. A
+          # paired file that excluded NOTHING would pass the loop above and ship
+          # runs/ (~10k files) and .env into a layer.
+          for must_exclude in ["runs/anything.jsonl", ".env", "tests/test_x.py"]:
+              hit = [
+                  pattern
+                  for pattern in patterns
+                  if fnmatch.fnmatch(must_exclude, pattern)
+                  or must_exclude.startswith(pattern.rstrip("/") + "/")
+              ]
+              if not hit:
+                  sys.exit(
+                      f"{must_exclude} is NOT excluded by the paired ignore file. "
+                      f"It replaces the root one rather than merging with it, so "
+                      f"every exclusion this image wants must be restated there."
+                  )
+
+          print(f"preflight OK: {len(patterns)} patterns, both scripts included, "
+                f"runs/ and .env still excluded")
+          PY
+
+      # The worker's requirements must cover the agents'. Both files are pinned and
+      # they must agree: `scripts/run_stage.py` drives all five agents in-process
+      # whenever REMOTE_AGENTS is false, which is the documented default AND the
+      # demo's fallback. A version bumped in one file and not the other produces a
+      # worker whose agents behave differently from the deployed runtimes'.
+      #
+      # Asserted here as well as in pytest because this is the job that decides
+      # whether to build: a mismatch found by the suite is a red test, and a mismatch
+      # found here costs no build minutes.
+      - name: The worker requirements must cover every agent requirement
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import sys
+
+
+          def pins(path):
+              out = {}
+              for line in pathlib.Path(path).read_text().splitlines():
+                  line = line.split("#", 1)[0].strip()
+                  if not line or "==" not in line:
+                      continue
+                  name, version = line.split("==", 1)
+                  # `psycopg[binary]` -> `psycopg`; the extra is not part of the name
+                  # a version comparison is about.
+                  out[name.split("[", 1)[0].strip().lower()] = version.strip()
+              return out
+
+
+          agents = pins("agentorg/agents/requirements.txt")
+          worker = pins("infra/worker/requirements.txt")
+          assert agents, "parsed zero pins from the agents' requirements"
+          assert worker, "parsed zero pins from the worker's requirements"
+
+          problems = []
+          for name, version in sorted(agents.items()):
+              if name not in worker:
+                  problems.append(f"{name}=={version} is absent from the worker's")
+              elif worker[name] != version:
+                  problems.append(
+                      f"{name}: agents pin {version}, worker pins {worker[name]}"
+                  )
+          if problems:
+              sys.exit(
+                  "the worker's requirements do not cover the agents':\n  "
+                  + "\n  ".join(problems)
+                  + "\nrun_stage.py drives all five agents in-process when "
+                    "REMOTE_AGENTS is false, so the worker needs every agent pin at "
+                    "the same version."
+              )
+          print(f"preflight OK: {len(agents)} agent pins all present at matching "
+                f"versions in the worker's ({len(worker)} total)")
+          PY
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: preflight
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-platform-build-${{ github.run_id }}
+
+      # Proves OIDC worked before anything expensive starts, so an auth failure reads
+      # as one rather than as a docker or ECR error. `deploy.yml`'s ruling.
+      - name: Who am I
+        run: aws sts get-caller-identity
+
+      # THE REPOSITORY MUST ALREADY EXIST, AND THIS SAYS SO RATHER THAN CREATING IT.
+      # `modules/platform` owns that resource. An `aws ecr create-repository` here
+      # would work, and would mean the account holds a registry Terraform does not
+      # know about -- exactly what `infra/README.md` and every module comment refuse:
+      # nothing created by hand in the console, and a workflow is the console with
+      # extra steps.
+      - name: The ECR repository must exist, created by Terraform
+        run: |
+          set -euo pipefail
+          if ! aws ecr describe-repositories \
+                --repository-names "${{ env.ECR_REPO }}" \
+                --query 'repositories[0].repositoryUri' --output text; then
+            echo "::error::${{ env.ECR_REPO }} does not exist. It is created by"
+            echo "::error::infra/Terraform/modules/platform, which is applied by"
+            echo "::error::.github/workflows/terraform.yml. This workflow does NOT"
+            echo "::error::create it: a registry the state does not know about is"
+            echo "::error::the hand-built resource every module comment refuses."
+            exit 1
+          fi
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      # arm64, and the runner is amd64, so this is required rather than optional.
+      # Fargate ARM is the cheaper runtime (USE1-Fargate-ARM-vCPU-Hours $0.03238/hour
+      # against $0.04048 for x86, AWS Pricing API 2026-08-28) and the task definition
+      # in `modules/platform/ecs.tf` pins ARM64 -- a mismatch deploys and then fails
+      # to start with an exec format error reading like a broken entrypoint.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      # TAGGED WITH THE COMMIT SHA AS WELL AS latest, because `latest` cannot tell
+      # you which commit is running -- and `modules/platform`'s `worker_image`
+      # precondition refuses an empty value for the same reason.
+      #
+      # `-f infra/worker/Dockerfile` with context `.` is what makes the paired ignore
+      # file apply: docker looks for `<dockerfile>.dockerignore` beside the Dockerfile
+      # named on the command line.
+      - name: Build and push the worker image
+        run: |
+          set -euo pipefail
+          repo='${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}'
+          docker buildx build \
+            --platform linux/arm64 \
+            --file infra/worker/Dockerfile \
+            --push \
+            --tag "${repo}:${{ github.sha }}" \
+            --tag "${repo}:latest" \
+            .
+
+      # Reads back what ECR actually holds rather than trusting the push, and reads
+      # the ARCHITECTURE too. `deploy.yml` verifies presence; this also verifies the
+      # platform, because an amd64 image pushes and deploys identically and then
+      # fails to start.
+      #
+      # THE ARCHITECTURE IS READ FROM THE MANIFEST, NOT FROM `describe-images`.
+      # That API reports the digest, the media type and the size -- none of which
+      # names a platform for a single-platform image. `docker buildx imagetools
+      # inspect` reads the manifest itself, so the assertion is over the thing that
+      # decides whether the container starts.
+      #
+      # `--output json` throughout: `--output text` appends a literal `None` line,
+      # a trap that cost two failed deploy runs.
+      - name: Verify ECR holds an arm64 image at this commit
+        run: |
+          set -euo pipefail
+          aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-ids imageTag='${{ github.sha }}' \
+            --query 'imageDetails[0].{digest:imageDigest,mediaType:imageManifestMediaType,bytes:imageSizeInBytes}' \
+            --output json
+
+          docker buildx imagetools inspect \
+            "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}" \
+            > /tmp/manifest.txt
+          cat /tmp/manifest.txt
+          if ! grep -q 'linux/arm64' /tmp/manifest.txt; then
+            echo "::error::the pushed image is not linux/arm64. The Fargate task"
+            echo "::error::definition in modules/platform pins ARM64; an amd64"
+            echo "::error::image deploys and then fails to start with an exec"
+            echo "::error::format error that reads like a broken entrypoint."
+            exit 1
+          fi
+
+  # ── THE REDEPLOY, GATED ON AN INPUT AND ON THE SERVICE EXISTING ─────────────
+  #
+  # THE CONDITION IS THE TRUTHINESS FORM, NOT `== 'true'`, AND THAT IS A RECORDED
+  # INCIDENT RATHER THAN A STYLE CHOICE.
+  #
+  # `redeploy_service` is declared `type: boolean`, so on a UI or `gh workflow run`
+  # dispatch `inputs.redeploy_service` is a REAL BOOLEAN in an expression context and
+  # `== 'true'` is always FALSE. A REST dispatch (every `gh api` call, and how
+  # EventBridge triggers `run-pipeline.yml`) sends inputs as JSON STRINGS, and a
+  # non-empty `"false"` string is TRUTHY to GitHub -- so a bare `inputs.x` sends the
+  # false case down the true branch.
+  #
+  # MEASURED on run 32585947588: `run-pipeline.yml`'s revision cap printed
+  # `POISONED: true` beside `MAX_REVISION_LOOPS: 3` -- the clean branch on a poisoned
+  # run -- while three tests read the workflow TEXT and stayed green, one of them
+  # asserting `== 'true'` was PRESENT. That test REQUIRED the bug.
+  #
+  # So the form below is the one that works for both dispatch shapes, and
+  # `tests/test_platform_deploy.py` EVALUATES it across both rather than reading it.
+  # A workflow expression cannot be tested by reading the workflow: the runner's type
+  # coercion is the whole behaviour.
+  redeploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    if: ${{ inputs.redeploy_service && inputs.redeploy_service != 'false' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: deploy-platform-redeploy-${{ github.run_id }}
+
+      # THE SERVICE MAY NOT EXIST, AND THAT IS THE NORMAL CASE. `runtime_enabled`
+      # defaults false in `modules/platform`, so an unconfigured account has a
+      # registry and no cluster. This must fail with that sentence rather than with
+      # an AWS ClusterNotFoundException, which reads as a broken workflow.
+      - name: The ECS service must exist before it can be redeployed
+        run: |
+          set -euo pipefail
+          status="$(aws ecs describe-services \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.ECS_SERVICE }}" \
+            --query 'services[0].status' --output json 2>/dev/null || echo 'null')"
+          echo "service status: ${status}"
+          if [ "$status" != '"ACTIVE"' ]; then
+            echo "::error::${{ env.ECS_SERVICE }} is not ACTIVE in cluster"
+            echo "::error::${{ env.ECS_CLUSTER }}. The most likely reason is the"
+            echo "::error::correct one: modules/platform's runtime_enabled defaults"
+            echo "::error::FALSE, so no cluster, task definition or service exists."
+            echo "::error::That gate is off because the DSN's DATABASE ROLE decides"
+            echo "::error::whether tenant isolation binds -- as the table OWNER an"
+            echo "::error::RLS policy admits every row with no tenant bound. Read"
+            echo "::error::infra/Terraform/modules/platform/variables.tf first."
+            exit 1
+          fi
+
+      # `--force-new-deployment` rather than a task-definition update: the task
+      # definition is Terraform's, and this workflow must not write a revision the
+      # state does not know about. The service's task definition already names a
+      # SHA-tagged image, so a redeploy without a Terraform apply would restart the
+      # SAME image -- which is honest and is why the log below prints which image the
+      # service is actually running rather than assuming it is this commit's.
+      - name: Force a new deployment and report which image it runs
+        run: |
+          set -euo pipefail
+          aws ecs update-service \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --service "${{ env.ECS_SERVICE }}" \
+            --force-new-deployment \
+            --query 'service.{name:serviceName,taskDefinition:taskDefinition}' \
+            --output json
+
+          # WHAT IMAGE IS ACTUALLY RUNNING. Read from the task definition rather than
+          # inferred from this run's SHA: pointing the service at a new image is a
+          # Terraform change (`platform_worker_image`), so a redeploy alone restarts
+          # whatever the state last applied. A workflow that printed
+          # `${{ github.sha }}` here would claim a deploy it did not perform.
+          arn="$(aws ecs describe-services \
+            --cluster "${{ env.ECS_CLUSTER }}" \
+            --services "${{ env.ECS_SERVICE }}" \
+            --query 'services[0].taskDefinition' --output json | tr -d '"')"
+          aws ecs describe-task-definition --task-definition "$arn" \
+            --query 'taskDefinition.containerDefinitions[0].image' --output json
+
+          echo "::notice::This restarted the service on the image its TASK"
+          echo "::notice::DEFINITION names, printed above. If that is not"
+          echo "::notice::${{ github.sha }}, set TF_VAR_platform_worker_image and"
+          echo "::notice::apply through terraform.yml -- a redeploy cannot change"
+          echo "::notice::which image a service runs."
