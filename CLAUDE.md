@@ -861,6 +861,124 @@ row: measured, and the reason
 call itself and asserts on the stage **set** rather than the total, which is identical
 either way.
 
+### `agentorg/integrations/` — GitHub as ONE ADAPTER, not the substrate
+
+Added 2026-08-28 (Lane D), spec §5. `github_ops.py` is 1,132 lines reached from 20
+files and is the **one** module in `agentorg/` with a hard module-level vendor import
+— measured, not asserted: `scripts/measure_dependencies.py` reports `1` of `50`
+modules with a MODULE-LEVEL vendor import and names `github_ops.py` / `github`.
+
+| Thing | What |
+|---|---|
+| `base.CodeHost` | the interface: five methods, four of which **cannot raise** |
+| `github.GitHubHost` | shipped; **delegates** to `github_ops`, function for function |
+| `memory.MemoryHost` | the double — no network, no git, no disk. **Not shipped** |
+| `git.GitHost` | plain git, no vendor at all. **Not shipped** — it exists to prove the interface |
+
+**`github_ops.py` IS NOT REWRITTEN, and that is the design.** It stays where it is
+with every behaviour and all 20 importers intact; the adapter is one call per method,
+asserted **over the AST** so a future edit that inlines any of it fails by name. A
+refactor moving 1,132 lines would have to re-earn every trap in its comments — the
+`os.path.exists`-not-`isdir` worktree guard, `_ISSUE_REF`'s anchors, `local://` only
+after the bytes reach disk — and "no behaviour change" is not a claim a rewrite can
+make honestly.
+
+**The five methods are DERIVED from `graph.py`**, not designed: `post_comment` (114,
+via `_comment`), `report_outcome` (486), `open_pr` (549), `ci_status` (644),
+`merge_pr` (691). `deploy_note` is deliberately **absent** — it reads the Bedrock
+AgentCore control plane, so an interface carrying it would oblige a plain-git adapter
+to answer a question about AWS runtimes.
+
+**An ABC, not a Protocol.** Structural typing means an adapter spelling a method
+`post_commnet` satisfies nothing until stage nine dies on `AttributeError` with the
+state already carrying `status="blocked"`. Measured when a RED step added a sixth
+abstract method: `TypeError: Can't instantiate abstract class GitHubHost without an
+implementation for abstract method 'deploy_note'` — at construction, on all three
+adapters. A Protocol would have accepted all three silently.
+
+**`open_pr` is the ONE method allowed to raise, and wrapping it would be a defect.**
+`_ensure_offline_repo` refuses a repository offline mode did not create, and that
+refusal exists because the `isdir` version was measured committing into a victim's
+checked-out worktree. A wrapper returning a placeholder `DevResult` there proceeds as
+though a branch existed.
+
+**`host()` refuses an unknown name AND a registered-but-unshipped one** — the
+`STATE_BACKEND` / `QUEUE_BACKEND=sqs` rule. "It passes the conformance suite" is not
+"it may open a pull request on somebody's repository". One asymmetry, deliberate and
+pinned: `INTEGRATION_HOST=` **from the environment** is the absent case and gets the
+default, because that is what an unset Actions variable interpolates to, while
+`host("")` **in Python** raises.
+
+#### What the second adapter and the conformance suite actually found
+
+Four defects, and none was visible by reading. This is the argument for D5/D6 in one
+place.
+
+- **An adapter that kept the developer's branch name.** `git left dev.branch as
+  'feat/rate-limit'; open_pr must replace the agent's branch name with the one it
+  actually created`. Not cosmetic: `_destination` routes a comment to the PULL
+  REQUEST whenever `dev.branch` is truthy, and the developer agent fills that field
+  with a branch that has no PR (the fixture's is `feat/login-rate-limit`), so every
+  post-develop comment goes to a lookup that finds nothing while the run stays green.
+  Fixed with `base.branch_for`, one spelling for all three adapters, pinned against
+  `github_ops._short_sha`.
+- **`ci_status` IS the measurement; the field is the WIRE.** Two adapters had been
+  written to read `RunState.ci_status_measured`, which reads as obviously correct and
+  is wrong — `github_ops.ci_status` does not read it. `[github]` failed with `assert
+  'unknown' == 'failing'`. `graph.py:644` / `run_stage.py:705` measure on the runner
+  (which holds a token) and store it; `agents/sre.py:163` is the **one** reader. A
+  double honouring the field passes a test the shipped adapter fails.
+- **The interface could not describe a host with no issues.** The first draft said
+  "issue or pull request", which a bare git remote cannot name. The contract had to
+  become the **ref** — `local://` means the bytes landed somewhere durable — which is
+  why `DELIVERY_SCHEMES` names schemes and the issue/PR split stays in
+  `github_ops._destination`.
+- **A test that PENALISED the port it exists to enable.** `graph.py` was temporarily
+  ported (1 import + 5 call sites) and the suite run: `1 failed, 1565 passed`, and the
+  failure was `graph.py makes no github_ops calls; this test would pin nothing`. The
+  derivation test matched by RECEIVER name, so it broke the moment anyone used the
+  interface. Fixed to match the METHOD name and ignore the receiver, then verified
+  `66 passed` under **both** spellings.
+
+**The `git` adapter's accepted limit, recorded rather than patched:** it merges into
+`main` with no protected branch and no review, so only this pipeline's own three gates
+stand between a diff and `main`. Patching that would mean inventing an approval model
+it does not have.
+
+#### The RED step that came back INERT, and what closed it
+
+Widening `CodeHost._guard`'s `except Exception` to `except BaseException` produced
+**`42 passed` before and `42 passed` after** — identical — with
+`test_offline_mode.py` at `25 passed` both ways. Cause: every conformance test drives
+the handler with an ordinary `RuntimeError`, which both spellings catch, so the one
+BaseException that matters — `pytest.fail`'s `Failed`, which is how conftest guard 2
+keeps the suite off the live GitHub API — never went through the seam at all.
+
+**This interface adds a SECOND blind handler in front of `github_ops`' own**, so it is
+guard 2's history repeating on a new seam, exactly as `repo_snapshot` repeated it. Two
+tests now close it, and the re-run fails both:
+
+```
+E  AssertionError: base.py's handlers catch ['BaseException']. Only `Exception` is allowed
+E  Failed: DID NOT RAISE BaseException
+WARNING agentorg.integrations.base: post_comment raised and the interface absorbed it
+        (Failed: the conftest GitHub guard fired); answering 'comment://absorbed' instead
+```
+
+That WARNING is the defect made visible: the guard protecting 1,500 tests, absorbed
+into a ref.
+
+**Ruff dictated `_guard`'s shape.** The first draft put the `exc_info` traceback in a
+helper: `BLE001` fired four times **plus** `LOG014` (`exc_info=` outside exception
+handlers). BLE001 is satisfied only by a logging call ruff can statically resolve to
+the logging module, carrying the traceback, **inside** the handler — so one shared
+guard is what the rules force, not a style choice.
+
+**`agentorg/integrations/` ships under the existing `include = ["agentorg*"]`** —
+measured by building a wheel into a temp target and reading the tree, because
+`test_packaging.py`'s `REQUIRED_SUBPACKAGES` lists only `agents`/`common`/`security`
+and so cannot answer it.
+
 ### `agentorg/github_ops.py` — GitHub API vs local git
 
 `_use_local()` returns `config.OFFLINE or not (config.GITHUB_TOKEN and
@@ -1402,7 +1520,7 @@ an audit trail.
 
 ## The test suite
 
-**55 test files** as of 2026-08-28, after Phase 1 (`ls tests/test_*.py | wc -l`), plus
+**57 test files** as of 2026-08-28, after Phase 1 plus Lane D (`ls tests/test_*.py | wc -l`), plus
 five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
 as five lanes committed, and three of those figures were written into this file while
@@ -1446,6 +1564,8 @@ not every file.
 | `test_ingress_dispatch_target.py` | connection, API destination, input transformer | 9 |
 | `test_functional_contract.py` | every result matches the frozen schema | 9 |
 | `test_provenance.py` | the discriminator itself — **source of all 3 skips** | 7 |
+| `test_integration_conformance.py` | **THE CONFORMANCE SUITE** — three adapters, one set of test bodies, none naming its adapter | 42 |
+| `test_integration_interface.py` | what `CodeHost` and `host()` REFUSE, plus the delegation claim over the AST | 24 |
 | `test_block_shape_stability.py` | field/type fingerprint stable over 10 runs | 6 |
 | `test_chaos_scanner.py` | broken scanners from OUTSIDE the pipeline | 5 |
 | `test_pipeline_smoke.py` | stubbed pipeline end to end | 3 |
@@ -2479,6 +2599,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/log.py` | The append-only decision log; `runs/<run_id>.jsonl` |
 | `agentorg/timeline.py` | The renderer — text and HTML |
 | `agentorg/github_ops.py` | The GitHub seam, `deploy_note()`, `merge_pr()`, `report_outcome()` |
+| `agentorg/integrations/` | GitHub as ONE ADAPTER behind one interface. `base.CodeHost` is derived from `graph.py`'s five calls; `GitHubHost` **delegates** to `github_ops`; `MemoryHost` is the suite's double and `GitHost` is the not-shipped proof the interface is real |
 | `agentorg/repo_snapshot.py` | The shared repo view every agent reads: clone, TTL, after-diff |
 | `agentorg/gates_cli.py` | `list` and `resume` — the only route to `--decision overridden` |
 | `agentorg/approve_server.py` | A local approval screen; no auth, loopback only |
