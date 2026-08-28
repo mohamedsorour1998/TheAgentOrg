@@ -30,7 +30,32 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-PYTHON="${PYTHON:-.venv-main/bin/python}"
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  # `.venv-main` LIVES IN THE MAIN CHECKOUT AND IN NO WORKTREE. Measured: running
+  # this script from `.claude/worktrees/<lane>` died with
+  # `.venv-main/bin/python: No such file or directory`, because the venv is
+  # gitignored and a linked worktree does not inherit it. That is the same class as
+  # the three divergences CLAUDE.md lists under "A GATE VERIFIED ONLY IN THE MAIN
+  # CHECKOUT IS NOT VERIFIED" -- state on disk but not in the index.
+  #
+  # `git rev-parse --git-common-dir` resolves to the MAIN checkout's `.git` from
+  # inside a worktree (where `--git-dir` gives the per-worktree directory), so its
+  # parent is the shared root. Falls back to the repo root for a plain clone.
+  COMMON_GIT_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "")"
+  if [ -n "$COMMON_GIT_DIR" ] && [ -x "$(dirname "$COMMON_GIT_DIR")/.venv-main/bin/python" ]; then
+    PYTHON="$(dirname "$COMMON_GIT_DIR")/.venv-main/bin/python"
+  else
+    PYTHON=".venv-main/bin/python"
+  fi
+fi
+if [ ! -x "$PYTHON" ]; then
+  echo "REFUSING: no interpreter at $PYTHON" >&2
+  echo "  set PYTHON=/path/to/python. Note .venv-main is gitignored, so it" >&2
+  echo "  exists in the main checkout and in no linked worktree." >&2
+  exit 2
+fi
+
 MODEL="${SELFHOST_MODEL:-qwen2.5-coder:7b}"
 GATEWAY="${LLM_BASE_URL:-http://127.0.0.1:11434/v1}"
 OUT="${SELFHOST_OUT:-runs/selfhost-demo.json}"
