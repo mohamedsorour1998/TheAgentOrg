@@ -221,6 +221,67 @@ if STATE_BACKEND not in STATE_BACKENDS:
         f"disk would leave an operator believing a run is durable when it is not."
     )
 
+# ── ADDED FOR THE FINAL PHASE, in one batch, by the integrator ──────────────────
+#
+# Same reason as the batch in state.py: this file is imported by 36 modules, and four of
+# the fourteen parallel lanes needed a knob here. Landing them together means no lane has
+# to touch this file, and the enumerated ones are VALIDATED AT IMPORT rather than
+# defaulted -- the STATE_BACKEND rule immediately above, for the reason it gives.
+#
+# The booleans parse `== "true"` case-insensitively, like every other boolean in this
+# file, and never `bool(os.environ.get(...))`, which reads the string "false" as True.
+
+# WHERE QUEUED WORK LIVES. `memory` keeps the test suite hermetic -- the whole suite runs
+# with no infrastructure, which is the property that makes it usable as a gate. The
+# durable backend is the deployed default and is chosen deliberately, never inherited.
+QUEUE_BACKEND_MEMORY = "memory"
+QUEUE_BACKEND_SQS = "sqs"
+QUEUE_BACKEND_POSTGRES = "postgres"
+QUEUE_BACKENDS = (QUEUE_BACKEND_MEMORY, QUEUE_BACKEND_SQS, QUEUE_BACKEND_POSTGRES)
+
+QUEUE_BACKEND = os.environ.get("QUEUE_BACKEND", QUEUE_BACKEND_MEMORY).lower()
+if QUEUE_BACKEND not in QUEUE_BACKENDS:
+    raise ValueError(
+        f"QUEUE_BACKEND={QUEUE_BACKEND!r} is not a queue backend; expected one of "
+        f"{', '.join(QUEUE_BACKENDS)}. Refused rather than defaulted to "
+        f"{QUEUE_BACKEND_MEMORY!r} for STATE_BACKEND's reason, one layer over: an "
+        f"in-memory queue loses a paused run when the worker restarts, and a typo that "
+        f"selected it in production would look exactly like a run that vanished."
+    )
+
+# WHETHER TENANT SCOPING IS ENFORCED. `single` is the current deployment, which becomes
+# tenant zero rather than being migrated away. Enumerated rather than boolean because a
+# third mode (shared-with-isolation) is a real possibility and a boolean could not carry
+# it without becoming a lie.
+TENANT_MODE_SINGLE = "single"
+TENANT_MODE_MULTI = "multi"
+TENANT_MODES = (TENANT_MODE_SINGLE, TENANT_MODE_MULTI)
+
+TENANT_MODE = os.environ.get("TENANT_MODE", TENANT_MODE_SINGLE).lower()
+if TENANT_MODE not in TENANT_MODES:
+    raise ValueError(
+        f"TENANT_MODE={TENANT_MODE!r} is not a tenancy mode; expected one of "
+        f"{', '.join(TENANT_MODES)}. Refused rather than defaulted: a typo that "
+        f"silently selected {TENANT_MODE_SINGLE!r} in a multi-tenant deployment would "
+        f"disable tenant scoping, which is the one defect that ends this as a product."
+    )
+
+# RUNNING ON INFRASTRUCTURE THE OPERATOR OWNS. Read by the self-hosted lane to pick a
+# model endpoint and an execution path. It does NOT itself disable anything -- like
+# OFFLINE, it closes one seam rather than implying a mode, and the comment exists because
+# an earlier knob in this file was documented as doing more than it did.
+SELF_HOSTED = os.environ.get("SELF_HOSTED", "false").lower() == "true"
+
+# WHETHER AGENTS MAY RETRIEVE EXTRA CONTEXT. Off by default: retrieval changes what the
+# model reads, and a demo whose behaviour depends on a corpus somebody forgot to load is
+# worse than one without retrieval at all.
+#
+# NOTHING GATED BY THIS FLAG MAY REACH A SECURITY VERDICT, whatever its value. Retrieved
+# text is context for prose and drafting. If it could reach the verdict, a poisoned
+# document would become a way to argue past the threshold -- exactly the attack the
+# deterministic gate exists to prevent.
+RETRIEVAL_ENABLED = os.environ.get("RETRIEVAL_ENABLED", "false").lower() == "true"
+
 # The DynamoDB table holding every run's events and its current state document.
 # One table, one partition per run: PK `run_id`, SK `ts#event_id` for an event
 # row and one reserved sort key for the state document (see log.py). Created by

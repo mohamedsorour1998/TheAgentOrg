@@ -78,7 +78,7 @@ This works because it is already proven: **four optional fields have been added 
 | 0.3 | `state.py` | `CostRecord` model: per-stage input/output/cached tokens, model id |
 | 0.4 | `state.py` | `SecurityResult.scoring: list[ScoreRow]` — the §8 transparency artifact (Lane C) |
 | 0.5 | `state.py` | `ScoreRow` model: tool, native severity, mapped severity, threshold, blocking |
-| 0.6 | `state.py` | `RunState.generated_tests: TestGenResult \| None = None` (Lane G) |
+| 0.6 | `state.py` | `RunState.generated_tests: GeneratedTests \| None = None` (Lane G) |
 | 0.7 | `state.py` | `RunState.retrieval: RetrievalRecord \| None = None` (Lane H) |
 | 0.8 | `config.py` | `QUEUE_BACKEND`, `TENANT_MODE`, `SELF_HOSTED`, `RETRIEVAL_ENABLED` — each validated at import like `STATE_BACKEND` already is |
 | 0.9 | tests | One test per new field asserting it defaults falsy and an old serialised `RunState` still loads |

@@ -58,7 +58,12 @@ def test_shapes_match_the_declared_types():
     # different things depending on whether real scanners ran, and this is the
     # field that tells them apart. See state.ScanProvenance.
     assert set(_shape(state.security)) == {
-        "verdict", "findings", "blocking", "explanation", "scan_provenance",
+        # `scoring` added by the final phase's Phase 0 contract batch -- the per-finding
+        # go/no-go transparency artifact. Listed here because this assertion is a
+        # FINGERPRINT of the contract, deliberately: a field arriving on SecurityResult
+        # without anyone noticing is exactly what it exists to catch, and it did catch
+        # this one. Updating it is the intended workflow; deleting it is not.
+        "verdict", "findings", "blocking", "explanation", "scan_provenance", "scoring",
     }
     assert state.review.verdict in ("approve", "changes_requested")
     assert state.security.verdict in ("pass", "block")
