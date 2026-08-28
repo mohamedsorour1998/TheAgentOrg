@@ -1963,11 +1963,15 @@ scripts/ --include='*.py' | grep -v <its own file> | grep -v tests/`. Empty outp
 the feature does not exist yet, whatever the suite says. Lane I ran exactly that on
 `record_run` and got two lines, both in Lane B's own tests.
 
-### The pattern found THIRTEEN times across four layers
+### The pattern found FOURTEEN times across FIVE layers
 
 > **A test double, a helper, an inference, or a measurement that cannot express the
 > failing case produces confidence that cannot be falsified — and reading it never
 > reveals that.**
+
+The fifth layer, added 2026-08-28, is **a claim about something outside this repository**.
+No test, gate or mutation can reach one, so the only instrument is checking — and the
+fourteenth instance measured that its errors have a **direction**.
 
 The instances, briefly:
 
@@ -2092,6 +2096,39 @@ The instances, briefly:
   perfect.** Both replacements were found by probing four candidates and keeping the two
   where the baseline visibly failed — `must_fix` naming the failure (3/8) and the hostile
   claim reaching the PR (8/8).
+
+- **A COMPETITIVE CLAIM READ OFF ONE DOC PAGE PER PRODUCT** — the fourteenth instance, and
+  the first outside the codebase entirely. Lane L's competitor matrix asserted that GitHub
+  Copilot runs no scanners, that Claude Code has no deterministic rule, and that *"nothing
+  found combines all three"* of multi-agent generation, a non-LLM block and human gates.
+  Commissioned research disproved **five** claims:
+
+  | Written | Actually |
+  |---|---|
+  | Copilot: scanning is *"something you add"* | it runs **CodeQL + secret scanning + Advisory DB**, no extra licence |
+  | Copilot: approval gates *"not described"* | Actions **do not run** on an agent push until a human clicks *Approve and run workflows* |
+  | Claude Code: no deterministic rule | **permission deny rules** are *"enforced by Claude Code, not by the model"* and survive `bypassPermissions` |
+  | *"Nothing found combines all three"* | Factory, OpenHands, GitLab Duo and Jules each have **two** of the three |
+
+  **Four of the five were wrong in the FLATTERING direction**, which is the whole finding:
+  a doc page describes what a vendor chose to put on it, so reading one page per competitor
+  is a measurement whose error has a *direction*. Nothing in this repository could have
+  caught it — there is no test, no gate and no mutation for a claim about somebody else's
+  product.
+
+  The fix has the same shape as every other instance: the claim became **narrower and
+  checkable**. Not "we are the only deterministic one" but a **seam distinction** — every
+  gate found guards a *tool call inside one agent's session*, ours guards a *pipeline stage
+  between agents*. And the strongest row turned out to be one the first draft had not
+  found: **every major vendor's LLM review is advisory, in writing, in their own docs**,
+  with Snyk's platform page arguing this repository's thesis verbatim — *"the generator
+  cannot be the validator."*
+
+  Three shipped products also carry **our own signature defect**: Cursor hooks are
+  *"fail-open by default"* on any exit code but 2, Claude Code's exit 1 does not block and
+  *"a mistyped path silently disables the gate"*, and **Semgrep returns exit code 0 on an
+  internal crash**. That is the outside-world argument for `SCANNERS_REQUIRED` and for
+  `unrunnable_findings` raising rather than returning `[]`.
 
 Three more mutations survived 793 tests, all in the cloud path, every one a case
 where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not its
