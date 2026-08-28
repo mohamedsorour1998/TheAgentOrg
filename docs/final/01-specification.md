@@ -341,7 +341,7 @@ pipeline run in real time, see status and cost.
 
 | Surface | Must show |
 |---|---|
-| **Sign up / sign in** | email + OAuth; sessions; password reset. Nothing exotic — this is table stakes and should consume as little time as possible |
+| **Sign up / sign in** | **Auth.js (NextAuth)**, GitHub OAuth as the primary provider, sessions in Postgres. Decided 2026-08-28 — see below |
 | **Account linking** | connect a GitHub account/installation, choose which repositories are in scope, revoke |
 | **Live run view** | the seven stages, current stage, per-stage output as it arrives, the three gates as *actionable* controls |
 | **Approve / reject in the product** | this is what makes self-hosting possible (§6) and removes the GitHub Environments dependency |
@@ -355,6 +355,36 @@ in front of judges, and should carry into the product. It is also genuinely apt:
 instrument, and it should look like one. The `frontend-design` skill should be used for the
 marketing surface and the empty/error states, where a default template would be most
 visible.
+
+**Auth: Auth.js with GitHub OAuth, not Cognito.** Decided deliberately, and against the
+faster option, because Cognito collides with a requirement this phase is also judged on.
+
+Cognito is the quickest path to working auth on AWS. But requirement 4 asks "self hosted?"
+and §6's answer is a *demonstration* — the stack comes up on the operator's own machine and
+a poisoned ticket still blocks. With Cognito in the auth path that demonstration either
+cannot sign anyone in, or needs a second auth implementation for the self-hosted case: two
+code paths on a security surface, which is worse than either alone. It would also make an
+AWS service **load-bearing** in §5's inventory — added voluntarily, on the one surface
+where we are arguing that nothing has to be.
+
+Auth.js is the better fit for reasons beyond avoiding that:
+
+- **GitHub OAuth is not optional anyway.** The product acts on somebody's repositories, so
+  the grant is required regardless. Making it the primary provider collapses sign-in and
+  §11's "link account" into one flow instead of two.
+- It runs identically under Compose and on AWS — one code path, no parity gap.
+- Sessions live in the Postgres the stack already needs for the queue and tenancy, so it
+  costs no new infrastructure.
+
+**What this defers, stated rather than hidden:** enterprise SSO (SAML), and letting a
+managed service own password storage and MFA compliance. Neither is a final-phase
+requirement; both belong on the roadmap, and §13 is where they are recorded honestly rather
+than discovered by a judge.
+
+**Docker Compose is the self-hosted demo vehicle, not a dev convenience.** `docker compose
+up` brings up the UI, the API, the worker and Postgres, and a poisoned ticket blocks on it.
+That is the answer to requirement 4 — Lane F's F4 owns it, and Phase 0 already made
+`postgres` a valid `QUEUE_BACKEND` so the queue and the app share one database.
 
 **Two engineering constraints that will otherwise be discovered late:**
 

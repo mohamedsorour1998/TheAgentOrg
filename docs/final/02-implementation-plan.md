@@ -302,7 +302,7 @@ OpenAI-compatible gateway, and the scanners already run locally in our own conta
 | F1 | Serve a local model (vLLM or Ollama), point `LLM_BASE_URL` at it, run the pipeline |
 | F2 | Record the parity difference **with numbers** — revision counts, verdicts, wall clock — not adjectives |
 | F3 | Self-hosted execution: Lane A's worker on your own compute. Largely *satisfied by* Lane A rather than built here |
-| F4 | Compose/Helm for the whole stack: worker, queue, database, UI |
+| F4 | Compose for the whole stack — UI, API, worker, Postgres. **The self-hosted demo vehicle, not a dev convenience**: `docker compose up` then a poisoned ticket blocks, with no AWS call. Phase 0 already made `postgres` a valid `QUEUE_BACKEND`, so the queue and the app share one database. Helm only if the calendar allows |
 | F5 | A one-command self-hosted demo, recorded, ending in the same block verdict |
 | F6 | Name the degradations explicitly. If the local model writes worse diffs, show the revision-count delta |
 
@@ -358,7 +358,7 @@ reach the verdict.
 
 | # | Task |
 |---|---|
-| I1 | Auth: email + OAuth, sessions, reset. Table stakes — spend as little time here as possible |
+| I1 | **Auth.js (NextAuth)**, GitHub OAuth as the primary provider, sessions in Postgres. NOT Cognito — spec §11 records why: it would put an AWS service in the one auth path requirement 4 needs to run without AWS, and the GitHub grant is required anyway, so this collapses sign-in and account-linking into one flow |
 | I2 | GitHub account/installation linking, repository scoping, revocation |
 | I3 | Run list and detail endpoints, tenant-scoped through Lane B |
 | I4 | **A real-time transport** — SSE or websockets, sourced from Lane A's queue events. Polling every two seconds is the first thing a judge notices |
