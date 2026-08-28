@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 
 # `agentorg` resolves through PYTHONPATH, which `pipeline.ts` sets to the
@@ -134,8 +135,16 @@ def _awaiting_by_run() -> dict[str, list[str]]:
 
 
 def list_runs(tenant_id: str) -> dict:
-    """Every run this tenant owns, newest first."""
-    connection = engine.connect(_database_path())
+    """Every run this tenant owns, newest first, and whether anything indexes them.
+
+    `indexed: false` with an empty list is NOT the same fact as `indexed: true` with
+    an empty list. See `_database_path`.
+    """
+    path = _database_path()
+    if not path:
+        return {"runs": [], "indexed": False}
+
+    connection = engine.connect(path)
     with engine.acting_as(tenant_id):
         rows = accessors.list_runs(accessors.scope_for(connection, tenant_id))
 
@@ -146,32 +155,40 @@ def list_runs(tenant_id: str) -> dict:
         gates_open = paused.get(row["run_id"], [])
         summary["awaiting_gate"] = gates_open[0] if gates_open else ""
         runs.append(summary)
-    return {"runs": runs}
+    return {"runs": runs, "indexed": True}
 
 
 def _database_path() -> str:
-    """Where the tenancy database lives.
+    """The tenancy database, or "" when there is none.
 
-    THE SAME FILE THE QUEUE USES when `QUEUE_DSN` names one, because the self-hosted
-    stack shares one database between the queue and the application -- "two databases
-    would mean a run could be enqueued and not recorded, or recorded and not
-    enqueued, with no transaction spanning the pair".
+    THE SAME ENV VAR THE WRITER READS -- `TENANT_DB`, matching
+    `agentorg/tenancy/run_index.py:70`. One name, so a deployment that indexes runs
+    and a reader that lists them cannot be pointed at different files. Read at CALL
+    time, never bound at import, for the reason every knob in `config.py` gives.
 
-    `:memory:` is NOT a fallback. An in-memory database would answer every read with
-    an empty list, which reads exactly like a tenant with no runs -- the "did not run
-    versus passed" conflation, one layer down. So an unset path is a refusal.
+    NOT in `config.py`, for the reason the writer states there: that module has 36
+    importers and this is one optional path's location.
+
+    A BLANK IS A LEGITIMATE STATE, NOT AN ERROR, and this is the correction the
+    integrator flagged. `run_index.record_run` is a **no-op** when `TENANT_DB` is
+    unset, so the single-tenant deployment writes no rows at all -- and a reader that
+    raised there would turn the normal single-tenant configuration into a 500 on
+    every screen.
+
+    So the reader distinguishes three states rather than two, because they want
+    different fixes and a reader that conflated them would be the "did not run versus
+    passed" defect:
+
+        TENANT_DB unset        -> `indexed: false`, an EMPTY list. Nothing indexes
+                                  runs here; a UI says so rather than showing zero.
+        TENANT_DB set, no rows -> `indexed: true`, an empty list. This tenant has
+                                  genuinely had no runs.
+        TENANT_DB set, rows    -> `indexed: true`, the rows.
+
+    An empty list ALONE cannot tell the first two apart, which is why `indexed`
+    travels beside it.
     """
-    import os
-
-    path = os.environ.get("AGENTORG_DB_PATH", "")
-    if not path:
-        raise RuntimeError(
-            "AGENTORG_DB_PATH is not set, so there is no tenancy database to read. "
-            "Refused rather than defaulting to ':memory:', which would answer every "
-            "read with an empty list -- indistinguishable from a tenant that has no "
-            "runs, and the reader would look healthy while showing nothing."
-        )
-    return path
+    return os.environ.get("TENANT_DB", "").strip()
 
 
 def main() -> int:

@@ -292,7 +292,22 @@ export const ENDPOINTS: readonly Endpoint[] = [
 ] as const;
 
 /** Response type per endpoint, for Lane J's fetch wrappers. */
-export type RunListResponse = { runs: RunSummary[] };
+/**
+ * The run list.
+ *
+ * `indexed` IS NOT DECORATION, and it is the difference between two facts an empty
+ * `runs` array cannot tell apart:
+ *
+ *   `indexed: false` — nothing indexes runs in this deployment (`TENANT_DB` is
+ *                      unset, so `run_index.record_run` is a no-op by design). A
+ *                      screen must SAY so rather than showing "no runs yet".
+ *   `indexed: true`  — runs are indexed and this tenant has had none.
+ *
+ * Lane J: render these differently. An empty list presented as "no runs yet" when
+ * nothing is recording them is the "did not run versus passed" conflation this
+ * repository exists to prevent, on a screen.
+ */
+export type RunListResponse = { runs: RunSummary[]; indexed: boolean };
 export type RunDetailResponse = RunDetail;
 export type RepositoryListResponse = { repositories: RepositoryView[] };
 
