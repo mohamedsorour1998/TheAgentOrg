@@ -507,6 +507,94 @@ failures to `None` too. That single signal is why four agents need no `try/excep
 
 `_complete` is the substitution seam the suite replaces.
 
+**It also records what each call CONSUMED, and that is new as of 2026-08-28.** Before
+it there was no cost tracking at all — `str(agent(...))` discarded `result.metrics` on
+the one line in the repository that holds an `AgentResult` — so "what did that run
+cost" had no answer, and two judge requirements hung on it.
+
+The recorder mirrors `_LAST_SOURCE`: module state, reset by the caller, read through
+`llm.usage()`. **Deliberately not a widened `_complete` return type** — conftest guard
+1 replaces `_complete`, and dozens of tests hand back a bare string, so a new return
+shape would break every one of them. That is this repo's named pattern (a double that
+cannot express the new shape), arriving one layer up.
+
+Four things worth knowing before touching it:
+
+- **`accumulated_usage` is a dict with CAMELCASE keys**, not an object with
+  attributes. strands declares it as a TypedDict carrying Bedrock's own key names
+  (`strands/types/event_loop.py`, verified against strands-agents 1.52.0). Read with
+  `.get`, never subscripted.
+- **`cacheReadInputTokens` is OPTIONAL and its absence is a fact.** The TypedDict is
+  `total=False`, strands' accumulator only creates the key `if
+  "cacheReadInputTokens" in source`, and the OpenAI path sets it behind `if cached
+  := ...` — so a real zero is omitted there too. Hence `Usage.cached_reported`
+  records **presence**, not truthiness: `cached_reported=False` means the provider
+  said nothing, `cached_tokens=0` means it said zero. Collapsing them makes an
+  unmeasured cache read as a measured miss.
+- **A fixture fallback records a ZERO ROW, not nothing** — stamped inside
+  `record_fixture_fallback`, the one call every agent's fallback branch already
+  makes. Same requirement as `scan_provenance`: a stage that fell back must not be
+  indistinguishable from a stage nobody measured.
+- **Usage crosses the remote seam on the 200 envelope**, exactly as `source` does —
+  `usage_payload()` / `absorb_usage_payload()`. **The two wiring lines are still
+  pending an owner**, because `agents/server.py` and `common/agent_client.py` are not
+  Lane E's files. Until they land, a `REMOTE_AGENTS=true` run records no usage on the
+  runner. `absorb_usage_payload` never raises and records **nothing** for an absent
+  payload rather than a zero row.
+
+### `agentorg/cost/` — what a run cost
+
+Three modules split by what can be wrong with each: `prices.py` (wrong when stale),
+`record.py` (wrong when it guesses), `report.py` (wrong when it flatters).
+
+**`CostRecord.usd` is `float | None` and the distinction is load-bearing**: `None`
+means not priced — an unknown model, or a table nobody updated — while `0.0` means
+priced and free. `total_usd` returns None only when NOTHING could be priced, and
+otherwise **understates** by skipping unpriced rows, with `report.render` naming how
+many stages were priced so a partial total is never read as complete.
+
+**Every price row carries the date it was read**, per model, plus the command that
+produced it. Measured 2026-08-28 from the **AWS Pricing API**, not a web page:
+
+```
+aws pricing get-products --service-code AmazonBedrock --region us-east-1 \
+  --filters "Type=TERM_MATCH,Field=model,Value=Nova 2.0 Lite" \
+            "Type=TERM_MATCH,Field=regionCode,Value=us-east-1" \
+            "Type=TERM_MATCH,Field=feature,Value=On-demand Inference"
+
+Nova 2.0 Lite  Input tokens                     0.00033   /1K = $0.33   /1M
+Nova 2.0 Lite  Output tokens                    0.00275   /1K = $2.75   /1M
+Nova 2.0 Lite  Prompt cache read input tokens   0.0000825 /1K = $0.0825 /1M
+```
+
+**Two traps the query itself exposed:**
+
+- **The catalogue's name for our model is `Nova 2.0 Lite`, not `Nova 2 Lite`.** A
+  query for the latter returns zero rows and **exits 0**, which reads exactly like a
+  model with no pricing. `aws pricing get-attribute-values --attribute-name model`
+  lists the real names.
+- **`Nova Lite` and `Nova 2.0 Lite` are different models at 5.5x and 11x the price.**
+  Reading the old row for the new model understates output by an order of magnitude.
+  Both are in the table so the mistake is visible; a test asserts they differ.
+
+Flex and priority tiers are deliberately **absent** — the same query returns them at
+0.5x and 1.75x, and this pipeline selects neither, so pricing a run at the flex rate
+would halve every reported figure.
+
+**THE CACHE HIT RATE IS ZERO, MEASURED.** Nothing in `agentorg/` sets a Bedrock cache
+point, so Nova reports no `cacheReadInputTokens` at all — meaning all five agents pay
+full price for the repository snapshot they re-send on every call, which is the
+largest silent cost in the design. `report.render` states that in words rather than
+leaving a reader to infer it from `0.0%`, because nobody reads a percentage as an
+alarm. `cache_hit_rate` returns `None` for a zero denominator, never `0.0`.
+
+**Per-stage attribution needs one line per stage in `graph.py` / `run_stage.py`** —
+the integrator's files. Without it every model call in a run lands in a single `plan`
+row: measured, and the reason
+`test_a_run_through_the_real_pipeline_records_a_cost_for_every_stage` installs that
+call itself and asserts on the stage **set** rather than the total, which is identical
+either way.
+
 ### `agentorg/github_ops.py` — GitHub API vs local git
 
 `_use_local()` returns `config.OFFLINE or not (config.GITHUB_TOKEN and
@@ -1990,7 +2078,8 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/fixtures_loader.py` | Resolves `fixtures/` from the **repo root** |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
-| `agentorg/common/llm.py` | Bedrock, with the fixture fallback |
+| `agentorg/common/llm.py` | Bedrock, with the fixture fallback — and the token/usage recorder |
+| `agentorg/cost/` | The price table, a run's `CostRecord`, and the cache finding |
 | `agentorg/common/diff.py` | What a diff PROPOSES — added lines only |
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile` |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
