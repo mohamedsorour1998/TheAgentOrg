@@ -160,8 +160,35 @@ in are we?
 
 - **A dependency inventory** distinguishing three severities: *substitutable* (a scanner —
   swap the binary), *seam-bound* (GitHub — one adapter behind one interface), and
-  *load-bearing* (the model provider). Measured at baseline: 33 references to `bedrock`,
-  13 to `amazonaws`, 5 to `github.com`, 1 to `openai`.
+  *load-bearing* (the model provider).
+
+  **The baseline, remeasured at `83fc52c`.** An earlier draft of this section quoted "33
+  references to `bedrock`, 13 to `amazonaws`, 5 to `github.com`, 1 to `openai`", and
+  **none of those four numbers reproduces under any scope** — `agentorg/` alone gives 32 /
+  0 / 4 / 7, and widening to `scripts/` and `infra/` gives 101 / 17 / 96 / 7. A grep count
+  of a vendor's name is the wrong instrument anyway: it counts prose in comments, and this
+  repository is 40% commentary, so the number measures how much we *wrote about* a
+  dependency rather than how coupled we are to it.
+
+  The instrument that answers the judge's question is **which modules import a vendor
+  SDK**, and whether the import is module-level (hard) or function-local (deferred):
+
+  ```
+  modules touching a vendor SDK      : 4 of 31
+  with a MODULE-LEVEL vendor import  : 1     <- github_ops.py:41, PyGithub
+  deferred-only (import inside a fn) : 3     <- agent_client, llm, log
+  ```
+
+  Measured over the AST, not by grep, because a grep cannot tell a module-level import
+  from one inside a function and that distinction is the whole point. Note `ast.walk` on a
+  top-level statement descends into function bodies — the first version of this
+  measurement reported all four as module-level for exactly that reason.
+
+  **One hard vendor import in thirty-one modules** is the honest headline, and it is
+  stronger than the number it replaces. It also independently confirms a fact CLAUDE.md
+  records from a different direction: `github_ops.py:41` is module-level and unconditional,
+  which is why the container image dies at import if `PyGithub` is missing from
+  `requirements.txt`.
 - **A named blast radius per dependency**: what stops working, what degrades, what is
   unaffected. This project already knows how to answer this well for scanners — absent
   versus broken, with different answers. Extend that discipline outward.
