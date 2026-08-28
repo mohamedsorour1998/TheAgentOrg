@@ -1069,7 +1069,7 @@ an audit trail.
 
 ## The test suite
 
-**41 test files** as of 2026-08-23 (`ls tests/test_*.py | wc -l`), plus five
+**46 test files** as of 2026-08-28 (`ls tests/test_*.py | wc -l`), plus five
 non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. The per-file counts below were measured with
 `--collect-only`; the table lists the largest and the ones whose subject matters,
@@ -1084,6 +1084,10 @@ not every file.
 | `test_ingress_handler.py` | the webhook Lambda — HMAC first, EventBridge second | 49 |
 | `test_agentcore_deploy_assets.py` | requirements / Dockerfile, unexerciseable locally | 49 |
 | `test_agent_client.py` | the remote seam | 43 |
+| `test_tenancy_leak.py` | **THE LEAK SUITE** — attempts a cross-tenant breach on every registered accessor | 52 |
+| `test_tenancy.py` | the tenancy schema, the engine, the migrations | 33 |
+| `test_tenancy_secrets.py` | per-tenant secret crypto; greps the module's own logs for the plaintext | 29 |
+| `test_tenancy_budgets.py` | budgets fail closed; tenant zero loses nothing | 22 |
 | `test_state_backend.py` | the dynamodb backend, hostile `run_id` refusal | 33 |
 | `test_timeline.py` | the run timeline, HTML escaping, delivery refs | 32 |
 | `test_packaging.py` | what a NON-editable install actually ships | 31 |
@@ -1280,6 +1284,17 @@ where `run_stage.py` inherited `graph.py`'s **comment** about a hazard but not i
 **test**: `return EXIT_BLOCKED → EXIT_OK` (with which the poisoned run reaches
 `status='promoted'`), `artifact_ref=ref → "comment://"`, and the flush loop
 re-reading `state.dev`.
+
+**One tenancy mutation survived, and it is a REDUNDANT layer rather than an untested
+one** — recorded because the distinction is the whole point of running the mutation.
+Removing the second `AND "tenant_id" = ?` from `add_spend`'s UPDATE left all 52 leak
+tests green. Probed directly rather than assumed: `_require` runs first and its own
+predicate is satisfiable only when the named tenant equals the scope, so by the time
+the UPDATE runs the two placeholders are necessarily the same string —
+`add_spend(scope_t1, "t2", 500)` raises `CrossTenantAccess` with `t2`'s
+`spent_cents` still 0. So that clause is a third layer behind `_require` and the
+trigger, not a gap. **A surviving mutation means "find out why" and not "add a
+test".**
 
 **A check that cannot distinguish "did not run" from "passed" is the defect this
 whole project exists to prevent.** Same for "denied" versus "not ready yet".
@@ -2031,6 +2046,51 @@ The dispatch token **lands in S3 Terraform state** — unavoidable with an API_K
 connection, since the provider takes the value through configuration. Scope it to
 these two repositories and **rotate it after the demo**.
 
+### Tenancy (Lane B) — where isolation is enforced, and where it is not
+
+`agentorg/tenancy/ADR-001-database.md` is the long form. The four facts a future
+session would otherwise re-derive:
+
+- **Writes are refused by the DATABASE on both dialects; reads only on Postgres.**
+  SQLite has no mechanism that constrains a `SELECT` against a base table — no RLS,
+  and a trigger cannot fire on a read. So on the tested path a read is only as
+  scoped as its accessor's `WHERE tenant_id = ?`. Measured: removing that one
+  predicate from `accessors._require` fails **13 named tests**. The Postgres RLS is
+  real emitted DDL asserted structurally, but **nothing in the suite connects to
+  Postgres** — same distinction as a green `terraform apply` versus
+  `simulate-principal-policy`.
+- **`IS NOT`, never `!=`, in every SQLite trigger.** SQL's three-valued logic makes
+  `'t2' != NULL` evaluate to NULL, which does not fire a `WHEN` — so a `!=` guard is
+  absent **exactly when no tenant is bound**, the case it most needs to catch. Both
+  spellings refuse an ordinary mismatch, so the bug survives any hand test. Mutating
+  one operator fails `test_the_sqlite_guards_use_IS_NOT_and_never_bare_inequality`
+  **and** the executed `test_with_no_tenant_bound_every_scoped_write_is_refused`.
+- **A trigger's `RAISE(ABORT, ...)` surfaces as `sqlite3.IntegrityError`, not
+  `OperationalError`** — measured. So a `try/except OperationalError` around a
+  scoped write would look like handling a refusal and catch nothing; catching
+  `IntegrityError` and returning quietly would turn a refused breach into a silent
+  no-op read as success. `accessors._write` deliberately catches neither.
+- **`dict(sqlite3.Row)` silently collapses duplicate column names**, keeping the
+  first of each pair, nothing raised. `membership JOIN app_user` shares `id` and
+  `created_at`, so an unaliased `SELECT *` returns 7 keys as a 5-key dict with the
+  user's `id` simply gone — and the result still looks like a member. That is why
+  `list_members` names its columns.
+
+Two directions that pass a casual reading either way round, both pinned: a tenant
+with **no budget row is REFUSED**, not admitted (absent must not read as unlimited,
+the same trap as a blank `ci_status_measured` read as `unknown`); and
+`RunState.tenant_id == ""` is **TRANSLATED** to tenant zero, never rewritten —
+`state.py` is frozen and every run on disk carries the blank.
+
+**The secret cipher is stdlib and is NOT AES-GCM.** `cryptography` is absent from
+the declared dependency closure — PyJWT requires it only under an extra and CI
+installs `.[dev]` — so an import would work locally and fail in CI. It is
+encrypt-then-MAC over an HMAC-SHA256 keystream with per-record random nonce and
+scrypt subkeys: the right shape, without a reviewed constant-time primitive. Every
+row records **which cipher wrote it**, the way `scan_provenance` records scanner
+mode, so a KMS migration is visible in the data. Binding it to KMS is a stated
+further step, not a done one.
+
 `agentorg/approve_server.py` has **no authentication** and binds `127.0.0.1` only.
 It resumes a paused pipeline past a human gate, including the security gate. Three
 things stand in for the auth that does not exist, and none is a substitute:
@@ -2057,6 +2117,8 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/gates_cli.py` | `list` and `resume` — the only route to `--decision overridden` |
 | `agentorg/approve_server.py` | A local approval screen; no auth, loopback only |
 | `agentorg/fixtures_loader.py` | Resolves `fixtures/` from the **repo root** |
+| `agentorg/db/` | The tenancy schema as DATA (one definition, two dialects), the connection + tenant binding, forward-only migrations |
+| `agentorg/tenancy/` | Scoped accessors, per-tenant secret crypto, budgets, tenant zero, and `ADR-001-database.md` |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
 | `agentorg/common/llm.py` | Bedrock, with the fixture fallback |
