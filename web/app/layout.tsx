@@ -13,6 +13,8 @@
 
 import type { Metadata } from "next";
 
+import { Shell } from "@/components/Shell";
+
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -22,12 +24,26 @@ export const metadata: Metadata = {
     "security rule decides whether it ships.",
 };
 
+/**
+ * LANE J EXTENDS BELOW. Nothing structural above is changed -- the `lang`
+ * attribute, the metadata and the stylesheet import are Lane I's and stay as
+ * they are. The only addition is the shell around `children`, which is the
+ * header, navigation and footer every screen shares.
+ *
+ * `colorScheme: "dark"` is on the html element rather than in CSS because it
+ * changes what the BROWSER draws, not what this app draws: scrollbars, the
+ * caret, and the default styling of a form control before any rule applies. On
+ * a dark surface without it a native `<select>` renders as a light rectangle,
+ * and the browser's own scrollbar stays white down the side of the page.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" style={{ colorScheme: "dark" }}>
+      <body>
+        <Shell>{children}</Shell>
+      </body>
     </html>
   );
 }

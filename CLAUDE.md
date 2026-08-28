@@ -60,22 +60,27 @@ actionlint .github/workflows/*.yml                            # exit 0
 cd infra/Terraform && terraform fmt -check -recursive          # exit 0
 ```
 
-**If you touched `web/`, there are FOUR MORE GATES and none of the four above sees
-them** — the Python suite does not compile TypeScript:
+**If you touched `web/`, there are FOUR MORE GATES and the four above see NOTHING of
+them** — `pytest` never loads the app and `ruff` never reads TypeScript:
 
 ```bash
 cd web
-npm run lint        # eslint, exit 0
+npm run lint        # eslint, 0 problems
 npm run typecheck   # tsc --noEmit, exit 0
-npm test            # vitest run
+npm test            # vitest run — READ THE FILE COUNT, not just the test count
 npm run build       # next build — 0 warnings, and the ONLY gate that compiles the app
 ```
 
-`npm run build` is not redundant with the other three. Measured 2026-08-28: `tsc`,
-`eslint` and `vitest` all read the WORKING TREE and none compiles the app, so a
-dynamic `spawn` path that made Turbopack trace the **whole repository** (including
-`runs/`, ~10k files) into the server bundle passed all three. The build is also the
-only gate that would notice a route file absent from the commit.
+**`npm run build` is not redundant with the other three, and both web lanes proved it
+separately.** Measured 2026-08-28: `tsc`, `eslint` and `vitest` all read the WORKING
+TREE and none of them compiles the app. So a dynamic `spawn` that made Turbopack trace
+the **whole repository** — including `runs/`, ~10k files — into the server bundle passed
+all three. The build is also the only gate that would notice a route file **absent from
+the commit**, which is exactly what the unanchored `runs/` gitignore caused.
+
+A fourth defect passed all four: `/` answering **404**, caught only by serving the app
+and reading the response. `next start` then `curl -i` is worth the thirty seconds before
+a demo.
 
 **If you touched `scripts/make_deck.py`, also regenerate the deck** — none of the four
 gates opens it, so a broken slide passes all of them:
@@ -2376,6 +2381,22 @@ regression — see the note at the top of this file.
 rewriting all three scanner wrappers AND Lane D moving every GitHub call behind an
 interface. **64 test files.**
 
+**That `1714 / 3` is a MAIN-CHECKOUT figure, and a worktree reads `1713 / 4`** — the
+same tests, one of them skipping. Measured 2026-08-28 at `d503e04` in a **pristine
+worktree** built for the purpose, then again in the lane's own worktree:
+
+```
+d503e04, pristine worktree      1713 passed, 4 skipped in 177.53s
+d503e04 + Lane J's web/ commits 1713 passed, 4 skipped in 181.91s
+```
+
+Identical, and Lane J touches **zero** Python files. So the difference is the
+gitignored `terraform.tfvars` skip already documented at the top of this file, not a
+regression — but a lane told to expect `1714 / 3` in a worktree will hunt for a
+missing test that was never there. **Quote the figure with the checkout it was taken
+in**, and reproduce in a pristine worktree at the same commit before believing a lane
+broke something.
+
 `1131 → 1502` is **371 tests** added by five lanes: queue (A), tenancy (B), scoring (C),
 cost (E) and evidence (L). The suite is 2.5 minutes and still needs no infrastructure —
 that is what keeps it usable as a gate, and it is why Lane A's in-process queue backend
@@ -3139,6 +3160,171 @@ for `tests/test_approve_server.py:266-289`'s reason.
   load-bearing: without it a person's tenant could change between requests. One tenant
   per session today; a switcher is a further step.
 
+### The web product (Lanes I + J) — `web/`
+
+A Next.js 16 app, separate from `agentorg/` and importing none of it. Lane I owns
+`web/app/api/**` and `web/lib/**`; Lane J owns `web/app/(routes)/**` and
+`web/components/**`. Seven routes: `/` (redirect), `/signin`, `/runs`,
+`/runs/[runId]`, `/repositories`, `/costs`, `/account`.
+
+**Its gates are not this repository's four**, and `pytest` says nothing about it:
+
+```bash
+cd web && npx tsc --noEmit    # exit 0
+npm run lint                   # eslint, 0 problems
+npx vitest run                 # 3 files, 31 passed
+npx next build                 # 7 routes — THE ONLY GATE THAT CATCHES SOME DEFECTS
+```
+
+**`next build` is not redundant with the other three.** Two defects passed tsc and
+eslint and were caught only by building: `tsconfig.json` shipped `jsx: "preserve"`,
+which the build reports as a MANDATORY change to `react-jsx` (Next 16 uses the React
+automatic runtime) — and that stale value is why any vitest file importing a `.tsx`
+module failed to parse. Serving it caught a third: `/` was a 404, because nobody had
+written `app/page.tsx`.
+
+#### THE FAILURE THAT READS AS FULL MARKS — vitest's file count, not its test count
+
+Hit **twice in one session**, from two unrelated causes (a JSX parse failure, then an
+orphaned `describe` after a bad edit). Both printed:
+
+```
+Test Files  1 failed | 1 passed (2)
+Tests      15 passed (15)
+```
+
+Every test green with an entire file never executed. **`Tests` counts what ran, so it
+cannot report what did not.** Read `Test Files`. This is `pytest -k` misspelled one
+level up — same class as `1172 deselected` exiting 0.
+
+#### An INERT RED step, and the helper that caused it
+
+`components/__tests__/refusals.test.ts` asserts over comment-stripped source, because
+this repo has twice found a test satisfied by the comment explaining the thing it
+checks. `stripComments` also blanks string **bodies** — correct for that purpose, and
+it made a RED step inert: reintroducing `"var(--border)"` as a text colour left `31
+passed` unchanged, because the token became `""` before the assertion ran. **The
+helper protecting the tests from their own commentary erased the evidence.** A CSS
+custom property only ever appears inside a string, so that one assertion reads a
+string-preserving form and asserts a token is present before forbidding a specific
+one.
+
+#### A border token doing text duty — measured
+
+The worst rendering defect found, in `StageSpine.tsx`. One table coloured both the
+stage mark and the stage word, so two phases drew text in border tokens:
+
+```
+pending  --border-strong #2c3a4f   1.67:1
+never    --border        #1f2937   1.31:1
+--text-muted             #8b97ab   6.50:1   (AA needs 4.5)
+```
+
+On a **poisoned** run every stage after the block rendered `did not run` at 1.31:1 —
+the words that exist so the spine does not read as blank were the ones nobody could
+read, on the demo's central beat. Now `PHASE_COLOUR` (the ring) and `PHASE_TEXT` (the
+word) are separate tables and a test forbids a border token in the second. **A hairline
+token and a text token are not interchangeable.**
+
+Accepted and unchanged: `.btn`'s border is 1.52:1 against its own fill, below WCAG
+1.4.11's 3:1 for control boundaries. Deliberate hairline aesthetic; it will read as
+plain text on a dim projector.
+
+#### `runs/` IS GITIGNORED AND IT SWALLOWED A ROUTE
+
+`.gitignore:27` is `runs/` — **unanchored**, so it matches a directory named `runs` at
+any depth, not only the ~10k-file run-log directory. `web/app/(routes)/runs/` was
+therefore ignored, and **`git add web/` reports success while adding nothing from it**:
+
+```
+git check-ignore -v "web/app/(routes)/runs/page.tsx"
+.gitignore:27:runs/   web/app/(routes)/runs/page.tsx
+```
+
+Two screens would have been missing from the commit with the working tree looking
+complete and every gate green — the signature failure shape, in git. Fixed by
+`web/app/(routes)/.gitignore` containing `!runs/`, deliberately **not** by anchoring
+the root rule to `/runs/`: that widens what the root ignores for every other lane.
+
+#### Three distinctions the UI must never collapse
+
+All three live in `web/components/vocabulary.ts`, one declaration each, pinned by
+`components/__tests__/vocabulary.test.ts`. **A screen must import them, never restate
+them** — measured across five parallel authors, `"fixture-fallback"` appears only in
+that module and its test, and there are **zero hardcoded hex colours** in nine
+components.
+
+| Distinction | Wrong answer looks like |
+|---|---|
+| `fixture-fallback` (a FAULT) vs `fixture-stub` (a CHOICE) | a broken gate hidden behind a demo setting |
+| `scan_provenance: ""` (unknown) vs `scanners` | an unmeasured run reading as measured |
+| `usd: null` (not priced) vs `0.0` (priced, free) | a missing price table reading as a free run |
+
+Each differs by **form as well as tone** — border style and strike-through — so they
+survive greyscale and a dim projector. And "is cost wired?" reads `stages_priced`,
+never `usd`: Lane E measured that an unwired run has zero rows with `usd: null` while
+a container that fell back has a row per stage with `usd: 0.0`.
+
+#### What the gate controls structurally cannot send
+
+`ApprovalRequest` carries `run_id`, `gate`, `decision` and an optional `reason` — and
+nothing else. No `by` (the server takes it from the session; a client-supplied one
+attributes an approval to somebody else), no `tenant_id`, and no `overridden`, which
+the route refuses with 422. `overridden` is still **rendered**, because `gates_cli`
+writes it and a screen showing a real override as a corrupt record is worse.
+
+Verified twice over: `tests` in `refusals.test.ts` assert it over the request body
+literal, **and** `tsc` refuses it — `error TS2353: 'by' does not exist in type
+'ApprovalRequest'`. Lane I's contract type is a live guard, not documentation.
+
+One test in that file had to be **narrowed after it failed**: `/\bby\s*:/` matched
+`by: string` in `DecisionLog`'s props type, which READS a `by` the server wrote.
+Reading it is how a screen shows who approved. Left as written, going green would have
+meant deleting the display of an attribution — a test making the product worse to
+satisfy itself.
+
+#### `Finding.line` on a screen
+
+It is the index of an **added line**, not a file position. The column is headed `Added
+line #`, there is no jump-to-line affordance anywhere (asserted: zero `href=` in
+`SecurityPanel.tsx`), and the disclaimer under the table is set at 13px rather than
+11px — it was the smallest muted type in the app, and it is the one sentence stopping
+a reader taking `app/auth.py:3` for a file position.
+
+#### The live run view, and what it shows while nothing happens
+
+Most of a run's wall clock is a pause: a stage takes tens of seconds, a gate waits for
+a person indefinitely. So the panel shows **when the stream was last heard from**, not
+a spinner — silence with a fresh heartbeat means waiting, silence with a stale one
+means something is wrong, and a spinner says neither. Heartbeat frames update that
+time and stay out of the event list.
+
+**The stream drives WHEN to re-read, never WHAT to display.** A frame says `security ->
+done` and carries no verdict, so rendering from frames alone leaves the security panel
+empty on exactly the run the screen exists for.
+
+**Next 16's `react-hooks/set-state-in-effect` refuses a loader called from an effect
+body**, and it bit three components independently. It cannot see through
+`useCallback`, so `void load()` is refused even when `load` opens with an await. Two
+honest fixes: await inside an async IIFE so every `setState` crosses a microtask
+boundary, or delete the synchronous reset and let the caller pass `key={id}` — a reset
+in an effect still renders the previous run's figures for one frame.
+
+#### Known gaps, named
+
+- **Cost per repository does not exist.** `RunSummary` carries `ticket_id` and no
+  repository, so `/costs` renders that dimension as a stated gap. Grouping by ticket
+  id and labelling it "repository" would answer the question wrongly with total
+  confidence.
+- **No component RENDERS in a test.** The suite pins the vocabulary, the nav↔route
+  correspondence and the structural refusals — all real, none a render. jsdom plus a
+  testing library would be two dependencies to assert a heading exists.
+- The avatar uses `next/image` with `unoptimized`, because
+  `avatars.githubusercontent.com` is not in `next.config.mjs`'s `remotePatterns`.
+- `AccountPanel` declares a local two-value link mark: link state is not in the shared
+  vocabulary. A use of the shared TYPE, not a second declaration of a shared fact.
+
+
 ---
 
 ## Where things live
@@ -3163,6 +3349,10 @@ for `tests/test_approve_server.py:266-289`'s reason.
 | `agentorg/api/` | The control plane: submit, watch, cancel, configure, verified webhook ingress, and a generated OpenAPI schema. Stdlib HTTP. **No route can approve or resume a gate** |
 | `web/` | The Next.js application. **Lane I owns `web/app/api/**` + `web/lib/**`; Lane J owns `web/app/(routes)/**` + `web/components/**`.** `lib/contract.ts` + `lib/endpoints.ts` are the contract J imports; `lib/authz.ts` holds every approval refusal as pure functions; `lib/reader/*.py` are Python subprocesses so Lane B's accessors stay the ONLY tenant scoping. **`POST /api/approvals` is the first surface here that can open a gate over a network** |
 | `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
+| `web/lib/` | **Lane I.** `contract.ts` (types + vocabulary, no runtime import) and `endpoints.ts` (the route table). The TypeScript half of the frozen contract |
+| `web/app/api/` | **Lane I.** Twelve endpoints. Every error is one shape, `ApiError` |
+| `web/app/(routes)/` | **Lane J.** Seven screens. Its `.gitignore` re-includes `runs/`, which the ROOT gitignore swallows — see the web section above |
+| `web/components/` | **Lane J.** `vocabulary.ts` is the one place the three collapsible distinctions are decided; `StageSpine` is the nine stages, where a gate is a different mark from an agent stage; `GateControls` cannot send `by`, `tenant_id` or `overridden` |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
 | `agentorg/common/llm.py` | Bedrock, with the fixture fallback — and the token/usage recorder |
