@@ -1,0 +1,192 @@
+# The whole platform on your own compute. Lane F, task F4.
+#
+#     docker compose -f infra/selfhost/docker-compose.yml up
+#
+# THIS IS THE SELF-HOSTED DEMO VEHICLE, NOT A DEV CONVENIENCE. The claim it exists
+# to support is one sentence: a poisoned ticket blocks, with no AWS call. Every
+# service below is here because that sentence needs it, and the two that are
+# commented out are absent for a stated reason rather than an oversight.
+#
+# WHAT IS VERIFIED AND WHAT IS NOT, stated at the top because this file's own
+# CI gate cannot run:
+#
+#   VERIFIED on the author's machine (no Docker daemon available):
+#     - `docker-compose -f … config` parses this file and resolves every
+#       interpolation. That is a SYNTAX and REFERENCE check, nothing more.
+#     - The pipeline it describes was run WITHOUT containers, on the same host,
+#       against a real local model: a poisoned ticket reached `verdict=block`,
+#       `provenance=scanners`, `blocking=2` at added-lines 3 and 4, with the
+#       network witness recording no AWS hostname and `127.0.0.1` as the only
+#       host contacted. See `docs/selfhost-runbook.md` for that transcript.
+#
+#   NOT VERIFIED, and nothing in this repository can claim otherwise:
+#     - `docker compose up` has never been executed against this file. There is
+#       no Docker daemon on the machine it was written on (`docker info` fails
+#       with "dial unix /var/run/docker.sock: connect: no such file or
+#       directory"), and neither podman nor colima has a VM configured.
+#     - Therefore the IMAGE BUILDS are unproven. `agentorg/agents/Dockerfile` is
+#       built by CodeBuild for arm64 today; whether it builds under a local
+#       daemon is a different question and this file does not answer it.
+#
+# A compose file that parses is not a stack that runs, and the distinction is
+# exactly the one this repository draws between a green `terraform apply` and
+# `simulate-principal-policy`. Do not present this as a demonstrated stack until
+# somebody has run it.
+
+name: theagentorg-selfhost
+
+services:
+
+  # ── THE DATABASE ───────────────────────────────────────────────────────────
+  #
+  # ONE Postgres for the queue AND the application, which Phase 0 made possible
+  # by accepting `postgres` as a `QUEUE_BACKEND`. Two databases would mean a run
+  # could be enqueued and not recorded, or recorded and not enqueued, with no
+  # transaction spanning the pair -- and the queue's whole correctness argument
+  # (a pause is a durable ROW) rests on the row and the run agreeing.
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: agentorg
+      POSTGRES_USER: agentorg
+      # A DEVELOPMENT PASSWORD, IN A FILE THAT IS COMMITTED. It is safe only
+      # because nothing here is published: `ports` is bound to 127.0.0.1 below,
+      # so the database is unreachable from outside this host. Publishing it to
+      # 0.0.0.0 with this password would expose the audit trail to the network.
+      POSTGRES_PASSWORD: selfhost-dev-only
+    ports:
+      # 127.0.0.1 IS LOAD-BEARING, not cosmetic. `- "5432:5432"` binds 0.0.0.0
+      # and Docker's rules bypass most host firewalls, so the shorter form would
+      # put this database on every interface the host has.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` rather than a TCP probe: Postgres accepts connections
+      # several seconds before it will answer a query, so a port check reports
+      # healthy while the worker's first statement still fails.
+      test: ["CMD-SHELL", "pg_isready -U agentorg -d agentorg"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # ── THE LOCAL MODEL ────────────────────────────────────────────────────────
+  #
+  # Serves an OpenAI-compatible API, which is the seam `config.LLM_BASE_URL`
+  # already routes to. Nothing in `agentorg/` knows this is ollama.
+  #
+  # NO GPU RESERVATION. On Apple silicon the Docker VM has no access to the
+  # Metal GPU, so a containerised model runs on CPU and is SLOWER than the same
+  # model served natively -- which is why the measurement in the runbook was
+  # taken against a host-native ollama. On a Linux host with nvidia-container-
+  # toolkit, add a `deploy.resources.reservations.devices` block; it is omitted
+  # rather than included-and-ignored, because a reservation that silently does
+  # nothing is a performance claim nobody can check.
+  model:
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # THE MODEL MUST BE PULLED BEFORE ANY AGENT ASKS FOR IT, and a 4.7 GB pull is
+  # not something to do inside the worker's first stage. A one-shot service with
+  # `restart: "no"` does it once and exits 0; the worker waits on its completion.
+  #
+  # Without this, the first agent call fails, `llm.text()` catches it BY DESIGN,
+  # and every agent serves its fixture while the stack looks healthy -- the
+  # signature defect this repository exists to prevent, reproduced by an absent
+  # `docker compose` dependency.
+  model-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      model:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://model:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - 'ollama pull "${SELFHOST_MODEL:-qwen2.5-coder:7b}"'
+    restart: "no"
+
+  # ── THE WORKER ─────────────────────────────────────────────────────────────
+  #
+  # Lane A's worker, unchanged, on our own compute. THIS IS F3, and it is
+  # SATISFIED BY LANE A rather than built here: `scripts/worker.py` already
+  # claims one stage at a time from a durable queue and takes no run parameters,
+  # because they live on the row. All this file contributes is the compute.
+  worker:
+    build:
+      context: ../..
+      dockerfile: agentorg/agents/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      model-pull:
+        condition: service_completed_successfully
+    environment:
+      # THE QUEUE AND THE APP SHARE ONE DATABASE. See the postgres service.
+      QUEUE_BACKEND: postgres
+      QUEUE_DSN: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+
+      # THE MODEL. `LLM_API_KEY` MUST NOT BE `not-needed`: both
+      # `llm.available()` and `common/model.create_model()` refuse that literal,
+      # so leaving it at its default sends every agent to its fixture with the
+      # run still green. MEASURED -- with only LLM_BASE_URL set,
+      # `llm.available()` returns False. A local gateway ignores the value, which
+      # is precisely what makes the default dangerous rather than merely wrong.
+      LLM_BASE_URL: http://model:11434/v1
+      LLM_API_KEY: selfhost-local-gateway-ignores-this
+      LLM_MODEL: "${SELFHOST_MODEL:-qwen2.5-coder:7b}"
+
+      # NO AWS ANYTHING. No AWS_REGION, no credentials, no role. The absence is
+      # the point, and it is deliberately NOT the evidence: with no credentials
+      # `llm.available()` would return False on the Bedrock path anyway, so a
+      # green run here proves nothing on its own. The evidence is
+      # `agentorg/selfhost/airgap.py`, which intercepts DNS and connect and
+      # names every host the process reached.
+
+      # OFFLINE closes the GitHub seam. It does NOT disable the model -- CLAUDE.md
+      # measures that, and `llm.available()` never reads it. Both are needed for a
+      # genuinely offline run; here only the GitHub half is wanted, because the
+      # model IS the local one.
+      OFFLINE: "true"
+
+      # The three scanners are in this image and this is the stack that can
+      # honestly demand them. On the security stage a missing binary must be a
+      # FAULT rather than a dev affordance -- otherwise a scanner that failed to
+      # install turns into a fixture fallback and the poisoned ticket blocks for
+      # the wrong reason, with `provenance` the only thing that would say so.
+      SCANNERS_REQUIRED: "true"
+      SECURITY_BLOCK_THRESHOLD: high
+      AGENT_ROLE: security
+    # The image's default command serves the HTTP agent; this service runs the
+    # worker loop instead. `--forever` claims jobs until stopped.
+    command: ["python", "scripts/worker.py", "--forever"]
+    restart: unless-stopped
+
+  # ── THE API AND THE UI ─────────────────────────────────────────────────────
+  #
+  # DELIBERATELY ABSENT, and this is a statement about the repository rather
+  # than about compose. `agentorg/api/` and any UI belong to other lanes and do
+  # not exist at this commit -- measured: no `agentorg/api`, no `agentorg/ui`.
+  #
+  # A service block pointing at them would parse, `docker compose config` would
+  # pass, and the stack would fail at `up` with a missing module. That is the
+  # failure shape this repository is most careful about: a check that passes for
+  # a thing that does not exist. When those lanes land, add them here with
+  # `depends_on: postgres` and the same `127.0.0.1:` port binding.
+  #
+  # `agentorg/approve_server.py` is NOT a substitute and must not be added. It
+  # has no authentication at all and binds loopback for that reason; putting it
+  # in a container means binding 0.0.0.0 inside the network namespace, and its
+  # POST endpoints resume a paused pipeline past the security gate.
+
+volumes:
+  pgdata:
+  ollama:
