@@ -1621,12 +1621,28 @@ Three things worth keeping:
 ### Live configuration
 
 Five runtimes `theagentorg_{planner,developer,reviewer,security,sre}`, all READY at
-**version 19** — re-read 2026-08-23 with `preflight.py` check 2. The number climbs on
+**version 20** — re-read 2026-08-28 with `preflight.py` check 2. The number climbs on
 every deploy; what matters is that all five carry the SAME one. All five carry the
 **same** version: a split would mean a partial deploy, where some agents run new code
 and some old and no stage's output says
 which, so `scripts/preflight.py` check 2 fails on a version mismatch as well as on
 a non-READY status.
+
+**All four gates measured green on `main` at `5215ca5`, 2026-08-28** — the Phase 1
+integrator baseline, before any lane merges:
+
+```
+pytest -q                              1131 passed, 3 skipped in 180.69s
+ruff check agentorg scripts tests      All checks passed!
+actionlint .github/workflows/*.yml     exit 0
+terraform fmt -check -recursive        exit 0
+preflight.py                           preflight OK   (all 4 checks PASS)
+```
+
+Preflight check 3 read `LINES: [3, 4]` with `provenance: scanners` from the deployed
+security runtime — so the discriminator still separates real scanners from the fixture
+after the Phase 0 contract batch. That is the one number to re-read after any lane
+touches `agentorg/security/`, and Lane C is doing exactly that.
 
 Environments `gate1`/`gate2`/`gate3`, each with `required_reviewers` — **and each
 with `can_admins_bypass: true`**, measured:
