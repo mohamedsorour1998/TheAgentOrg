@@ -62,6 +62,58 @@ def test_both_backends_are_exercised_and_are_not_the_same_class(backend):
 
 # ── A1: the operations ────────────────────────────────────────────────────────
 
+def test_both_backends_actually_satisfy_the_protocol_they_claim_to(backend):
+    """Every `QueueBackend` method exists on the backend, WITH ITS DEFAULTS.
+
+    FOUND BY A TEST RATHER THAN BY READING, and it is worth recording how. The
+    protocol declares `claim(self, worker, *, lease_seconds: int = ...)`, and both
+    backends were written `lease_seconds: int` with NO default -- so neither
+    actually satisfied the protocol it was documented against:
+
+        TypeError: SqlQueue.claim() missing 1 required keyword-only argument:
+                   'lease_seconds'
+
+    Nothing caught it because `queue.claim()` -- the only caller in the package --
+    passes the value explicitly from its own default. The gap was reachable only by
+    calling a backend directly, which is what a restart test does when it reopens a
+    file. A `Protocol` is not checked at runtime and `typing.runtime_checkable`
+    would only check that names exist, not their signatures, so this is asserted
+    over the signature itself.
+    """
+    import inspect
+
+    for name in ("enqueue", "claim", "heartbeat", "complete", "fail", "pause",
+                 "resume", "adopt_run_id", "get", "jobs_for_run", "awaiting"):
+        assert hasattr(backend, name), f"{type(backend).__name__} has no {name}"
+
+    declared = inspect.signature(queue.QueueBackend.claim).parameters
+    actual = inspect.signature(type(backend).claim).parameters
+    for parameter in declared:
+        if parameter == "self":
+            continue
+        assert parameter in actual, f"claim is missing {parameter}"
+        if declared[parameter].default is not inspect.Parameter.empty:
+            assert actual[parameter].default is not inspect.Parameter.empty, (
+                f"the protocol gives `{parameter}` a default and "
+                f"{type(backend).__name__}.claim does not, so calling the backend "
+                f"directly raises TypeError -- measured on SqlQueue.claim"
+            )
+
+
+def test_the_lease_default_is_the_packages_constant_and_not_a_restated_number(backend):
+    """One declaration of the lease length, not three.
+
+    A backend that hardcoded `600` would agree with `DEFAULT_LEASE_SECONDS` today
+    and drift silently the moment either changed -- and the drift would show up as
+    a stage reclaimed while still running, which is the double-invocation this
+    package spends most of its care refusing.
+    """
+    import inspect
+
+    assert (inspect.signature(type(backend).claim).parameters["lease_seconds"].default
+            == queue.DEFAULT_LEASE_SECONDS)
+
+
 def test_enqueue_then_claim_hands_back_the_same_job(backend):
     enqueued = queue.enqueue("run-1", "plan", ticket_id="T-1", ticket_text="x")
     claimed = queue.claim("worker-a")

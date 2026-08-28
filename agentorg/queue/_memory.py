@@ -50,6 +50,7 @@ import threading
 
 from . import (
     APPROVING_DECISIONS,
+    DEFAULT_LEASE_SECONDS,
     REJECTION_STAGES,
     TERMINAL_STATUSES,
     Job,
@@ -113,7 +114,8 @@ class MemoryQueue:
             self._jobs[job.job_id] = job
             return job.model_copy()
 
-    def claim(self, worker: str, *, lease_seconds: int) -> Job | None:
+    def claim(self, worker: str, *,
+              lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Job | None:
         """The oldest claimable job, leased to `worker`. None if there is none.
 
         CLAIMABLE MEANS, in order:
@@ -166,7 +168,8 @@ class MemoryQueue:
             job.reclaimed_from = reclaimed
         return job.model_copy()
 
-    def heartbeat(self, job_id: str, *, lease_seconds: int) -> Job:
+    def heartbeat(self, job_id: str, *,
+                  lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Job:
         """Extend a claim. Refuses a job that is not currently claimed.
 
         A heartbeat on a `paused` or terminal job is a worker that has lost track

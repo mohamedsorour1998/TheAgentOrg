@@ -89,6 +89,7 @@ import threading
 
 from . import (
     APPROVING_DECISIONS,
+    DEFAULT_LEASE_SECONDS,
     REJECTION_STAGES,
     TERMINAL_STATUSES,
     Job,
@@ -392,7 +393,8 @@ class SqlQueue:
                 connection.commit()
             return job.model_copy()
 
-    def claim(self, worker: str, *, lease_seconds: int) -> Job | None:
+    def claim(self, worker: str, *,
+              lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Job | None:
         """Lease the oldest claimable job to `worker`. None if there is none.
 
         ONE TRANSACTION, and the whole of A6's second half lives in it. The read
@@ -453,7 +455,8 @@ class SqlQueue:
                 connection.commit()
             return self._require(job.job_id)
 
-    def heartbeat(self, job_id: str, *, lease_seconds: int) -> Job:
+    def heartbeat(self, job_id: str, *,
+                  lease_seconds: int = DEFAULT_LEASE_SECONDS) -> Job:
         """Extend a claim. Refuses a job that is not currently claimed."""
         job = self._require(job_id)
         if job.status != "claimed":
