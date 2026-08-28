@@ -225,6 +225,7 @@ def test_a_retrieval_record_carries_provenance_and_nothing_the_verdict_reads():
 
 @pytest.mark.parametrize(("knob", "expected"), [
     ("QUEUE_BACKEND", "memory"),
+    ("QUEUE_DSN", ""),
     ("TENANT_MODE", "single"),
     ("SELF_HOSTED", False),
     ("RETRIEVAL_ENABLED", False),

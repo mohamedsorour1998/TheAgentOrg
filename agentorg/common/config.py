@@ -249,6 +249,25 @@ if QUEUE_BACKEND not in QUEUE_BACKENDS:
         f"selected it in production would look exactly like a run that vanished."
     )
 
+# WHERE THE DURABLE QUEUE CONNECTS. Empty means "the sqlite file beside runs/", which
+# `queue/_sql.py` resolves -- the path is that module's business, not this file's, and
+# putting it here would be a second declaration of it.
+#
+# READ THROUGH THE MODULE AT CALL TIME, never `from ..common.config import QUEUE_DSN`.
+# That binds the value before any fixture runs, so the knob would ignore both the suite
+# and the deployed environment -- the same trap SCANNERS_REQUIRED documents above. The
+# consumer calls `config.QUEUE_DSN` inside a function for exactly this reason.
+#
+# NOT VALIDATED HERE, deliberately, unlike QUEUE_BACKEND. A DSN is free-form: sqlite
+# paths, `postgresql://` URLs and future dialects are all legitimate, so any pattern
+# this file could enforce would reject a valid value later. The failure it would catch
+# arrives loudly anyway, at the first connect, naming the string that failed.
+#
+# Added by the integrator on Lane A's request: `_sql.py` was reading `QUEUE_DSN` from
+# `os.environ` directly, which works but breaks "every knob lives in config.py" -- and a
+# knob nobody can find in this file is a knob nobody knows exists.
+QUEUE_DSN = os.environ.get("QUEUE_DSN", "")
+
 # WHETHER TENANT SCOPING IS ENFORCED. `single` is the current deployment, which becomes
 # tenant zero rather than being migrated away. Enumerated rather than boolean because a
 # third mode (shared-with-isolation) is a real possibility and a boolean could not carry
