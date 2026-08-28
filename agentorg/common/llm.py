@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, replace
 
 from pydantic import BaseModel, ValidationError
 
@@ -97,8 +98,8 @@ def record_fixture_fallback() -> None:
     """Called by an agent that is about to load its fixture.
 
     PUBLIC BECAUSE THE AGENTS NEED IT, and that is not redundant with the
-    recording `text()` does internally. Almost every test in this suite -- and
-    `tests/test_agent_fallbacks.py` in particular -- monkeypatches
+    recording `text()` does internally. Almost every test in this suite --
+    and `tests/test_agent_fallbacks.py` in particular -- monkeypatches
     `llm.structured` rather than `llm._complete`, so on that path none of this
     module's own code runs and nothing would be recorded at all. The agent's
     fallback branch is the one place the fact cannot be stubbed away, because it
@@ -108,8 +109,264 @@ def record_fixture_fallback() -> None:
     returning a usable string is not the same event as the caller USING it: a
     reply that fails the caller's own validation is a fixture run from the
     caller's side, and the caller is the only one who knows.
+
+    IT ALSO RECORDS A ZERO-TOKEN USAGE ROW, and that is the whole of E7's
+    "a fixture fallback records zero rather than nothing". A stage that fell back
+    must not be indistinguishable from a stage nobody measured -- the same
+    requirement `scan_provenance` answers for the security verdict. With a row
+    present and zero, a reader can tell that the stage ran and spent nothing; with
+    no row at all, the honest reading is that nothing was instrumented.
+
+    Recorded here rather than in the five agents because this function is already
+    the one call every agent's fallback branch makes, and `agentorg/agents/` is
+    another lane's file. Convenient, and also correct: one writer for one event.
+
+    The row is ADDED, never substituted for a real one. When the model genuinely
+    answered and the CALLER then rejected the reply, both rows stand -- the tokens
+    were really spent and a fixture was really served, and a version that dropped
+    either would misreport one of those two facts.
     """
     _record(SOURCE_FIXTURE)
+    _record_usage(Usage(fixture=True))
+
+
+# ── WHAT THE MODEL CALLS CONSUMED ────────────────────────────────────────────
+#
+# THERE WAS NO USAGE RECORDING AT ALL BEFORE THIS. Measured on the pre-final
+# baseline: this module called the model and threw the token counts away on the
+# `str(agent(...))` line, so nobody could answer "what did that run cost".
+#
+# The shape mirrors `_LAST_SOURCE` above ON PURPOSE, and the choice is not
+# stylistic. `_complete` is the seam the whole suite substitutes -- conftest.py
+# guard 1 replaces it, and dozens of tests hand back a bare string -- so
+# widening its `-> str` return type to carry usage would make every one of those
+# stubs a shape mismatch. This repository has a named pattern for that: a test
+# double that cannot express the new shape produces confidence that cannot be
+# falsified. Module state costs those stubs nothing; they simply record no usage,
+# which is the honest answer for a stub that never called a model.
+
+
+@dataclass(frozen=True)
+class Usage:
+    """One model call's token counts. Frozen, so an accumulator cannot edit history.
+
+    `cached` IS SEPARATE FROM `input` because Bedrock prices it separately -- a
+    Nova 2.0 Lite cache read is $0.0825/1M against $0.33/1M fresh, measured from
+    the AWS Pricing API (see `agentorg/cost/prices.py`). It is also the number
+    that says whether caching is working at all: the five agents each re-send a
+    repository snapshot on every call, so a zero across a whole run means the
+    largest cost in the design is being paid in full, every time, silently.
+
+    `cached_reported` IS NOT THE SAME QUESTION AS `cached_tokens > 0`, and
+    conflating them is how an unmeasured cache would come to read as a measured
+    miss. strands' `Usage` TypedDict declares `cacheReadInputTokens` as an OPTIONAL
+    key (`strands/types/event_loop.py:8-23`, `total=False`), and its accumulator
+    only creates that key `if "cacheReadInputTokens" in source`
+    (`strands/telemetry/metrics.py:338-353`) -- so a provider that does not report
+    caching leaves the key genuinely ABSENT, not zero. The OpenAI-compatible path
+    makes this sharper still: `strands/models/openai.py:585-594` sets the key
+    behind `if cached := ...`, so a real zero is falsy and omitted there too.
+    Reporting an absent key as `cached_tokens=0` would state that the cache was
+    measured and missed, when the truth is that nothing was measured -- the same
+    distinction `SecurityResult.scan_provenance` exists for, and the same one
+    `CostRecord.usd` draws between "not priced" and "priced, and free".
+    """
+
+    stage: str = ""              # filled by the caller; "" when nobody said
+    model: str = ""              # the model id that answered
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cached_reported: bool = False   # did the provider report caching AT ALL?
+    # A FIXTURE STOOD IN FOR THIS CALL. Zero tokens, and the zero is a measurement
+    # rather than an absence -- which is what makes "the stage fell back" different
+    # from "nobody instrumented the stage". See `record_fixture_fallback`.
+    fixture: bool = False
+
+
+_USAGE: list[Usage] = []
+
+
+def reset_usage() -> None:
+    """Forget what the model calls consumed. Call once before a run.
+
+    Mirrors `reset_source`, and for the same reason: a laptop can run several
+    stages in one process, and a run inheriting the previous run's token counts
+    is worse than reporting nothing, because it looks like a measurement.
+    """
+    _USAGE.clear()
+
+
+def usage() -> list[Usage]:
+    """Every model call since the reset, in order. A COPY, so a caller cannot append.
+
+    A list rather than a running total, because the caller knows something this
+    module does not: which stage it is in. The developer/reviewer loop calls the
+    model an unknown number of times per stage, and a total computed here could
+    not be split back apart afterwards.
+    """
+    return list(_USAGE)
+
+
+def _record_usage(entry: Usage) -> None:
+    """Append one call's counts. Never replaces -- a stage may call the model twice."""
+    _USAGE.append(entry)
+
+
+def _usage_from_metrics(metrics: object, model_id: str) -> Usage:
+    """Read strands' accumulated usage off an AgentResult's metrics.
+
+    DEFENSIVE ON PURPOSE, AND THIS FUNCTION MUST NOT RAISE. It runs inside
+    `_complete`, on the pipeline's model path, to record a number nobody's verdict
+    depends on. A `getattr` chain that raised here would take down a run over
+    bookkeeping -- turning an instrument into an outage, which is strictly worse
+    than the missing measurement it replaced.
+
+    `accumulated_usage` is a plain dict with CAMELCASE keys, not an object with
+    attributes: strands defines it as a TypedDict carrying Bedrock's own key names
+    (`strands/types/event_loop.py`). Read with `.get`, never subscripted -- the two
+    cache keys are optional and their absence is the fact `cached_reported` carries.
+    """
+    counts = getattr(metrics, "accumulated_usage", None)
+    if not isinstance(counts, dict):
+        # No metrics at all -- a substituted `_complete`, or a strands version that
+        # moved the attribute. Recorded as a zero-token call rather than skipped:
+        # a call that happened is a call that happened, and dropping it would make
+        # the stage row vanish from the cost record entirely.
+        return Usage(model=model_id)
+
+    return Usage(
+        model=model_id,
+        input_tokens=int(counts.get("inputTokens", 0) or 0),
+        output_tokens=int(counts.get("outputTokens", 0) or 0),
+        cached_tokens=int(counts.get("cacheReadInputTokens", 0) or 0),
+        # PRESENCE, not truthiness. See the Usage docstring.
+        cached_reported="cacheReadInputTokens" in counts,
+    )
+
+
+def attribute_usage_to(stage: str) -> None:
+    """Stamp `stage` onto every call recorded so far that has none.
+
+    THE STAGE IS KNOWN BY THE CALLER AND NOT BY THIS MODULE, which is the whole
+    reason this is a separate call rather than a parameter on `text()`. Four agents
+    reach the model through `structured()` without ever naming their stage, and
+    threading one through would change every agent's call site for a fact only the
+    pipeline layer reads -- the same argument that keeps `last_source()` module
+    state instead of a return value.
+
+    Only BLANK stages are filled, and that asymmetry is load-bearing: the
+    developer/reviewer loop runs both agents repeatedly within one `develop` stage,
+    so a version that overwrote every row would relabel earlier calls on every
+    later pass. Already-attributed rows are settled history.
+    """
+    for i, entry in enumerate(_USAGE):
+        if not entry.stage:
+            _USAGE[i] = replace(entry, stage=stage)
+
+
+# ── CROSSING THE REMOTE SEAM ─────────────────────────────────────────────────
+#
+# THE SAME PROBLEM `source` ALREADY SOLVED, ON THE SAME SEAM. Under
+# REMOTE_AGENTS=true the model call happens INSIDE an AgentCore container, so the
+# token counts exist only over there and `llm.usage()` on the runner is always
+# empty -- exactly as `llm.last_source()` was always None before the provenance
+# fix, which is how the deployed pipeline came to print `_source=none` beside
+# plainly model-written output.
+#
+# So usage travels back on the 200 response envelope, the way `source` does. This
+# is deliberately NOT a second mechanism: `agents/server.py` already builds that
+# envelope and `common/agent_client.py` already reads it, and the two functions
+# below are the serialise/absorb pair those two call sites need.
+#
+# THE WIRING IS TWO LINES IN FILES LANE E DOES NOT OWN:
+#
+#   agents/server.py, beside `"source": llm.last_source() or ""`:
+#       "usage": llm.usage_payload(),
+#
+#   common/agent_client.py, beside the `llm._record(source)` call:
+#       llm.absorb_usage_payload(envelope.get("usage"))
+#
+# Both are additive and backward compatible in both directions -- an older
+# container omits the key and `absorb_usage_payload(None)` is a no-op, and an older
+# runner ignores a key it does not read. The mechanism, its serialisation and its
+# refusal behaviour are all here and all tested; only those two lines are pending
+# an owner.
+
+
+def usage_payload() -> list[dict]:
+    """Every recorded call as JSON-serialisable dicts, for the response envelope.
+
+    Plain dicts rather than the dataclass, because `json.dumps` cannot encode a
+    dataclass and `agents/server.py` is standard-library only -- the same reason
+    that file already needs `model_dump(mode="json")` rather than `model_dump()`.
+
+    Field names are the dataclass's own, NOT strands' camelCase. The wire format
+    here is between two copies of THIS repository, so it should speak this
+    repository's vocabulary; `cacheReadInputTokens` is a detail of the provider
+    that `_usage_from_metrics` has already translated away.
+    """
+    return [
+        {
+            "stage": entry.stage,
+            "model": entry.model,
+            "input_tokens": entry.input_tokens,
+            "output_tokens": entry.output_tokens,
+            "cached_tokens": entry.cached_tokens,
+            "cached_reported": entry.cached_reported,
+            "fixture": entry.fixture,
+        }
+        for entry in _USAGE
+    ]
+
+
+def absorb_usage_payload(payload: object) -> int:
+    """Record a container's usage rows locally. Returns how many were accepted.
+
+    NEVER RAISES, and that is a hard requirement rather than defensiveness. It runs
+    on the runner's side of a network call, and `agent_client` is explicit that the
+    provenance is recorded BEFORE validation so a container that answered honestly
+    and then failed validation still reports which path it took. A bookkeeping
+    function that raised there would convert a cost-reporting gap into a failed
+    stage -- an instrument becoming an outage.
+
+    A malformed or absent payload records NOTHING rather than a zero row. An older
+    container omits the key entirely, and inventing a zero-token row for it would
+    assert that the stage spent nothing when the truth is that the container could
+    not report -- the `""`-versus-`0` distinction this whole lane turns on. The
+    return count is what lets a caller (or a test) tell "nothing was sent" from
+    "rows were sent and rejected".
+    """
+    if not isinstance(payload, list):
+        return 0
+
+    accepted = 0
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        try:
+            _record_usage(Usage(
+                stage=str(row.get("stage", "") or ""),
+                model=str(row.get("model", "") or ""),
+                input_tokens=int(row.get("input_tokens", 0) or 0),
+                output_tokens=int(row.get("output_tokens", 0) or 0),
+                cached_tokens=int(row.get("cached_tokens", 0) or 0),
+                cached_reported=bool(row.get("cached_reported", False)),
+                fixture=bool(row.get("fixture", False)),
+            ))
+        except (TypeError, ValueError):
+            # A row whose numbers are not numbers. Skipped rather than raised, and
+            # counted out of `accepted` so the loss is observable.
+            logging.getLogger(__name__).warning(
+                "a usage row from the remote agent could not be read; "
+                "this stage's cost will be understated"
+            )
+            continue
+        accepted += 1
+    return accepted
+
+
+
 
 
 def available() -> bool:
@@ -151,11 +408,39 @@ def extract_json(text_in: str) -> str:
 
 
 def _complete(system_prompt: str, user_prompt: str) -> str:
-    """Raw model call. Separated so tests can substitute it."""
+    """Raw model call. Separated so tests can substitute it.
+
+    THE TOKEN COUNTS ARE READ HERE AND NOWHERE ELSE, because this is the only
+    line in the repository that holds an `AgentResult`. `str(result)` concatenates
+    the text blocks and discards `result.metrics` -- which is exactly what the
+    pre-instrumentation version did, and why no run could report its cost.
+
+    The signature stays `-> str`. See the `Usage` note above: widening it would
+    break every string-returning stub in the suite, and a double that cannot
+    express the new shape is this repository's named recipe for unfalsifiable
+    confidence.
+    """
     from strands import Agent
 
-    agent = Agent(model=create_model(), system_prompt=system_prompt)
-    return str(agent(user_prompt))
+    model = create_model()
+    agent = Agent(model=model, system_prompt=system_prompt)
+    result = agent(user_prompt)
+
+    # `get_config()["model_id"]` rather than a config read, so the recorded id is
+    # the one that ANSWERED rather than the one the environment asked for. The two
+    # differ whenever `create_model` is passed an override, and a cost record
+    # naming the wrong model prices the run against the wrong table.
+    model_id = ""
+    try:
+        model_id = str(model.get_config().get("model_id", "") or "")
+    except Exception:
+        # Bookkeeping must not break a run. See _usage_from_metrics.
+        logging.getLogger(__name__).debug(
+            "could not read the model id for the cost record", exc_info=True
+        )
+
+    _record_usage(_usage_from_metrics(getattr(result, "metrics", None), model_id))
+    return str(result)
 
 
 def text(system_prompt: str, user_prompt: str) -> str | None:

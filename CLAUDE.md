@@ -528,6 +528,182 @@ failures to `None` too. That single signal is why four agents need no `try/excep
 
 `_complete` is the substitution seam the suite replaces.
 
+**It also records what each call CONSUMED, and that is new as of 2026-08-28.** Before
+it there was no cost tracking at all — `str(agent(...))` discarded `result.metrics` on
+the one line in the repository that holds an `AgentResult` — so "what did that run
+cost" had no answer, and two judge requirements hung on it.
+
+The recorder mirrors `_LAST_SOURCE`: module state, reset by the caller, read through
+`llm.usage()`. **Deliberately not a widened `_complete` return type** — conftest guard
+1 replaces `_complete`, and dozens of tests hand back a bare string, so a new return
+shape would break every one of them. That is this repo's named pattern (a double that
+cannot express the new shape), arriving one layer up.
+
+Four things worth knowing before touching it:
+
+- **`accumulated_usage` is a dict with CAMELCASE keys**, not an object with
+  attributes. strands declares it as a TypedDict carrying Bedrock's own key names
+  (`strands/types/event_loop.py`, verified against strands-agents 1.52.0). Read with
+  `.get`, never subscripted.
+- **`cacheReadInputTokens` is OPTIONAL and its absence is a fact.** The TypedDict is
+  `total=False`, strands' accumulator only creates the key `if
+  "cacheReadInputTokens" in source`, and the OpenAI path sets it behind `if cached
+  := ...` — so a real zero is omitted there too. Hence `Usage.cached_reported`
+  records **presence**, not truthiness: `cached_reported=False` means the provider
+  said nothing, `cached_tokens=0` means it said zero. Collapsing them makes an
+  unmeasured cache read as a measured miss.
+- **A fixture fallback records a ZERO ROW, not nothing** — stamped inside
+  `record_fixture_fallback`, the one call every agent's fallback branch already
+  makes. Same requirement as `scan_provenance`: a stage that fell back must not be
+  indistinguishable from a stage nobody measured.
+- **Usage crosses the remote seam on the 200 envelope**, exactly as `source` does —
+  `usage_payload()` / `absorb_usage_payload()`. **The two wiring lines are still
+  pending an owner**, because `agents/server.py` and `common/agent_client.py` are not
+  Lane E's files. Until they land, a `REMOTE_AGENTS=true` run records no usage on the
+  runner. `absorb_usage_payload` never raises and records **nothing** for an absent
+  payload rather than a zero row.
+
+  The two lines, verbatim. In `agents/server.py`, one key on the existing 200
+  envelope (currently `server.py:194-198`):
+
+  ```python
+  self._send(200, {
+      "agent": role,
+      "result": result.model_dump(mode="json"),
+      "source": llm.last_source() or "",
+      "usage": llm.usage_payload(),          # ← ADD THIS LINE
+  })
+  ```
+
+  In `common/agent_client.py`, immediately after the existing `llm._record(source)`
+  block and **before** `return _validate(...)` (currently `agent_client.py:543-547`):
+
+  ```python
+  source = envelope.get("source") if isinstance(envelope, dict) else None
+  if source in (llm.SOURCE_MODEL, llm.SOURCE_FIXTURE):
+      llm._record(source)
+
+  # ← ADD THESE TWO LINES
+  if isinstance(envelope, dict):
+      llm.absorb_usage_payload(envelope.get("usage"))
+
+  return _validate(role, envelope)
+  ```
+
+  **Before `_validate`, for the same reason `_record(source)` is**: a container that
+  answered honestly and then failed validation still spent the tokens, and a cost
+  record that drops them understates the bill for exactly the runs worth
+  investigating. **`absorb_usage_payload` needs no refusal of its own** — it is not a
+  verdict, it validates its own rows, returns a count, and never raises.
+
+  **Verifying it worked, and the distinction that matters.** Absent wiring and a
+  zero-cost run are different facts and the record already separates them, measured
+  three ways on the runner side:
+
+  ```
+  WIRING ABSENT (no key sent)            accepted=0  stages=0  usd=None
+      render -> "cost: no model calls recorded for this run"
+  WIRING PRESENT, container fell back    accepted=1  stages=1  usd=0.0
+  WIRING PRESENT, model answered         accepted=1  stages=1  usd=0.0085
+  ```
+
+  So the check is **`len(state.cost.stages)`, never `usd`**: an unwired run has
+  **zero rows** and `usd=None`, a wired run has a row per stage even when that stage
+  spent nothing. `usd == 0.0` cannot tell them apart, and `absorb_usage_payload`'s
+  return count is the same discriminator one layer down — `0` means nothing arrived,
+  not that nothing was spent.
+
+### `agentorg/cost/` — what a run cost
+
+Three modules split by what can be wrong with each: `prices.py` (wrong when stale),
+`record.py` (wrong when it guesses), `report.py` (wrong when it flatters).
+
+**`CostRecord.usd` is `float | None` and the distinction is load-bearing**: `None`
+means not priced — an unknown model, or a table nobody updated — while `0.0` means
+priced and free. `total_usd` returns None only when NOTHING could be priced, and
+otherwise **understates** by skipping unpriced rows, with `report.render` naming how
+many stages were priced so a partial total is never read as complete.
+
+**Every price row carries the date it was read**, per model, plus the command that
+produced it. Measured 2026-08-28 from the **AWS Pricing API**, not a web page:
+
+```
+aws pricing get-products --service-code AmazonBedrock --region us-east-1 \
+  --filters "Type=TERM_MATCH,Field=model,Value=Nova 2.0 Lite" \
+            "Type=TERM_MATCH,Field=regionCode,Value=us-east-1" \
+            "Type=TERM_MATCH,Field=feature,Value=On-demand Inference"
+
+Nova 2.0 Lite  Input tokens                     0.00033   /1K = $0.33   /1M
+Nova 2.0 Lite  Output tokens                    0.00275   /1K = $2.75   /1M
+Nova 2.0 Lite  Prompt cache read input tokens   0.0000825 /1K = $0.0825 /1M
+```
+
+**Two traps the query itself exposed:**
+
+- **The catalogue's name for our model is `Nova 2.0 Lite`, not `Nova 2 Lite`.** A
+  query for the latter returns zero rows and **exits 0**, which reads exactly like a
+  model with no pricing. `aws pricing get-attribute-values --attribute-name model`
+  lists the real names.
+- **`Nova Lite` and `Nova 2.0 Lite` are different models at 5.5x and 11x the price.**
+  Reading the old row for the new model understates output by an order of magnitude.
+  Both are in the table so the mistake is visible; a test asserts they differ.
+
+Flex and priority tiers are deliberately **absent** — the same query returns them at
+0.5x and 1.75x, and this pipeline selects neither, so pricing a run at the flex rate
+would halve every reported figure.
+
+**THE CACHE HIT RATE IS ZERO, MEASURED.** Nothing in `agentorg/` sets a Bedrock cache
+point — `grep -rn 'cache_point\|cachePoint\|cache_control\|CachePoint' agentorg/ scripts/`
+returns nothing — so Nova reports no `cacheReadInputTokens` at all, meaning all five
+agents pay full price for the repository snapshot they re-send on every call. That is
+the largest silent cost in the design. `report.render` states it in words rather than
+leaving a reader to infer it from `0.0%`, because nobody reads a percentage as an
+alarm. `cache_hit_rate` returns `None` for a zero denominator, never `0.0`.
+
+**The alarm's condition is on the RENDERED STRING, not on `rate == 0.0`,** and that is
+a measured fix rather than a style choice. `_pct` formats to one decimal place, so
+every rate below 0.05% renders `0.0%` while comparing unequal to zero:
+
+```
+rate=1e-06   renders 0.0%   == 0.0? False
+rate=0.0004  renders 0.0%   == 0.0? False
+rate=0.0005  renders 0.1%   == 0.0? False
+```
+
+Against `rate == 0.0` a run with one cached token in a million printed `cache hit
+rate: 0.0%` with **no finding beside it** — so two runs showing the reader an identical
+number got different verdicts, and the one that looked fine was the one nobody was
+warned about. Pinned by `test_a_cache_rate_that_merely_ROUNDS_to_zero_still_carries_the_finding`,
+which asserts over `report._pct(rate)` rather than the float, because pinning it on
+the float is exactly what let the gap exist: the test and the code agreed with each
+other and neither agreed with the page.
+
+**`cached_reported` does NOT reach the cost record, and that is a known gap.**
+`llm.Usage` separates "the provider said nothing" from "the provider said zero", and
+that survives the remote seam — but `StageCost` declares no such field, so both arrive
+as `cached_tokens=0` and `cache_hit_rate` answers `0.0` for each. Measured:
+
+```
+provider SAID NOTHING   usage.cached_reported=False  -> rate=0.0
+provider SAID ZERO      usage.cached_reported=True   -> rate=0.0
+```
+
+No reported number is wrong — both mean no caching is happening — but the two want
+different fixes, and the record cannot say which you have. Left open because `state.py`
+is the frozen contract and another lane's file; the fix is one optional field
+(`StageCost.cached_reported: bool = False`) plus `any(e.cached_reported for e in
+entries)` in `build_cost_record`. `test_the_reported_flag_does_NOT_survive_the_fold_and_that_gap_is_pinned`
+**fails when the field is added**, and its message says what else to finish — a gap
+recorded only in a comment gets closed halfway, with the field added and nothing
+reading it, and nothing would say so.
+
+**Per-stage attribution needs one line per stage in `graph.py` / `run_stage.py`** —
+the integrator's files. Without it every model call in a run lands in a single `plan`
+row: measured, and the reason
+`test_a_run_through_the_real_pipeline_records_a_cost_for_every_stage` installs that
+call itself and asserts on the stage **set** rather than the total, which is identical
+either way.
+
 ### `agentorg/github_ops.py` — GitHub API vs local git
 
 `_use_local()` returns `config.OFFLINE or not (config.GITHUB_TOKEN and
@@ -2121,7 +2297,8 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/tenancy/` | Scoped accessors, per-tenant secret crypto, budgets, tenant zero, and `ADR-001-database.md` |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
-| `agentorg/common/llm.py` | Bedrock, with the fixture fallback |
+| `agentorg/common/llm.py` | Bedrock, with the fixture fallback — and the token/usage recorder |
+| `agentorg/cost/` | The price table, a run's `CostRecord`, and the cache finding |
 | `agentorg/common/diff.py` | What a diff PROPOSES — added lines only |
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile` |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
