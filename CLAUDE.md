@@ -1402,7 +1402,7 @@ an audit trail.
 
 ## The test suite
 
-**55 test files** as of 2026-08-28, after Phase 1 (`ls tests/test_*.py | wc -l`), plus
+**59 test files** as of 2026-08-28, after Phase 1 plus Lane K (`ls tests/test_*.py | wc -l`), plus
 five non-test modules in `tests/`: `conftest.py`, `provenance.py`, `dora_runner.py`,
 `dora_batch.py`, `dora_table.py`. **This number went 41 → 46 → 51 → 55 in a single day**
 as five lanes committed, and three of those figures were written into this file while
@@ -1423,6 +1423,10 @@ not every file.
 | `test_agentcore_deploy_assets.py` | requirements / Dockerfile, unexerciseable locally | 49 |
 | `test_agent_client.py` | the remote seam | 43 |
 | `test_tenancy_leak.py` | **THE LEAK SUITE** — attempts a cross-tenant breach on every registered accessor | 52 |
+| `test_api_auth.py` | K5 — what the machine-key layer refuses; the empty store, and two orderings over the AST | 31 |
+| `test_api_ingress.py` | K4's three providers + K6's schema, incl. the dispatcher-vs-document loop | 30 |
+| `test_api_cancel.py` | K7 — cancellation at all three positions, and K3's threshold floor | 25 |
+| `test_api_submission.py` | K7 — idempotency under retry, and the gate refusal per module over the AST | 20 |
 | `test_tenancy.py` | the tenancy schema, the engine, the migrations | 33 |
 | `test_tenancy_secrets.py` | per-tenant secret crypto; greps the module's own logs for the plaintext | 29 |
 | `test_tenancy_budgets.py` | budgets fail closed; tenant zero loses nothing | 22 |
@@ -2467,6 +2471,85 @@ recorded as `"ui-reviewer"` for every decision because with no authentication th
 server genuinely does not know who clicked. **Never expose it off-host.** It is
 kept for a future frontend, since it is buttons over `gates.resume`.
 
+### The control-plane API (Lane K) — and the one thing it cannot do
+
+`agentorg/api/` is stdlib-only HTTP over Phase 1's substrate: `POST /v1/runs` is
+`queue.enqueue`, `GET /v1/runs/<id>` is `queue.jobs_for_run`, cancel is
+`queue.complete`. Verified end to end with no GitHub involvement — submitted,
+watched and cancelled over a real socket, no token and no network.
+
+**IT CANNOT APPROVE OR RESUME A GATE, and the refusal is structural rather than a
+policy note.** No route maps to `gates.resume` or `queue.resume`, no scope grants
+it, and `tests/test_api_submission.py` asserts that per-module over the **AST** —
+because these files are half commentary and several discuss `gates.resume` at
+length, so a grep for `resume` matches the prose arguing for its absence while a
+real call sits beside it. The argument: a machine credential that could approve a
+gate defeats the gate for exactly the callers gates exist to exclude, and
+`HumanDecision.by` would name a service account while reading as a human decision.
+The absent scope is deliberate too — a `gates:approve` nobody holds reads as a
+capability that exists, and the next person grants it and hunts for the broken route.
+
+Four things measured rather than assumed:
+
+- **An empty key store is a REFUSAL.** Every authenticated route 401s until a key
+  is provisioned, asserted from the transport as well as the function. Written the
+  other way the failure is invisible from inside a deployment: every request
+  succeeds and the first signal is somebody else's run in your tenant. Same
+  direction as `budgets.check` with no budget row.
+- **scrypt `n=2**14` costs 27.7 ms here** (`n=2**13` is 11.6 ms), and an unknown
+  key id costs the SAME work as a wrong secret — 23.1 vs 22.8 ms, because the hash
+  runs against a throwaway salt either way. An early return on a missing id reads as
+  correct code and answers "does this key exist?" through timing.
+- **`secrets.token_urlsafe` emits base64url, whose alphabet CONTAINS `_`.** A key
+  formatted `agtk_<id>_<secret>` therefore broke `split("_")` and refused every
+  legitimately issued key. **A test asserting only that malformed keys are refused
+  passes against this**, because refusing everything satisfies it. Found by issuing
+  a key and resolving it in the same breath; fixed with `maxsplit=2`.
+- **The queue's UNIQUE index cannot carry HTTP idempotency**, and this is the
+  measurement worth keeping: `adopt_run_id` renames the placeholder row in place, so
+  `jobs_for_run(placeholder)` drops to 0 and re-enqueuing that triple is **accepted**.
+  The index stops a retry arriving before `plan` runs and admits the identical retry
+  arriving after — a window narrow enough to make the defect intermittent. Hence
+  `api/idempotency.py`, keyed `(tenant_id, key)`; the tenant half is not optional
+  because `Idempotency-Key` is client-chosen and two customers will pick the same one.
+
+**What cancellation guarantees, precisely**, because "honoured mid-run" has an edge
+and all three positions were verified: a READY next stage stops (`queue.claim`
+returns None), a run PAUSED at a gate stops and leaves `queue.awaiting()`, and a
+stage **already executing is not killed** — the subprocess runs to completion and
+the worker's later `complete` is REFUSED (`already ended as 'rejected' with exit 4`).
+So the promise is *no further stage runs*, not *the current stage stops*. Killing it
+would be the stronger promise and is refused for `queue.fail`'s reason: a
+half-killed stage may have opened a PR and posted three comments. A second cancel
+is **409**, never 200 — a cancel reporting success for a run it did not cancel is
+the signature defect.
+
+**K3's threshold goes through `scoring.resolve_threshold` and the floor is not
+re-implemented.** The RED step that proves it is worth copying: replacing the call
+with a local list check that rejects `HIGH` and `catastrophic` identically leaves
+every vocabulary test green, and **only** the test that lowers `THRESHOLD_FLOOR` to
+`low` catches it. The floor is `critical` today so it refuses none of the four legal
+thresholds — a test that tried only legal values could not tell whether this API
+consults it at all. `security` is absent from `OPTIONAL_CHECKS`, so no configuration
+disables the one binding check.
+
+Three known gaps, named rather than implied: the key store, the idempotency store
+and the config store are **in-process**, so none survives a restart (the durable
+homes are `schema.SECRET` and `schema.REPOSITORY`, Lane B's files); `RunStatus.cost_usd`
+is always `None` because reaching `RunState.cost` needs `gates.load` and the AST test
+forbids importing `gates` at all — closing it needs a cost column on the job row or a
+read helper that is not `gates`; and one ingress secret per provider means one webhook
+endpoint serves every tenant, since a webhook arrives with no credential and "try
+every tenant's secret" is an oracle for which tenants exist.
+
+**No web framework.** `starlette 1.6.0` and `uvicorn 0.52.4` ARE installed and were
+still refused: `test_requirements_covers_every_third_party_import_in_the_package`
+AST-walks `agentorg/` and would make any import here a dependency of all five arm64
+agent images — and `starlette` already sits in that test's `_NOT_RUNTIME` list
+described as "dead code today", so importing it from a live module would make that
+exclusion a lie. `tests/test_api_ingress.py` asserts the absence locally, so the
+failure names this package instead of surfacing as a packaging test going red.
+
 ---
 
 ## Where things live
@@ -2486,6 +2569,7 @@ kept for a future frontend, since it is buttons over `gates.resume`.
 | `agentorg/db/` | The tenancy schema as DATA (one definition, two dialects), the connection + tenant binding, forward-only migrations |
 | `agentorg/tenancy/` | Scoped accessors, per-tenant secret crypto, budgets, tenant zero, and `ADR-001-database.md` |
 | `agentorg/queue/` | The job queue that replaces Actions' sequencing. `_memory.py` keeps the suite hermetic; `_sql.py` is durable and holds the ADR. **A pause is a durable ROW** |
+| `agentorg/api/` | The control plane: submit, watch, cancel, configure, verified webhook ingress, and a generated OpenAPI schema. Stdlib HTTP. **No route can approve or resume a gate** |
 | `scripts/worker.py` | claim → run one stage → record → re-enqueue or pause. Takes no run parameters: they live on the row |
 | `agentorg/common/config.py` | Every knob, with the reasoning |
 | `agentorg/common/agent_client.py` | The one seam: in-process vs `invoke_agent_runtime` |
