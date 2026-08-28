@@ -187,45 +187,104 @@ def test_an_adapter_missing_a_method_cannot_be_constructed():
         HalfAnAdapter()
 
 
+# The five methods, as `base.CodeHost` declares them. Written out rather than
+# derived from `CodeHost.__abstractmethods__`, because the point of the test below
+# is to check the interface against `graph.py` -- and an expectation read off the
+# interface would move with it and confirm only that the interface agrees with
+# itself. The eleventh instance of this repository's pattern is exactly that: a
+# property test whose oracle reads the table under test.
+_THE_FIVE = frozenset({"open_pr", "post_comment", "merge_pr", "report_outcome",
+                       "ci_status"})
+
+
+def _code_host_calls_in(source: Path) -> set[str]:
+    """Which code-host methods a module calls, WHICHEVER spelling it uses.
+
+    TWO SPELLINGS, BOTH REAL, and this helper exists because a version that
+    understood only the first went stale the moment the port it was written to
+    enable actually happened:
+
+        github_ops.post_comment(state, body)              <- today
+        integrations.host().post_comment(state, body)     <- after the port
+
+    Measured: with `graph.py` ported onto the interface, the first version of
+    `test_the_interface_declares_exactly_the_five_methods_graph_calls` failed with
+    `assert set()` -- "graph.py makes no github_ops calls; this test would pin
+    nothing" -- while the other 1,565 tests passed. So the test that exists to
+    prove the interface was DERIVED from `graph.py` was the one thing standing in
+    the way of using it. That is worse than a stale test: it is a test that
+    penalises the change it was written to enable.
+
+    The receiver is matched structurally rather than by name, so an integrator may
+    also bind the host once (`host = integrations.host()`) and this still reads it.
+    """
+    tree = ast.parse(source.read_text())
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in _THE_FIVE:
+            continue
+        # Any receiver: `github_ops`, `integrations.host()`, or a bound `host`.
+        # The METHOD NAME is the coupling; which object carries it is the thing
+        # this lane exists to make interchangeable.
+        found.add(node.func.attr)
+    return found
+
+
 def test_the_interface_declares_exactly_the_five_methods_graph_calls():
     """Five, no sixth. DERIVED from graph.py, and this test re-derives it.
 
     D1 says "define the interface from what `graph.py` actually calls -- derive it,
     do not design it fresh", and the way that claim rots is by someone adding a
-    convenient sixth method. So the abstract set is checked against the
-    `github_ops.<name>` calls `graph.py` actually makes, read off ITS AST.
+    convenient sixth method. So the abstract set is checked against the code-host
+    calls `graph.py` actually makes, read off ITS AST.
+
+    SURVIVES THE PORT, which the first version did not -- see `_code_host_calls_in`
+    for the measurement. Whether `graph.py` says `github_ops.post_comment` or
+    `integrations.host().post_comment`, the METHOD NAMES are the interface's real
+    content and those are what is compared.
 
     `deploy_note` is expected to be ABSENT and the assertion says so explicitly: it
     reads the Bedrock AgentCore control plane, and an interface carrying it would
     oblige a plain-git adapter to answer a question about AWS runtimes.
     """
-    source = REPO_ROOT / "agentorg" / "graph.py"
-    tree = ast.parse(source.read_text())
-    called = {
-        node.func.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "github_ops"
-    }
-    assert called, "graph.py makes no github_ops calls; this test would pin nothing"
-
-    public = {
-        name for name in ("open_pr", "post_comment", "merge_pr", "report_outcome",
-                          "ci_status")
-    }
-    assert called == public, (
-        f"graph.py calls {sorted(called)} but the interface declares {sorted(public)}. "
-        f"The interface is DERIVED from these call sites -- reconcile them rather "
-        f"than adding a method nothing calls."
+    called = _code_host_calls_in(REPO_ROOT / "agentorg" / "graph.py")
+    assert called, (
+        "graph.py makes no code-host calls under either spelling; this test would "
+        "pin nothing. Check `_code_host_calls_in` before assuming graph.py changed."
     )
-    assert "deploy_note" not in public, (
+    assert called == set(_THE_FIVE), (
+        f"graph.py calls {sorted(called)} but the interface is derived from "
+        f"{sorted(_THE_FIVE)}. Reconcile them rather than adding a method nothing "
+        f"calls."
+    )
+    assert "deploy_note" not in called, (
         "deploy_note reads the AgentCore control plane, not a code host"
     )
     assert not hasattr(CodeHost, "deploy_note"), (
         "CodeHost grew a deploy_note; a plain-git adapter cannot answer a question "
         "about AWS runtimes and would have to stub it"
+    )
+
+
+def test_the_cloud_stage_runner_calls_the_same_five_methods():
+    """`run_stage.py` is the second caller, and it must not drift from the first.
+
+    CLAUDE.md records THREE mutations that survived 793 tests for one reason:
+    `run_stage.py` inherited `graph.py`'s COMMENT about a hazard without inheriting
+    its TEST. An interface derived from `graph.py` alone would have the same shape
+    of gap -- so the cloud path's call set is checked too.
+
+    A SUBSET, not equality: `run_stage.py` cuts the pipeline at gate boundaries, so
+    a single stage invocation touches only some of the five. What must hold is that
+    it names nothing the interface does not carry.
+    """
+    called = _code_host_calls_in(REPO_ROOT / "scripts" / "run_stage.py")
+    assert called, "run_stage.py makes no code-host calls; this test would pin nothing"
+    assert called <= set(_THE_FIVE), (
+        f"run_stage.py calls {sorted(called - set(_THE_FIVE))}, which the interface "
+        f"does not declare. The interface must cover BOTH pipeline callers."
     )
 
 
