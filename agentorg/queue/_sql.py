@@ -125,7 +125,7 @@ CREATE TABLE IF NOT EXISTS queue_jobs (
     ticket_id         TEXT NOT NULL DEFAULT '',
     ticket_text       TEXT NOT NULL DEFAULT '',
     trigger_source    TEXT NOT NULL DEFAULT 'manual',
-    poisoned          INTEGER NOT NULL DEFAULT 0,
+    poisoned          {BOOL} NOT NULL DEFAULT {FALSE},
     status            TEXT NOT NULL,
     claimed_by        TEXT NOT NULL DEFAULT '',
     lease_expires_at  TEXT NOT NULL DEFAULT '',
@@ -312,12 +312,34 @@ class SqlQueue:
     def _ensure_schema(self) -> None:
         with self._lock, self._connect() as connection:
             if self.dialect == "sqlite":
-                connection.executescript(_SCHEMA)
+                connection.executescript(self._schema())
             else:
                 with connection.cursor() as cursor:
-                    for statement in filter(None, (s.strip() for s in _SCHEMA.split(";"))):
+                    for statement in filter(None, (s.strip() for s in self._schema().split(";"))):
                         cursor.execute(statement)
                 connection.commit()
+
+    def _schema(self) -> str:
+        """`_SCHEMA` rendered for this dialect.
+
+        THE BOOLEAN COLUMN IS WHY THIS EXISTS, and it was found the first time the
+        Postgres dialect ever ran:
+
+            DatatypeMismatch: column "poisoned" is of type integer but expression is
+            of type boolean
+
+        `INTEGER NOT NULL DEFAULT 0` is right for sqlite, which has no boolean type and
+        stores 0/1 -- and Postgres will not accept a Python `True` bound against an
+        integer column. `_BOOL_COLUMNS` already coerces on the way OUT; nothing coerced
+        on the way in, because `psycopg` correctly sends a bool as a bool.
+
+        Rendered rather than branched at each call site for `_sql`'s reason: every
+        method would otherwise carry the same conditional and one would be written
+        wrong against the dialect nobody was testing.
+        """
+        if self.dialect == "sqlite":
+            return _SCHEMA.format(BOOL="INTEGER", FALSE="0")
+        return _SCHEMA.format(BOOL="BOOLEAN", FALSE="FALSE")
 
     def _sql(self, statement: str) -> str:
         """`statement` with `?` rewritten for the dialect.

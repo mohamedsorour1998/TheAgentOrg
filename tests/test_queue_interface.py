@@ -298,3 +298,88 @@ def test_an_unimplemented_backend_raises_rather_than_downgrading(monkeypatch):
     with pytest.raises(NotImplementedError, match="does not implement"):
         queue._backend()
     queue.reset()
+
+
+# ── THE POSTGRES DIALECT'S DDL — added by the integrator on 2026-08-28 ─────────
+#
+# Lane A wrote both dialects and said plainly that the Postgres one had never been
+# executed, because psycopg was not installed on any machine that ran this suite. It was
+# executed for the first time against a real PostgreSQL 16.15 and failed on the first
+# INSERT:
+#
+#     DatatypeMismatch: column "poisoned" is of type integer but expression is of type
+#     boolean
+#
+# `poisoned INTEGER NOT NULL DEFAULT 0` is right for sqlite, which has no boolean type
+# and stores 0/1 — and Postgres will not accept a Python `True` bound against an integer
+# column. `_BOOL_COLUMNS` already coerced on the way OUT; nothing coerced on the way in,
+# because psycopg correctly sends a bool as a bool. The two halves of the round trip were
+# written against different assumptions and only one of them was ever run.
+#
+# These tests need no database. They read the rendered DDL, which is what the existing
+# tests could not do while `_SCHEMA` was one dialect-blind string.
+
+def test_the_postgres_schema_declares_poisoned_as_a_boolean():
+    """A Python `True` bound against an INTEGER column is refused by Postgres.
+
+    Read off the rendered DDL rather than the template, because the rendering is where
+    the dialects diverge — the template deliberately holds a placeholder now.
+    """
+    from agentorg.queue import _sql
+
+    # `__new__`, not `__init__`: the constructor connects, and this test is about the
+    # rendered TEXT. `_schema` reads only `self.dialect`.
+    queue = _sql.SqlQueue.__new__(_sql.SqlQueue)
+    queue.dialect = "postgres"
+    ddl = queue._schema()
+
+    poisoned = [line.strip() for line in ddl.splitlines() if "poisoned" in line]
+    assert poisoned, "no `poisoned` column in the Postgres DDL; this test pins nothing"
+    assert "BOOLEAN" in poisoned[0].upper(), (
+        f"the Postgres DDL declares {poisoned[0]!r}. Binding a Python bool against an "
+        f"integer column raises DatatypeMismatch — measured against PostgreSQL 16.15."
+    )
+    assert "DEFAULT FALSE" in poisoned[0].upper(), (
+        f"{poisoned[0]!r} defaults a boolean column to a numeric literal, which Postgres "
+        f"refuses at CREATE TABLE"
+    )
+
+
+def test_the_sqlite_schema_still_declares_poisoned_as_an_integer():
+    """The other half, or the fix is a swap rather than a rendering.
+
+    SQLite has no boolean type: `DEFAULT FALSE` there is a bareword it accepts and then
+    stores as text, so `_row_to_job`'s coercion would receive `'FALSE'` — truthy — and a
+    clean run would read as poisoned. The two dialects genuinely need different literals.
+    """
+    from agentorg.queue import _sql
+
+    queue = _sql.SqlQueue.__new__(_sql.SqlQueue)
+    queue.dialect = "sqlite"
+    poisoned = [ln.strip() for ln in queue._schema().splitlines() if "poisoned" in ln]
+
+    assert poisoned, "no `poisoned` column in the sqlite DDL"
+    assert "INTEGER" in poisoned[0].upper(), f"sqlite DDL changed: {poisoned[0]!r}"
+    assert "DEFAULT 0" in poisoned[0].upper(), (
+        f"{poisoned[0]!r} — a `FALSE` bareword is stored as TEXT by sqlite and reads as "
+        f"truthy, so a clean run would report itself poisoned"
+    )
+
+
+def test_neither_rendering_leaves_an_unfilled_placeholder():
+    """A `{BOOL}` reaching a database is a syntax error at CREATE TABLE.
+
+    `_SCHEMA` is a `str.format` template now, so a future column added with a brace and
+    no corresponding key renders literally and fails at connect time — on whichever
+    dialect nobody ran. Cheaper to catch here.
+    """
+    from agentorg.queue import _sql
+
+    for dialect in ("sqlite", "postgres"):
+        queue = _sql.SqlQueue.__new__(_sql.SqlQueue)
+        queue.dialect = dialect
+        ddl = queue._schema()
+        assert "{" not in ddl and "}" not in ddl, (
+            f"the {dialect} DDL still contains a format placeholder: "
+            f"{[ln for ln in ddl.splitlines() if '{' in ln or '}' in ln]}"
+        )

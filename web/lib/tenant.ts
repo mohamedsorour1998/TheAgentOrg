@@ -89,6 +89,51 @@ export const MEMBERSHIP_QUERY = `
 `;
 
 /**
+ * THIS QUERY RETURNS NOTHING UNDER POSTGRES ROW-LEVEL SECURITY, AND THAT IS A
+ * CIRCULAR DEPENDENCY RATHER THAN A BUG IN THE SQL.
+ *
+ * Found 2026-08-28, the first time the web app ran against a real PostgreSQL 16.15 —
+ * every earlier run was sqlite-only, where nothing constrains a SELECT and this
+ * query worked. Measured, one connection, same query, same role:
+ *
+ *     no tenant bound      -> []
+ *     tenant-zero bound    -> [('tenant-zero',)]
+ *
+ * The loop:
+ *
+ *   1. `membershipsFor` asks which tenant this login belongs to.
+ *   2. It reads `membership`, which is in `schema.SCOPED_TABLES` and therefore
+ *      carries an RLS policy comparing against `current_setting('agentorg.tenant_id')`.
+ *   3. RLS needs a bound tenant to return any row.
+ *   4. The bound tenant is the thing this function is trying to discover.
+ *
+ * So `signed_in` is true, `tenant_id` is null, and every authenticated route
+ * refuses with `no-tenant`. VERIFIED END TO END: /api/session answers
+ * `{"signed_in":true,...,"tenant_id":null}` while /api/runs answers 401.
+ *
+ * The behaviour is FAIL-CLOSED and correct as a default — the alternative,
+ * returning tenant zero when the lookup finds nothing, would have worked in a demo
+ * and handed every new signup the original deployment's runs.
+ *
+ * FIXING IT IS A DESIGN DECISION, NOT A PATCH, and the three options are not
+ * equivalent:
+ *
+ *   a. Take `membership` out of SCOPED_TABLES. Wrong: it holds who belongs to which
+ *      organisation, which is exactly the data a cross-tenant read must not see.
+ *   b. Add an RLS policy admitting a row when no tenant is bound. Wrong in the same
+ *      direction as reading a blank provenance as `unknown` — it makes "nobody is
+ *      scoped" mean "everybody is visible", on the one table that decides scope.
+ *   c. Give the identity lookup its own unscoped path: a SECURITY DEFINER function,
+ *      or a small role with SELECT on `web_identity` and `membership` only, used for
+ *      this one query and nothing else. Narrow, auditable, and the standard answer
+ *      to this shape.
+ *
+ * (c) is the right answer and it is deliberately not written here: it changes the
+ * deployment's role model, which is Lane N's file and the operator's decision.
+ * Recorded rather than half-built.
+ */
+
+/**
  * Every tenant this login is a member of, oldest membership first.
  *
  * An empty array is a REAL ANSWER: a person who has signed in and belongs to no
