@@ -67,6 +67,7 @@ from .base import (
     MERGE_REFUSED_PREFIX,
     SCHEME_DELIVERED_LOCAL,
     CodeHost,
+    branch_for,
     undelivered_ref,
 )
 
@@ -123,9 +124,10 @@ class MemoryHost(CodeHost):
         """
         self._maybe_fail("open_pr")
         dev = state.dev or fixtures_loader.dev()
-        # The real adapter's branch shape, from github_ops.open_pr, so a test
-        # asserting on the branch name is asserting on the same thing either way.
-        dev.branch = f"agent-org/{state.ticket_id}-{github_ops._short_sha(dev.diff)}"
+        # The real adapter's branch shape, through the ONE function that spells it,
+        # so a test asserting on the branch name is asserting on the same thing
+        # whichever adapter served the run. See `base.branch_for`.
+        dev.branch = branch_for(state, dev)
         dev.pr_url = f"{SCHEME_DELIVERED_LOCAL}://{dev.branch}"
         self.pulls.append(dev)
         return dev
@@ -175,13 +177,27 @@ class MemoryHost(CodeHost):
         return f"{SCHEME_DELIVERED_LOCAL}://memory/outcome/{state.run_id}"
 
     def _ci_status(self, state: RunState) -> str:
-        """The measured field if a runner filled it, else this adapter's answer.
+        """This adapter's answer. DOES NOT read `RunState.ci_status_measured`.
 
-        The field FIRST, because `""` means "nobody measured" and a measured value
-        must not be re-derived: `RunState.ci_status_measured` exists precisely
-        because the container that runs the agent holds no token while the runner
-        does, and reading past a populated field would produce the same answer for
-        the wrong reason with every test still green.
+        THE CONFORMANCE SUITE CAUGHT THE OPPOSITE OF THIS, and the distinction is
+        worth the paragraph. The first draft returned
+        `state.ci_status_measured or self.ci`, which reads as obviously correct --
+        and `test_a_measured_ci_status_is_carried_through_not_re_derived[github]`
+        failed, because `github_ops.ci_status` does NOT read that field:
+
+            assert 'unknown' == 'failing'   <- github, with the field set
+
+        `ci_status` IS THE MEASUREMENT. The field is where a measurement TRAVELS,
+        from the runner that holds a token to the container that does not, and the
+        one reader is `sre.run` (`agents/sre.py:163`: `state.ci_status_measured or
+        github_ops.ci_status(state)`). An adapter reading it too would mean the
+        answer came from the field on one adapter and from a lookup on another,
+        with nothing recording which -- and a double that honoured it would pass
+        tests the shipped adapter fails.
+
+        So this stays the adapter's own answer, and `unknown` by default: a double
+        defaulting to `passing` would let every test that never mentions CI assert
+        against a green build nothing measured.
         """
         self._maybe_fail("ci_status")
-        return state.ci_status_measured or self.ci
+        return self.ci

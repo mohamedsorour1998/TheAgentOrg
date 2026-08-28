@@ -127,12 +127,25 @@ def host(name: str | None = None) -> CodeHost:
         `GitHost` passes the conformance suite, which is exactly why the refusal
         must be explicit: "it passes the tests" is not "it may open a pull
         request on somebody's repository".
-      * an EMPTY string is not silently the default. `INTEGRATION_HOST=` in a
-        workflow env block is a value somebody set and got wrong; `""` means
-        "unset" only for a variable nobody wrote, which is the absent case the
-        `or DEFAULT_HOST` below covers.
+      * an EMPTY STRING PASSED BY A CALLER raises, because a caller who reached
+        for this function with a value in hand had a value in mind.
+
+    AN EMPTY ENVIRONMENT VARIABLE IS THE ABSENT CASE, and that asymmetry is
+    deliberate rather than sloppy -- an earlier draft of this docstring claimed the
+    opposite of what the code does, and the test caught it. `env: INTEGRATION_HOST:
+    ${{ vars.INTEGRATION_HOST }}` with the variable unset arrives as `""`, not as
+    absent, so refusing it would turn an ordinary Actions env line into a failed
+    pipeline for a repository that never configured this knob at all. That is the
+    same string-typed-input reality `run_stage.flag` handles, where `""` means
+    absent and anything unrecognised raises.
+
+    So: `""` FROM THE ENVIRONMENT means nobody chose, and the default applies.
+    `host("")` in Python means somebody chose badly, and it raises.
     """
-    chosen = name if name is not None else os.environ.get(_ENV_VAR) or DEFAULT_HOST
+    if name is None:
+        chosen = os.environ.get(_ENV_VAR) or DEFAULT_HOST
+    else:
+        chosen = name
     adapter = ADAPTERS.get(chosen)
     if adapter is None:
         raise ValueError(

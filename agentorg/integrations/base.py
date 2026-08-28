@@ -72,6 +72,7 @@ suite green.
 from __future__ import annotations
 
 import abc
+import hashlib
 import logging
 from collections.abc import Callable
 
@@ -139,6 +140,30 @@ def scheme_of(ref: str) -> str:
     ask the question without restating the parsing.
     """
     return ref.split("://", 1)[0] if "://" in ref else ""
+
+
+# The branch a run's change lives on. `agent-org/<ticket>-<7 hex of sha1(diff)>`,
+# which is `github_ops.open_pr`'s shape.
+#
+# A SECOND DECLARATION OF THAT SHAPE, and it is here because the CONFORMANCE
+# SUITE FOUND ITS ABSENCE. The first `git.GitHost` kept whatever branch name the
+# developer agent had put on `state.dev` -- the fixture's is
+# `feat/login-rate-limit` -- and
+# `test_open_pr_fills_the_branch_and_pr_url_on_every_adapter` failed by name:
+#
+#     git left dev.branch as 'feat/rate-limit'; open_pr must replace the agent's
+#     branch name with the one it actually created
+#
+# That is not cosmetic. `github_ops._destination` routes a comment to the PULL
+# REQUEST whenever `dev.branch` is truthy, so an adapter that keeps the agent's
+# name sends every post-develop comment to a PR lookup for a branch nothing
+# created -- and the comment quietly goes nowhere while the run stays green. The
+# branch shape is a property of THIS PIPELINE, not of GitHub, so it belongs on the
+# interface; `test_the_shared_branch_shape_matches_the_shipped_adapters` is the
+# instrument that keeps this copy and `github_ops.open_pr`'s from drifting.
+def branch_for(state: RunState, dev: DevResult) -> str:
+    """The branch name this run's change belongs on. Stable per (ticket, diff)."""
+    return f"agent-org/{state.ticket_id}-{hashlib.sha1(dev.diff.encode('utf-8')).hexdigest()[:7]}"
 
 
 def _absorbed(method: str, exc: Exception, fallback: str) -> str:

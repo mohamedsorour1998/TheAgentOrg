@@ -77,6 +77,7 @@ from .base import (
     MERGE_REFUSED_PREFIX,
     SCHEME_DELIVERED_LOCAL,
     CodeHost,
+    branch_for,
 )
 from .memory import MemoryHost
 
@@ -150,7 +151,7 @@ class GitHost(CodeHost):
         has no PR concept".
         """
         dev = state.dev or MemoryHost().open_pr(state)
-        branch = dev.branch or f"agent-org/{state.ticket_id}"
+        branch = branch_for(state, dev)
         path = self._repo_path()
         self._run("checkout", "main")
         self._run("checkout", "-B", branch)
@@ -215,5 +216,9 @@ class GitHost(CodeHost):
         it must never become `passing`, because a commit nothing examined is not a
         green commit -- the fail-open shape the security lane exists to prevent,
         one seam over.
+
+        DOES NOT READ `RunState.ci_status_measured`, for the reason
+        `MemoryHost._ci_status` records at length: this method IS the measurement,
+        and the field is where a measurement travels. Its one reader is `sre.run`.
         """
-        return state.ci_status_measured or CI_UNKNOWN
+        return CI_UNKNOWN
