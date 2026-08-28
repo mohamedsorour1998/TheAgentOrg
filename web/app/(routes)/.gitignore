@@ -1,0 +1,28 @@
+# THE REPOSITORY ROOT GITIGNORES A DIRECTORY NAMED `runs`, AND IT SWALLOWED THIS
+# ROUTE SILENTLY.
+#
+# `/.gitignore:27` is `runs/` -- UNANCHORED, so it matches a directory called
+# `runs` at ANY depth, not only the repository root's run-log directory (the one
+# CLAUDE.md says never to `ls`, ~10k files). This app's run history lives at
+# `web/app/(routes)/runs/`, so every file under it was ignored.
+#
+# WHAT MADE IT DANGEROUS RATHER THAN ANNOYING: `git add` on an ignored path is not
+# an error unless you name the path exactly. `git add web/` reports success and
+# adds nothing from here, so the screen would have been missing from the commit
+# with the working tree looking complete and every gate green. That is this
+# repository's signature failure shape -- a step reporting success for work it did
+# not do -- arriving in git rather than in the pipeline.
+#
+# Measured:
+#     git check-ignore -v "web/app/(routes)/runs/page.tsx"
+#     .gitignore:27:runs/   web/app/(routes)/runs/page.tsx
+#
+# THE FIX IS HERE AND NOT AT THE ROOT, deliberately. Anchoring the root rule to
+# `/runs/` would be correct and is a one-character edit to a file this lane does
+# not own -- and it would silently widen what the root ignores for every other
+# lane and every future directory. A negation scoped to this directory cannot
+# affect anything outside it.
+#
+# The trailing slash matters: `!runs` would not re-include a DIRECTORY excluded by
+# a directory pattern.
+!runs/
