@@ -420,3 +420,143 @@ integrator, with the reproduction above.
 worktree. A test that passes in the main checkout and fails in a worktree will be
 read as "the lane broke it", and the lane will spend time proving otherwise — as
 this one did.
+
+---
+
+## 7 · PHASE 4 — the second row, and the dimension that stopped being a gap
+
+Measured at **`d6165c8`**, 2026-08-28T16:10:41+0300, twelve lanes after the
+baseline. Same command, same regime, same `--require-real-scanners`:
+
+```
+block_correctness        1.0 (10/10)    measured here
+false_block_rate         0.0 (0/10)     measured here
+human_touches            p=1.0 c=3.0    median of 10 + 10
+agent_rework             p=0.0 c=0.0    median of 10 + 10
+walk seconds  poisoned 1.174652-1.915899  clean 1.202299-1.502633
+suite         1857 tests collected in 0.29s
+```
+
+| Dimension | `9b2b1ee` baseline | `d6165c8` | Reading |
+|---|---|---|---|
+| block correctness | 1.0 (10/10) | **1.0 (10/10)** | **R1 HELD.** The veto is satisfied |
+| false-block rate | 0.0 (0/10) | **0.0 (0/10)** | R2 held |
+| human touches | 1 poisoned · 3 clean | 1 · 3 | R5 held |
+| agent rework | 0 both arms | 0 both arms | still the floor, still fixture-driven |
+| walk, poisoned | 1.233–1.757 s | 1.175–1.916 s | overlapping ranges; not a change |
+| suite collected | 1153 | **1857** | not a scorecard row, deliberately — see §3 |
+
+**R1 holding across twelve lanes is the single most load-bearing line in this
+document,** because four of those lanes edited the path the verdict travels: Lane C
+rewrote all three scanner wrappers behind one severity table, Lane D moved every
+GitHub call behind an interface, Lane H added retrieval, Lane M rewrote all six
+prompts. Preflight check 3 reads `LINES: [3, 4]` with `provenance: scanners` against
+the deployed runtime at **v37**, so the discriminator survived all four.
+
+### cost_per_merged_change is now MEASURED, and it was the largest gap
+
+The baseline reported it `measured: false` with the reason *"nothing records tokens"*
+and named the command that would close it. Lane E built `agentorg/cost/`; Lane L's
+`scripts/measure_cost.py` reads it. Measured, `--runs 3 --require-model`:
+
+| | Value |
+|---|---|
+| model cost per clean change | **$0.013036 – $0.016931**, median $0.013102 |
+| AWS cost that is not the model | **$0.00001245** per run |
+| the model's share of marginal cost | **99.9%** |
+| cached tokens across 3 runs | **0**, and the provider reported caching *at all*: **False** |
+
+Quoted as a range because the spread is **30%** across three consecutive runs of one
+unchanged ticket. A point value here would be the most-quoted figure in this
+document and the least reproducible.
+
+**`scorecard-baseline.json` still reports this dimension `measured: false`, and that
+is correct rather than stale.** `measure_scorecard.py` runs with `LLM_DISABLED=true`
+— it must, or ten poisoned runs make fifty billable Bedrock calls — so it genuinely
+cannot price a run. The two scripts measure different regimes on purpose, and
+collapsing them would mean either a scorecard that spends money or a cost figure
+taken from a fixture read.
+
+Two dimensions remain gaps, with the reason unchanged: **time to merge** (the local
+walk is ~1.5 s against minutes of real run, most of it a human at a gate) and
+**escaped defects** (a rate whose denominator is a handful of merged PRs — report the
+count and the denominator, never the ratio).
+
+### THE PHASE 4 REJECTION — "the queue replaces GitHub Actions", refused under R4
+
+> A rubric that has never rejected anything is decoration. §4 records six rejections
+> from before this phase; this is the one from **this** phase, and it is the claim the
+> deck most wanted to make.
+
+**The proposed claim.** Lane A built `agentorg/queue/` + `scripts/worker.py` — 1,931
+lines plus 745 — to provide the sequencing, handoff, pause and isolation GitHub
+Actions provides today, and CLAUDE.md records it verified end to end with no Actions
+involved: a clean ticket reaches `promoted`, a poisoned one exits 3 with
+`blocking=2`, a refusal exits 4. All true. The slide that wrote itself was *"the
+pipeline no longer needs GitHub Actions."*
+
+**Rejected. Three measurements, and each alone is sufficient.**
+
+```
+grep -icE 'queue|worker' .github/workflows/run-pipeline.yml     ->  1
+grep -inE 'queue|worker' .github/workflows/run-pipeline.yml     ->
+    145:# disk saying how it ended. Queue instead.
+```
+
+The **only** occurrence of either word in the deployed workflow is a **comment**, and
+it is a comment about DynamoDB. Every one of the seven jobs still runs
+`scripts/run_stage.py`. So the queue is not an alternative the deployed pipeline
+selects — it is an alternative nothing selects.
+
+```python
+config.QUEUE_BACKEND with no env set : 'memory'
+config.QUEUE_BACKEND_MEMORY          : 'memory'
+equal                                : True
+```
+
+The durable backend is not the default, **and `config.py`'s own comment three lines
+above says it is**: *"The durable backend is the deployed default and is chosen
+deliberately, never inherited."* It is chosen deliberately in exactly one place —
+`infra/selfhost/docker-compose.yml:134` — and inherited as `memory` everywhere else.
+A comment and its own code disagreeing is §4's closing rule arriving inside one file.
+
+```
+grep -rn 'worker.py' .github/workflows/ infra/ --include='*.yml'
+  ->  infra/selfhost/docker-compose.yml:170: command: ["python","scripts/worker.py","--forever"]
+
+command -v docker  ->  /opt/homebrew/bin/docker
+docker info        ->  NO DAEMON
+```
+
+The single caller of the worker is a compose file whose own header states that
+`docker compose up` **has never been executed against it**, because there is no Docker
+daemon on this machine. Re-measured here: the binary exists, the daemon does not.
+
+| Rule | Verdict |
+|---|---|
+| R1 block correctness | **not affected.** 1.0 (10/10) at `d6165c8`, and the queue path's own verification blocked correctly too |
+| R2 false-block rate | not affected |
+| R3 four gates | **passed, and that is again the finding.** 1853 tests green, ruff/actionlint/terraform clean, preflight OK — on a capability nothing invokes |
+| R4 every number from a committed command | **FAILED.** "Replaces Actions" is a claim about *what runs in production*, and the command that would support it (`grep worker.py .github/workflows/`) returns nothing |
+| R5 human touches | not affected — and the queue's gate design is genuinely stronger, see below |
+
+**Rejected under R4, and NOT under R1.** The distinction matters and is the reason
+this is a rejection of a *claim* rather than of the *code*. The queue is correct: a
+pause is a durable row, `claim` will not hand a `paused` job to a worker, and there is
+no code path from `paused` to `ready` that does not carry a `HumanDecision` — which is
+a stronger guarantee than an Actions Environment, since CLAUDE.md measures all three
+of ours at `can_admins_bypass=True`. None of that is in dispute. What failed is the
+tense: the deck wanted the present indicative for something in the subjunctive.
+
+**What the deck says instead**, and it is the honest form of the same sentence:
+
+> The pipeline's dependence on GitHub Actions is now a **choice rather than a
+> constraint**. A second execution path exists, is tested, and blocks a poisoned
+> ticket with no Actions involved. It is not what production runs today.
+
+**This is the second pattern in CLAUDE.md — a correct answer nobody asks for —
+arriving at the largest scale yet.** The four instances recorded there were single
+modules found by the next lane. This one is 2,676 lines across two files, and the
+thing with no caller is *the alternative to the architecture on slide eight*. It was
+reported honestly by Lane A; what nearly shipped was a slide, not a defect.
+
