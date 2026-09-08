@@ -17,16 +17,37 @@ WHY THE LEDGER STORES A CHECKSUM. A migration edited after it was applied is the
 that produces two databases with the same version number and different shapes -- and
 nothing about the ledger's version column can see it. The checksum can, so `migrate()`
 refuses rather than continuing against a schema it cannot describe.
+
+IT RUNS ON POSTGRES NOW, AND UNTIL 2026-09-09 IT COULD NOT (Lane R)
+==================================================================
+This module accepted `dialect="postgres"` and then called `connection.executescript` at
+three sites. **psycopg has no such method** -- measured on this host against psycopg
+3.3.4:
+
+    sqlite3 Connection has executescript: True
+    psycopg Connection has executescript: False
+
+So everything above -- the forward-only ledger, the checksum guard, the idempotency --
+had never executed against PostgreSQL. Every Postgres verification in this repository
+piped `schema.render_schema(POSTGRES)` into `psql` and bypassed the runner entirely, so a
+Postgres deployment got the schema and no version history: `applied_migration` did not
+exist, and nothing could say which shape that database was.
+
+The fix is at the EXECUTE BOUNDARY and not at the three call sites -- `db/_dialect.py`,
+following `queue/_sql.py:_sql`, "because every method would otherwise carry the same
+conditional, and one of them would eventually be written with the wrong placeholder and
+fail only against the dialect nobody was testing". The parameter is also now REFUSED when
+it disagrees with the connection, which is the original defect turned into a message.
 """
 
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from . import schema
+from ._dialect import Connection, query, run_script, scalar, sql
 
 LEDGER_TABLE = "applied_migration"
 
@@ -99,16 +120,27 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def applied_versions(connection: sqlite3.Connection) -> list[int]:
-    """Which migrations this database has already run, in order."""
-    connection.executescript(_LEDGER_DDL)
-    rows = connection.execute(
-        f'SELECT "version" FROM "{LEDGER_TABLE}" ORDER BY "version"'
-    ).fetchall()
-    return [row["version"] for row in rows]
+def applied_versions(
+    connection: Connection, dialect: str = schema.SQLITE
+) -> list[int]:
+    """Which migrations this database has already run, in order.
+
+    `dialect` is additive with the sqlite default, so every existing caller is unchanged.
+    It is not optional in effect: `run_script` refuses a dialect the connection cannot
+    honour, so a psycopg connection left on the default fails by name here rather than
+    with an `AttributeError` about `executescript`.
+    """
+    run_script(connection, _LEDGER_DDL, dialect)
+    rows = query(
+        connection,
+        f'SELECT "version" FROM "{LEDGER_TABLE}" ORDER BY "version"',
+        (),
+        dialect,
+    )
+    return [scalar(row) for row in rows]
 
 
-def migrate(connection: sqlite3.Connection, dialect: str = schema.SQLITE) -> list[int]:
+def migrate(connection: Connection, dialect: str = schema.SQLITE) -> list[int]:
     """Apply every unapplied migration. Returns the versions applied, possibly empty.
 
     RETURNS THE LIST RATHER THAN A COUNT, so a caller and a test can tell "nothing to do"
@@ -116,18 +148,21 @@ def migrate(connection: sqlite3.Connection, dialect: str = schema.SQLITE) -> lis
     integer but not the same event, and the migration path is one where "did nothing" must
     be distinguishable from "did the work".
     """
-    connection.executescript(_LEDGER_DDL)
-    already = set(applied_versions(connection))
+    run_script(connection, _LEDGER_DDL, dialect)
+    already = set(applied_versions(connection, dialect))
     applied: list[int] = []
 
     for migration in sorted(MIGRATIONS, key=lambda m: m.version):
         expected = migration.checksum(dialect)
         if migration.version in already:
-            recorded = connection.execute(
+            rows = query(
+                connection,
                 f'SELECT "checksum" FROM "{LEDGER_TABLE}" WHERE "version" = ?',
                 (migration.version,),
-            ).fetchone()
-            if recorded is not None and recorded["checksum"] != expected:
+                dialect,
+            )
+            recorded = scalar(rows[0]) if rows else None
+            if recorded is not None and recorded != expected:
                 # REFUSED RATHER THAN SKIPPED. A migration whose text changed after it
                 # ran means this database's shape is not the one the code describes, and
                 # continuing would build later migrations on an unknown base. The
@@ -136,16 +171,19 @@ def migrate(connection: sqlite3.Connection, dialect: str = schema.SQLITE) -> lis
                 raise RuntimeError(
                     f"migration {migration.version} ({migration.name}) was applied with "
                     f"a different definition than the one in this build: recorded "
-                    f"{recorded['checksum'][:12]}, now {expected[:12]}. This database's "
+                    f"{recorded[:12]}, now {expected[:12]}. This database's "
                     f"shape is not the one the code describes. Add a NEW forward "
                     f"migration rather than editing an applied one."
                 )
             continue
 
-        connection.executescript(migration.sql(dialect))
+        run_script(connection, migration.sql(dialect), dialect)
         connection.execute(
-            f'INSERT INTO "{LEDGER_TABLE}" '
-            f'("version", "name", "checksum", "applied_at") VALUES (?, ?, ?, ?)',
+            sql(
+                f'INSERT INTO "{LEDGER_TABLE}" '
+                f'("version", "name", "checksum", "applied_at") VALUES (?, ?, ?, ?)',
+                dialect,
+            ),
             (migration.version, migration.name, expected, _now()),
         )
         applied.append(migration.version)
