@@ -126,19 +126,27 @@ describe("what the table claims about each route", () => {
     }
   });
 
-  it("authenticates everything except the two that structurally cannot", () => {
-    // The Auth.js handler IS the sign-in, and `/api/session`'s whole answer may be
-    // "nobody is signed in". Every other route requires a session, and this asserts
-    // the exemption list has not grown — the `promote` job was exempted by name from
-    // a test once, with a stale reason in a comment, and merged nothing while
-    // reporting success.
+  it("authenticates everything except the four that structurally cannot", () => {
+    // The three `/api/auth/*` routes ARE the sign-in — a route that required a
+    // session to establish one could never establish the first — and
+    // `/api/session`'s whole answer may be "nobody is signed in". Every other
+    // route requires a session, and this asserts the exemption list has not
+    // grown: the `promote` job was exempted by name from a test once, with a
+    // stale reason in a comment, and merged nothing while reporting success.
+    //
+    // THE LIST IS A LITERAL AND NOT DERIVED FROM `ENDPOINTS`, which is the whole
+    // reason it can catch anything. A version computing the expectation from the
+    // same table it checks would move with any change and refuse none — the
+    // `SEVERITY_ORDER` failure, where 24 of 25 property tests read the table
+    // under test and could not see it transposed.
     const unauthenticated = ENDPOINTS.filter((e) => !e.authenticated).map(
       (e) => `${e.method} ${e.path}`,
     );
     expect(unauthenticated.sort()).toEqual([
-      "GET /api/auth/[...nextauth]",
+      "GET /api/auth/callback",
+      "GET /api/auth/logout",
+      "GET /api/auth/signin",
       "GET /api/session",
-      "POST /api/auth/[...nextauth]",
     ]);
   });
 
