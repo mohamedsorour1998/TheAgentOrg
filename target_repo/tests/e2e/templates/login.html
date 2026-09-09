@@ -25,7 +25,28 @@
 <body>
   <h1>Sign in</h1>
 
-  <form id="login-form" method="post" action="/login">
+  <!--
+    action="/web/login", and the one-word difference is the whole point of this
+    surface. MEASURED 2026-09-09, the first time a real browser drove this form:
+    with action="/login" the three submitting tests failed with
+
+        NoSuchElementException: {"method":"css selector","selector":"[id=\"result\"]"}
+
+    because `/login` is `create_app()`'s JSON API -- it answers
+    `{"error":"invalid credentials"}`, which has no #result element and no
+    data-status attribute. The browser was reading a JSON document.
+
+    So the POST route this module exists to add, `web_submit` on /web/login, was
+    reached by NOTHING: the wrapper was written precisely so the browser surface
+    would not override the endpoint the unit tests drive, and then the form posted
+    to that endpoint anyway. CLAUDE.md's second named pattern -- a feature complete,
+    tested, and reached by nothing -- arriving in an HTML attribute, where neither
+    ruff, pytest nor a template render can see it.
+
+    Only a real browser submitting a real form could catch this. `render_template`
+    is happy either way; the string "/login" is not code to anything in this repo.
+  -->
+  <form id="login-form" method="post" action="/web/login">
     <label for="username">Username</label>
     <input id="username" name="username" type="text" autocomplete="username">
 

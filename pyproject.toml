@@ -88,7 +88,35 @@ include = ["agentorg*"]
 "agentorg.security" = ["gitleaks.toml", "semgrep_rules.yml"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# `target_repo/tests/e2e` IS IN testpaths, and it was not until 2026-09-09. Lane G
+# wrote four Selenium tests and made their skip loud in both directions -- and
+# `testpaths = ["tests"]` meant pytest never saw them. Measured at 4814510:
+#
+#     pytest --collect-only -q | grep -ci selenium     ->  0
+#
+# So the skip machinery was correct and UNREACHABLE: a test written to be honest
+# about a missing browser was instead a test nobody ran. That is this repository's
+# second named pattern -- a feature complete, tested, and reached by nothing --
+# arriving in the test suite's own configuration, which is the one place none of the
+# four gates looks.
+#
+# WHY `e2e` AND NOT `target_repo/tests`. `target_repo/tests/test_auth.py` does
+# `from app.auth import ...` at module scope, so collecting it from the repo root
+# needs `target_repo/` on sys.path -- and putting it there (here, or in a conftest)
+# makes the BARE `pytest tests -q` inside target_repo start working, harmonising the
+# two invocations CLAUDE.md says must stay apart. That file is the subject app's own
+# unit test and runs in auth-service's ci.yml; it does not belong in this gate.
+# `test_login_browser.py` needs nothing at import (see `_load_app_web`), so it
+# collects cleanly. Re-measured after this change, `cd target_repo`:
+#
+#     python -m pytest tests -q   ->  6 passed, 4 skipped
+#     pytest tests -q             ->  ModuleNotFoundError: No module named 'app'
+#
+# THIS DOES NOT PUT target_repo/ INTO THE LINT GATE. `ruff check agentorg scripts
+# tests` names its paths explicitly and is unchanged; target_repo carries 2 ruff
+# errors on purpose. testpaths and the ruff argument list are separate lists, and
+# widening one must never be assumed to widen the other.
+testpaths = ["tests", "target_repo/tests/e2e"]
 pythonpath = ["."]
 # Registered so an unknown-marker warning cannot hide a typo. A misspelled
 # `@pytest.mark.real_snapshoot` would otherwise silently not apply, and the test
