@@ -279,6 +279,15 @@ services:
       # network, and it is an address to bind rather than a name to visit.
       AUTH_URL: http://localhost:3000
       AUTH_TRUST_HOST: "true"
+      # THE LIVE COGNITO POOL, provisioned 2026-09-09 by `infra/cognito/provision.py`.
+      # None of these is a secret: an issuer, a PUBLIC client id, and a hosted-UI domain.
+      # The client is provisioned with no secret (verified: `has secret: False`), which is
+      # why `COGNITO_CLIENT_SECRET` appears nowhere — a public client is correct for a
+      # browser-driven authorization-code flow and removes a credential from every
+      # environment that would otherwise have to carry one.
+      COGNITO_ISSUER: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pyt161csn
+      COGNITO_CLIENT_ID: 2uc5d3stt4912418sh5m4btt0s
+      COGNITO_DOMAIN: https://theagentorg-shared-reviewers.auth.us-east-1.amazoncognito.com
       HOSTNAME: 0.0.0.0
       # THE READERS NEED THE PACKAGE ON sys.path. `web/lib/pipeline.ts` spawns one
       # short-lived `python` per read — a deliberate architecture, because a Node database
