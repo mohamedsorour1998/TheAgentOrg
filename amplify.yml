@@ -1,0 +1,172 @@
+# Amplify Hosting build settings for `web/`, the Next.js application.
+#
+# Every paragraph below is a failure somebody already paid for -- most of them on
+# a sibling deployment (`~/sorour/AgentsforHumansHackathon`), the rest here. None
+# of it is stylistic.
+#
+# **THE `applications:` / `appRoot:` FORM IS MANDATORY, NOT A CHOICE.** It is one
+# half of a pair with the `AMPLIFY_MONOREPO_APP_ROOT` environment variable, which
+# `infra/amplify/provision.py` sets to `web`. With that variable present Amplify
+# rejects a flat single-app spec outright:
+#
+#     CustomerError: Monorepo spec provided without "applications" key
+#
+# Removing the variable instead is not the fix. This repository has **no root
+# `package.json`** -- `web/` holds the only one -- so without it the build cannot
+# find Next at all and dies at clone time, about a second in, before any phase
+# runs:
+#
+#     CustomerError: Cannot read 'next' version in package.json. If you are using
+#     monorepo, please ensure that AMPLIFY_MONOREPO_APP_ROOT is set correctly.
+#
+# Both failures read like a packaging problem. Keep both settings, or neither.
+# The same message is also what a CONVERGE prints after deleting that variable,
+# which is why `infra/amplify/provision.py` merges over a fresh read.
+#
+# **THIS FILE OVERRIDES THE CONSOLE'S BUILD SETTINGS, WHICH IS WHY IT IS
+# COMMITTED.** On the reference deployment the console copy drifted out of sync
+# with the monorepo variable and produced exactly the clone-time failure above.
+# A committed spec is reviewable, survives an accidental console edit, and moves
+# with the code that needs it. `infra/amplify/provision.py` READS THIS FILE and
+# sends its bytes as the app's `buildSpec` rather than carrying a second copy --
+# the reference has two spellings of the spec and they can drift; here they
+# cannot, and `tests/test_infra_amplify.py` asserts the module sends this file.
+#
+# **PATHS ARE RELATIVE TO `appRoot`.** In this form Amplify has already entered
+# `web/`, so `baseDirectory` is `.next` and NOT `web/.next` -- the `web/` prefix
+# belongs only to the single-app form, which runs from the repository root.
+# Naming `web/.next` here resolves to `web/web/.next` and fails looking for
+# `required-server-files.json`. There is no `cd web` in the commands for the same
+# reason: a command naming `web/.env.production` from inside `web/` would create
+# `web/web/.env.production`, which Next would never load, on a green build.
+#
+# **`.next`, NEVER `out`, FOR NEXT 14+ REGARDLESS OF SSG OR SSR.** `next export`
+# was removed; a stale local `out/` directory looks like the right answer and
+# fails with `cannot find required-server-files.json`.
+#
+# ── THE `.env.production` WRITES ARE NOW THE ONLY THING STANDING THERE ─────────
+#
+# Amplify exposes its environment variables to the build SHELL, and AWS documents
+# that it deliberately does NOT expose them to the SSR runtime -- "a Next.js
+# server component doesn't have access to those environment variables by default.
+# This behavior is intentional to protect any secrets stored in environment
+# variables". `next build` reads `.env.production`, and Next loads it again at
+# request time, so these four lines are the bridge. Without them every read is
+# `undefined` after a green deploy.
+#
+# **AND THE BUILD CAN NO LONGER CATCH A MISSING ONE.** Before Lane P,
+# `next build` refused without `DATABASE_URL`, `AUTH_SECRET`, `AUTH_GITHUB_ID`
+# and `AUTH_GITHUB_SECRET`, because `authConfig` opened a connection pool at
+# module scope during page-data collection. That call is gone and all three auth
+# routes are `force-dynamic`, so the build now needs **no** environment variables
+# at all -- measured by Lane P with every one explicitly unset: exit 0, zero
+# warnings. A variable omitted here therefore produces a green build and a
+# RUNNING app that refuses every session, which reads as "sign-in broke" rather
+# than as "a variable is unset". There is no backstop under this list.
+#
+# **`rm -f` BEFORE THE APPENDS.** `>>` appends and Amplify caches between builds,
+# so a surviving file would leave two values for one variable -- and dotenv keeps
+# the FIRST, so a rotated Cognito client id would be ignored on every rebuild
+# while the console showed the new one.
+#
+# ── WHAT IS DELIBERATELY ABSENT, AND WHY EACH ONE ─────────────────────────────
+#
+# **NONE OF THE FOUR VALUES BELOW IS A SECRET, AND THAT IS A REQUIREMENT.**
+# Amplify environment variables are visible in the console, in build logs, and --
+# because these lines write them into `.env.production` -- inside a build
+# artifact anyone who can call `get-job` may download. A credential here would be
+# a credential in three places at once, which is the shape of the `github_pat_`
+# this repository already leaked into a Terraform plan artifact. So:
+#
+#   COGNITO_CLIENT_SECRET  The app client is provisioned PUBLIC
+#                          (`GenerateSecret: False`, `infra/cognito/spec.py`), so
+#                          there is no secret to carry. `web/lib/cognito.ts:296`
+#                          reads it as optional and names this the one link a
+#                          missing variable makes silent -- absent here because
+#                          the secret does not exist, not because it was
+#                          forgotten. If anyone ever flips `GenerateSecret`, the
+#                          value belongs in Secrets Manager read by the compute
+#                          role, NEVER on this list.
+#   DATABASE_URL           A DSN carries a password. Same argument. See the
+#   TENANT_DB              database note in `infra/amplify/provision.py`, which
+#                          is the honest answer to "does the deployed app have a
+#                          database at all".
+#   COGNITO_TEST_JWKS      A TEST-ONLY trust-anchor override
+#                          (`web/lib/cognito.ts:129`, gated on
+#                          `NODE_ENV === "test"`). Setting it on a deployed app
+#                          would replace Cognito's published key set, and every
+#                          forged token would then verify with a VALID signature.
+#                          It must never be provisioned anywhere.
+#   AUTH_SECRET            Read by nothing since Lane P removed Auth.js --
+#   AUTH_GITHUB_ID         measured, not assumed: `grep -rn process.env web/`
+#   AUTH_GITHUB_SECRET     names none of them. Carrying a dead variable invites
+#                          the next person to keep it alive.
+#   anything `AWS`-prefixed  Amplify refuses the whole prefix:
+#                          `BadRequestException: Environment variables cannot
+#                          start with the reserved prefix "AWS".`, for
+#                          `AWS_REGION`, `AWS_DEFAULT_REGION` and
+#                          `AWS_ACCESS_KEY_ID` alike. There is no static AWS key
+#                          in this file and there must never be one: every AWS
+#                          step here assumes a role, and the SSR runtime takes
+#                          its credentials from the app's compute role.
+#
+# **`AUTH_URL` IS ONE VARIABLE DOING TWO JOBS, AND THE SECOND HAS NO FALLBACK.**
+# The three auth routes read it as the callback base with
+# `?? request.nextUrl.origin`, so they survive its absence. `web/lib/origins.ts`
+# does not: an unset value yields an EMPTY allow-list, and `originIsAcceptable`
+# refuses every present `Origin` against an empty list -- so **every approval is
+# refused and the button looks broken** rather than misconfigured. Lane P kept
+# one name deliberately; two names would be two declarations of one origin, and
+# the drift shows up as a legitimate click being refused. Its value must be the
+# same origin the reviewer's browser is actually on.
+#
+# **`nvm use 22` IS REQUIRED AND MUST COME FIRST.** Amplify's build image has
+# shipped Node 18, and `next@16.3.3` declares `engines.node: ">=20.9.0"`
+# (measured from the installed package). The build Node version also selects the
+# SSR runtime version. 22 is the value measured working on the reference
+# deployment; this repository's own `web/Dockerfile` builds on 24 and both
+# satisfy Next. `nvm use` in preBuild is documented to run after live package
+# updates and to override them, which is why it is the first line rather than a
+# setting.
+#
+# **THE THREE GATES RUN BEFORE `build`, DELIBERATELY.** `npm run build` is the
+# only one of the four that compiles the app, and CLAUDE.md records four separate
+# defects that passed `tsc`, `eslint` and `vitest` and were caught only by
+# building or by serving. Putting the gates after the build would still satisfy a
+# substring check while the artifact already existed. A deploy that skips them
+# can ship a broken authorization gate, and `POST /api/approvals` is the first
+# surface in this repository that can open a human gate over a network.
+#
+# **`npm run test` NEEDS NO AWS CREDENTIALS AND NO DATABASE.** `web/`'s vitest
+# suite pins the contract, the vocabulary and the structural refusals; nothing in
+# it opens a socket. `pytest` is NOT run here -- it is the repository's gate, run
+# by `.github/workflows/ci.yml`, and it says nothing about `web/`.
+
+version: 1
+applications:
+  - appRoot: web
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - nvm use 22
+            - npm ci --cache .npm --prefer-offline
+        build:
+          commands:
+            - rm -f .env.production
+            - echo "COGNITO_ISSUER=${COGNITO_ISSUER}" >> .env.production
+            - echo "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" >> .env.production
+            - echo "COGNITO_DOMAIN=${COGNITO_DOMAIN}" >> .env.production
+            - echo "AUTH_URL=${AUTH_URL}" >> .env.production
+            - npm run typecheck
+            - npm run lint
+            - npm run test
+            - npm run build
+      artifacts:
+        baseDirectory: .next
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - .next/cache/**/*
+          - .npm/**/*
