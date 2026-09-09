@@ -1938,6 +1938,45 @@ only the mutation produced `1 failed, 46 passed`.
 
 **Numbers in prose must come from a command whose output you paste.**
 
+### AN ABSENCE PROVED BY LOOKING IN ONE PLACE IS NOT AN ABSENCE
+
+Recorded because **I asserted it, twice, in a report to the operator, and it was false.**
+
+For two days this file said "no browser has ever run Selenium — no browser on this host".
+The evidence was `ls "/Applications/Google Chrome.app"` returning `No such file or
+directory`, plus `which chromedriver geckodriver` finding nothing. Correct commands. Wrong
+conclusion. Lane T found:
+
+```
+/Users/sorour/.cache/puppeteer/chrome/mac_arm-152.0.7977.75/
+/Users/sorour/.cache/puppeteer/chrome-headless-shell/mac_arm-152.0.7977.75/
+```
+
+A real Chrome for Testing 152 had been on the machine the whole time. It is not in
+`/Applications` because it is not an installed application — it is a cached artifact that
+some other tool downloaded. **`chromedriver` reports Chrome absent while Chrome is
+present**, because it looks in the standard location and nothing tells it otherwise.
+
+The failure is not the missing directory. It is that **a negative from one lookup was
+promoted to a fact about the machine**, and then written into a report as a limitation the
+project would have to live with. Four Selenium tests were left skipping, and an entire open
+item was described as needing hardware that was already there.
+
+**The rule.** A search that finds nothing has found nothing *where it looked*. Before
+writing "X is not available":
+
+- name the places you searched, in the claim itself, so a reader can see the shape of the
+  hole — `ls /Applications` is not `find ~ -name`;
+- search by CONTENT or by capability rather than by expected path where you can
+  (`find / -name 'chromedriver'` beats `which chromedriver`, which only reads `PATH`);
+- and prefer "I did not find it in A, B or C" to "it is not installed". The first is
+  measured. The second is an inference, and it is the one that ends up in a report.
+
+This is the same shape as `-k` with a misspelled name exiting 0, and as a parametrisation
+derived from the code under test: **an empty result that reads as a clean answer.** The
+difference is that those two were caught by a suite. This one was caught only because
+another agent went looking anyway.
+
 ### A THIRD pattern — a dialect, a driver or a service nobody ever ran
 
 > **Code written for two backends and executed against one is not "mostly working". It
@@ -4083,7 +4122,7 @@ the list is that none of it is a surprise.**
 | 2 | **`migrations.migrate` cannot run on Postgres** | it calls `connection.executescript`, which psycopg has no such method for — so the forward-only ledger, its checksum guard and its idempotency have never run there. Every Postgres verification so far applied the DDL directly and bypassed the runner |
 | 3 | **`state.cost` is assigned nowhere** | so the SRE prompt's cost block renders `""` on every run. Two lines, one per pipeline |
 | 4 | **`/api/runs/[id]/scoring` answers empty** | the PR comment carries the scoring table; that endpoint has no producer on its path |
-| 5 | **Selenium has never run** | no browser on this host, and `pyproject.toml`'s `testpaths = ["tests"]` means the four tests are not even collected — `--collect-only \| grep -ci selenium` is 0 |
+| 5 | **Selenium** — *in progress, and the premise was wrong* | "no browser on this host" was MY conclusion and it was false: a real Chrome for Testing 152 sits in `~/.cache/puppeteer/`. See the note below. The real half is that `testpaths = ["tests"]` means the tests are not collected at all |
 | 6 | **GitHub OAuth cannot complete locally** | the credentials are `selfhost-dev-only` placeholders. A real app's id and secret make the sign-in button work; see the setup note below |
 | 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
 | 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
