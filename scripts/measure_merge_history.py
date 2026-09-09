@@ -18,8 +18,17 @@ by `compute_security_verdict`, and its diff carries `AKIAIOSFODNN7EXAMPLE` on an
 added line. A scan that finds nothing in the merged set AND nothing in the blocked
 set has measured nothing at all.
 
-    python scripts/measure_merge_history.py                 # both dimensions
+    python scripts/measure_merge_history.py                 # read the committed artifact
+    python scripts/measure_merge_history.py --refresh       # RE-MEASURE from live GitHub
     python scripts/measure_merge_history.py --json          # the raw rows
+    python scripts/measure_merge_history.py --out rows.json # also write them somewhere
+
+**The default reads `docs/final/evidence/merge-history.json` and touches no
+network.** `--refresh` is the only mode that calls GitHub, and it rewrites that
+artifact with a `measured_at` stamp. See the note on `ARTIFACT` below for why: an
+existing guard runs every `measure_*.py` on every suite run, and an unconditional
+network call here would have put live GitHub inside a suite whose defining property
+is that it needs none.
 
 TWO THINGS THE NUMBERS DO NOT SAY, both printed beside them rather than left to a
 reader. `time_to_merge` is measured over MERGES, so every blocked and failed run is
@@ -36,8 +45,23 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from statistics import median
+
+# THE DEFAULT READS A COMMITTED ARTIFACT, AND `--refresh` IS THE NETWORK.
+#
+# Caught by `tests/test_evidence.py::test_every_measure_script_runs_and_exits_zero`,
+# which runs every `scripts/measure_*.py` on every suite run. The first version of
+# this script measured from GitHub unconditionally, so that guard would have put
+# ~20 live GitHub API calls inside `pytest -q` -- breaking the property the whole
+# suite is built on ("deliberately hermetic, no AWS, no GitHub, no scanners") and
+# turning the suite red on any machine without an authenticated `gh`.
+#
+# Same shape as `scorecard-baseline.json`: the artifact carries the timestamp it was
+# measured at, and a number nobody has refreshed goes stale VISIBLY rather than
+# silently. Re-measure with `--refresh`.
+ARTIFACT = Path(__file__).resolve().parent.parent / "docs/final/evidence/merge-history.json"
 
 TARGET_REPO = "mohamedsorour1998/auth-service"
 PIPELINE_REPO = "mohamedsorour1998/TheAgentOrg"
@@ -171,7 +195,8 @@ def render(data: dict) -> str:
     tm = [r["ticket_to_merge_min"] for r in rows]
     pm = [r["pr_open_to_merge_min"] for r in rows]
     escaped = sum(data["escaped_by_pr"].values())
-    out = ["MEASURED FROM LIVE GITHUB HISTORY", ""]
+    when = data.get("measured_at", "unknown")
+    out = [f"MEASURED FROM LIVE GITHUB HISTORY at {when}", ""]
     for r in rows:
         out.append(
             f"  issue #{r['issue']:>3} -> PR #{r['pr']:>3}   "
@@ -209,12 +234,53 @@ def render(data: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit the raw rows")
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="re-measure from LIVE GitHub and rewrite the artifact (needs `gh`, authenticated)",
+    )
+    parser.add_argument("--out", type=Path, help="also write the rows to this path")
     args = parser.parse_args()
-    try:
-        data = measure()
-    except CannotMeasure as exc:
-        print(f"CANNOT MEASURE: {exc}", file=sys.stderr)
-        return 1
+
+    if args.refresh:
+        try:
+            data = measure()
+        except CannotMeasure as exc:
+            print(f"CANNOT MEASURE: {exc}", file=sys.stderr)
+            return 1
+        # `commit`, `measured_at` and a non-empty `conditions` are required of every
+        # published artifact by `test_every_published_json_artifact_records_its_conditions`,
+        # and the requirement is right: a number without its conditions is not a
+        # measurement. The conditions that matter here are WHICH repositories were
+        # read and WHAT counted as a credential -- change either and the figures move
+        # while the field names stay identical.
+        data["measured_at"] = datetime.now(UTC).isoformat()
+        data["commit"] = subprocess.run(
+            ("git", "rev-parse", "HEAD"), capture_output=True, text=True,
+            cwd=ARTIFACT.parent, check=False,
+        ).stdout.strip() or "unknown"
+        data["conditions"] = {
+            "target_repo": TARGET_REPO,
+            "pipeline_repo": PIPELINE_REPO,
+            "workflow": WORKFLOW,
+            "credential_patterns": list(CREDENTIAL_PATTERNS),
+            "scanned": "ADDED lines only, per common/diff.py",
+            "time_to_merge_excludes": "every run that did not merge (survivorship)",
+            "gates": "clicked by a human who was watching; a floor on machine time",
+        }
+        ARTIFACT.write_text(json.dumps(data, indent=2) + "\n")
+    else:
+        if not ARTIFACT.exists():
+            print(
+                f"CANNOT MEASURE: {ARTIFACT} is absent and --refresh was not given. "
+                f"This command reads a committed artifact by default; re-measure with "
+                f"--refresh.",
+                file=sys.stderr,
+            )
+            return 1
+        data = json.loads(ARTIFACT.read_text())
+
+    if args.out:
+        args.out.write_text(json.dumps(data, indent=2) + "\n")
     print(json.dumps(data, indent=2) if args.json else render(data))
     return 0
 

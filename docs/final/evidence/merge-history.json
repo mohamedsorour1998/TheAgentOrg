@@ -1,0 +1,90 @@
+{
+  "merges": [
+    {
+      "issue": 21,
+      "pr": 24,
+      "ticket_to_merge_min": 27.066666666666666,
+      "pr_open_to_merge_min": 3.0166666666666666
+    },
+    {
+      "issue": 28,
+      "pr": 29,
+      "ticket_to_merge_min": 4.583333333333333,
+      "pr_open_to_merge_min": 2.6666666666666665
+    },
+    {
+      "issue": 35,
+      "pr": 36,
+      "ticket_to_merge_min": 4.466666666666667,
+      "pr_open_to_merge_min": 2.566666666666667
+    },
+    {
+      "issue": 37,
+      "pr": 38,
+      "ticket_to_merge_min": 9.383333333333333,
+      "pr_open_to_merge_min": 2.5166666666666666
+    },
+    {
+      "issue": 39,
+      "pr": 40,
+      "ticket_to_merge_min": 6.0,
+      "pr_open_to_merge_min": 2.6333333333333333
+    },
+    {
+      "issue": 41,
+      "pr": 42,
+      "ticket_to_merge_min": 4.683333333333334,
+      "pr_open_to_merge_min": 2.6
+    },
+    {
+      "issue": 45,
+      "pr": 46,
+      "ticket_to_merge_min": 4.783333333333333,
+      "pr_open_to_merge_min": 2.8333333333333335
+    },
+    {
+      "issue": 55,
+      "pr": 56,
+      "ticket_to_merge_min": 9.016666666666667,
+      "pr_open_to_merge_min": 5.216666666666667
+    }
+  ],
+  "skipped_prs": [
+    18
+  ],
+  "escaped_by_pr": {
+    "56": 0,
+    "46": 0,
+    "42": 0,
+    "40": 0,
+    "38": 0,
+    "36": 0,
+    "29": 0,
+    "24": 0,
+    "18": 0
+  },
+  "positive_control": {
+    "50": 3
+  },
+  "pipeline_runs": 37,
+  "pipeline_outcomes": {
+    "success": 13,
+    "failure": 13,
+    "cancelled": 11
+  },
+  "measured_at": "2026-09-09T04:22:53.741293+00:00",
+  "commit": "12dabf896e8aa74284e39cb42eaca3a1d54d18ff",
+  "conditions": {
+    "target_repo": "mohamedsorour1998/auth-service",
+    "pipeline_repo": "mohamedsorour1998/TheAgentOrg",
+    "workflow": "run-pipeline.yml",
+    "credential_patterns": [
+      "AKIAIOSFODNN7EXAMPLE",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_ACCESS_KEY_ID"
+    ],
+    "scanned": "ADDED lines only, per common/diff.py",
+    "time_to_merge_excludes": "every run that did not merge (survivorship)",
+    "gates": "clicked by a human who was watching; a floor on machine time"
+  }
+}
