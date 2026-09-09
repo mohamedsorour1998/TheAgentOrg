@@ -84,8 +84,11 @@ describe("what tenant.ts no longer does", () => {
     // RLS needed bound; the claim replaces them. Keeping them exported with no
     // caller would be this repository's second named pattern — a correct answer
     // nobody asks for — so their ABSENCE is asserted rather than assumed.
-    const module: Record<string, unknown> = await import("@/lib/tenant");
-    expect(Object.keys(module).sort()).toEqual([
+    // Named `exported` and not `module`: `@next/next/no-assign-module-variable`
+    // refuses the latter, because in a CommonJS scope `module` is the real thing
+    // and shadowing it breaks the bundle rather than the test.
+    const exported: Record<string, unknown> = await import("@/lib/tenant");
+    expect(Object.keys(exported).sort()).toEqual([
       "MAX_TENANT_ID_LENGTH",
       "tenantFromClaim",
     ]);
