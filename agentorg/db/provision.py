@@ -148,8 +148,14 @@ def _quote_ident(name: str) -> str:
     Role and table names here come from `pg_tables` and from this module's own constants,
     never from a request -- so the honest move is to REFUSE an unexpected shape rather
     than to build an escaping routine nobody exercises.
+
+    `isascii()` IS LOAD-BEARING AND IT WAS A TEST THAT SAID SO. `'ô'.isalnum()` is True in
+    Python -- the same Unicode-awareness that makes `github_ops._ISSUE_REF` spell its
+    character class `[0-9]` rather than `\\d`, because `\\d` matches Arabic-Indic digits.
+    A first draft accepted `rôle` here, and the next thing this function's output does is
+    become DDL.
     """
-    if not name or not all(c.isalnum() or c == "_" for c in name):
+    if not name or not all(c.isascii() and (c.isalnum() or c == "_") for c in name):
         raise ValueError(
             f"{name!r} is not a plain identifier. This module interpolates identifiers "
             f"into DDL -- GRANT takes no parameters -- so it accepts only "
