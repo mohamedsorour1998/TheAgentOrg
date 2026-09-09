@@ -2925,6 +2925,19 @@ full-suite run** — `test_every_workflow_that_reaches_aws_is_one_we_expect` fai
 `Extra items in the left set: 'deploy-platform.yml'`, which is that guard working
 exactly as designed; registering the name is the deliberate decision it asks for.
 
+**And at `b9f0803`, with NINETEEN LANES merged and the app on Cognito:**
+
+```
+pytest -q                              2022 passed, 7 skipped
+ruff / actionlint / terraform fmt      exit 0
+web: tsc / eslint / vitest / build     0 · 0 problems · 14 files 204 tests · builds
+test files                             83
+```
+
+`1131 → 2022` is **891 tests**. The web suite went 166 → 204 when Auth.js was replaced by
+Cognito, and the Python suite absorbed Lane T's Selenium collection, Lane R's two-role
+provisioning and Lane Q's infrastructure specs.
+
 **And at `e93205e`, with ALL FIVE PHASES and all FOURTEEN LANES merged:**
 
 ```
@@ -4141,20 +4154,24 @@ noise.**
 
 ---
 
-## WHAT IS STILL OPEN, as of 2026-08-28
+## WHAT IS STILL OPEN, as of 2026-09-09
 
-All five phases and fourteen lanes are merged; the app runs locally. These are the named
-gaps, each one measured rather than suspected. **Nothing here is unknown — the value of
-the list is that none of it is a surprise.**
+All five phases and **nineteen lanes** are merged; the app runs locally, on Cognito, with
+the database behind a non-owning role. **Eight of the ten items below are closed** — six
+on 2026-09-09 — and the two that remain are an operator's click rather than code.
+
+Each was measured rather than suspected, and each closure carries the measurement that
+closed it. **Nothing here is unknown; the value of the list is that none of it is a
+surprise.**
 
 | # | Open | Why it is not done |
 |---|---|---|
-| 1 | **Two-role database model** — the app must connect as a non-owning role | `membershipsFor` reads the RLS-scoped `membership` table to discover the tenant RLS needs bound. Circular. `web/lib/tenant.ts:126` records the three options and why two are wrong; the right one changes the deployment's role model |
-| 2 | **`migrations.migrate` cannot run on Postgres** | it calls `connection.executescript`, which psycopg has no such method for — so the forward-only ledger, its checksum guard and its idempotency have never run there. Every Postgres verification so far applied the DDL directly and bypassed the runner |
-| 3 | **`state.cost` is assigned nowhere** | so the SRE prompt's cost block renders `""` on every run. Two lines, one per pipeline |
-| 4 | **`/api/runs/[id]/scoring` answers empty** | the PR comment carries the scoring table; that endpoint has no producer on its path |
+| 1 | ~~**Two-role database model**~~ — **CLOSED 2026-09-09 (Lanes P + R)** | Both halves. The CIRCULARITY went first: Lane P replaced the RLS-scoped lookup with a verified `custom:tenant` claim, so `membershipsFor` is deleted and all three options that file recorded are moot. Then the ROLE: `agentorg/db/provision.py` creates `agentorg_app` and the stack's five DSNs name it. Measured as both roles — owner sees **2** tenants' rows and an unscoped read returns **2**; `agentorg_app` sees **1** and **0** |
+| 2 | ~~**`migrations.migrate` on Postgres**~~ — **CLOSED 2026-09-09 (Lane R)** | A dialect-aware execute boundary. Proven on a clean database: ledger `v1 tenancy_schema`, and a second `migrate()` leaves it at one row — idempotent, there, for the first time. The evidence it had never run: the hand-built database REFUSED migration with `DuplicateObject`, exactly as a forward-only runner should |
+| 3 | ~~**`state.cost` assigned nowhere**~~ — **CLOSED 2026-09-09** | `merge_cost_records` in both pipelines, not assignment: seven cloud jobs are seven processes, and an assignment erases every earlier row. **Wiring it exposed a defect underneath** — a fixture-only run reported a priced-and-free zero for a run where nothing was priced, because `price_stage` short-circuited zero-token rows. Its own docstring already said otherwise |
+| 4 | ~~**`/api/runs/[id]/scoring` empty**~~ — **CLOSED 2026-09-09** | Its own note said no deployed run carried a scoring row, which stopped being true when `score_findings` was wired into `_with_provenance` — all three returns pass through it. Measured on a poisoned run against the real Postgres: **3 rows**, with thresholds and blocking flags |
 | 5 | ~~**Selenium**~~ — **CLOSED 2026-09-09 (Lane T)** | A real browser ran all four: Chrome for Testing 152.0.7977.75 + chromedriver 152.0.7977.82, headless, `5 passed`. `testpaths` now carries `target_repo/tests/e2e` (**1969 → 1974** collected) and the three-direction skip is unchanged. The first run was `3 failed` — the form posted to `/login`, the JSON API, so the `/web/login` route the wrapper exists to add was reached by nothing. `docs/final/evidence/selenium-run.md` |
-| 6 | **GitHub OAuth cannot complete locally** | the credentials are `selfhost-dev-only` placeholders. A real app's id and secret make the sign-in button work; see the setup note below |
+| 6 | ~~**GitHub OAuth**~~ — **SUPERSEDED 2026-09-09 (Lanes P + Q)** | There is no GitHub OAuth provider any more. Cognito replaced Auth.js, `next-auth` is out of `package.json`, and the sign-in button is a `<form>` posting to `/api/auth/signin`. What remains is provisioning a pool — an operator's `aws` call, with the spec and an idempotent script written and tested |
 | 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
 | 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
 | 9 | ~~**`time_to_merge` and `escaped_defects`**~~ — **CLOSED 2026-09-09 (Lane T)** | They needed "real runs over real time". The runs existed and nobody had asked GitHub. `scripts/measure_merge_history.py`: ticket→merge median **5.39 min** (n=8, max 27.07); **0** credential escapes over **9** merged PRs, positive control PR #50 carries 3. Survivorship stated — 8 merges of **37** runs |
