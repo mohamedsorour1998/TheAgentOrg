@@ -4,115 +4,118 @@
  * The one function that turns a request into a `SessionIdentity`, which is what
  * `authz.decide` takes. Nothing else in `web/app/api/**` may construct one — a
  * route that built its own could build one from a request body, and a tenant a
- * caller can name is a tenant a caller can choose.
+ * caller can name is a tenant a caller can choose. That rule is unchanged by the
+ * move to Cognito; only where the identity COMES FROM has changed.
  *
- * THE TENANT IS RESOLVED PER REQUEST, FROM MEMBERSHIP, NOT CARRIED ON THE SESSION
- * =============================================================================
- * A session identifies the PERSON. The tenant comes from joining
- * `web_identity` -> `app_user` -> `membership` on every request.
+ * THE TENANT NOW ARRIVES ON THE TOKEN, AND THE PREVIOUS VERSION OF THIS FILE
+ * ARGUED AGAINST EXACTLY THAT. Read `web/lib/tenant.ts` before deciding it is
+ * an improvement: it closes the RLS circularity, it moves the assignment from a
+ * SQL row to a Cognito attribute, and it reintroduces a revocation latency this
+ * file used to refuse — bounded now by `cognito.SESSION_MAX_AGE_SECONDS`, one
+ * hour, rather than by a thirty-day database session. All three are true at once
+ * and the honest account needs all three.
  *
- * Carrying it on the session would be cheaper and is wrong: revoking somebody's
- * membership would leave their live session still scoped to the tenant they were
- * removed from, for up to thirty days, with nothing anywhere saying so. That is the
- * same shape as a JWT session that cannot be revoked, one level up — and it is why
- * `authConfig` uses a database strategy in the first place.
+ * A PERSON IN NO ORGANISATION GETS `null`, NEVER A DEFAULT TENANT — unchanged,
+ * and it matters more now that anyone may sign themselves up. `engine.acting_as`
+ * refuses a blank scope because "a blank scope matches a blank column and that is
+ * a row nobody owns", and `tenant_zero.for_run_state` translates a blank to
+ * tenant zero — correct for a RUN written before multi-tenancy and catastrophic
+ * for a SESSION, because it would hand every new signup the original single-tenant
+ * deployment's runs.
  *
- * A PERSON IN NO ORGANISATION GETS `null`, NEVER A DEFAULT TENANT. `engine.acting_as`
- * refuses a blank scope because "a blank scope matches a blank column and that is a
- * row nobody owns", and `tenant_zero.for_run_state` translates a blank to tenant
- * zero — which is correct for a RUN written before multi-tenancy and catastrophic
- * for a SESSION: it would hand anybody who signs in the original single-tenant
- * deployment's runs. So the translation happens for run state and never for a
- * session, and the reader refuses a blank tenant at its own boundary as well.
+ * THREE LAYERS, AND EACH ANSWERS A DIFFERENT QUESTION:
+ *
+ *     cognito.verifySession   is this token authentic, and about a real account?
+ *     authorize.authorizeSession   is this an account this application acts on?
+ *     tenant.tenantFromClaim  is there a scope to act in?
+ *
+ * `currentIdentity` requires all three and returns `null` otherwise, so a
+ * signed-in-but-unassigned account authenticates and authorises nothing.
  */
 
-import { auth } from "./auth";
+import { cookies } from "next/headers";
+
+import { authorizeSession, type TokenIdentity } from "./authorize";
+import { SESSION_COOKIE, verifySession } from "./cognito";
+import { tenantFromClaim } from "./tenant";
 import type { SessionIdentity } from "./authz";
 
 /**
- * The signed-in identity, or `null`.
+ * The verified token, or `null`. **`/api/session` is the ONLY intended caller.**
  *
- * Returns `null` for three different situations, and that is deliberate at THIS
- * layer: no session, a session with no GitHub login, and a session whose person
- * belongs to no organisation. The caller turns them into different statuses (401 vs
- * 403) through `authz.decide`'s refusal codes — this function's job is only to
- * refuse to invent an identity.
+ * It is exported because that route has to distinguish *nobody is signed in* from
+ * *signed in and not yet assigned a role or a tenant* — a distinction requirement
+ * 9 creates the moment self-service sign-up is allowed, and one `currentIdentity`
+ * deliberately collapses. No route that reads or writes data may use this: it
+ * carries an identity that has passed authentication and no authorisation check
+ * at all.
  *
- * `login` NOT `email`. It becomes `HumanDecision.by`, and it is what a person
- * recognises on a timeline beside a gate decision. An email is also personal data
- * that would then appear in the append-only decision log, which is
- * `runs/<run_id>.jsonl` and a DynamoDB audit trail — neither of which has a
- * deletion path, because `Scan`, `DeleteItem` and `BatchWriteItem` are deliberately
- * absent from that table's IAM grant.
+ * THE `catch` IS FAIL-CLOSED AND ITS REACHABILITY IS THE INTERESTING PART.
+ * `cookies()` throws outside a request scope, so it sits INSIDE the `try` rather
+ * than above it — Plan 1's `list_documents` lesson from the reference project:
+ * "this function already fails closed" is not the same claim as "every line in it
+ * is inside the `try`". `verifySession` itself is believed not to throw for any
+ * input (`issuer()` and `clientId()` are called inside its own `try`), which
+ * makes this branch mostly unreachable today — and an unreachable branch is still
+ * shipped code that the next edit to `cognito.ts` can make live.
+ */
+export async function verifiedToken(): Promise<TokenIdentity | null> {
+  try {
+    const jar = await cookies();
+    return await verifySession(jar.get(SESSION_COOKIE)?.value);
+  } catch {
+    // A verifier that could not run has authenticated nobody.
+    return null;
+  }
+}
+
+/**
+ * The signed-in identity a route may act on, or `null`.
+ *
+ * Returns `null` for four situations, and collapsing them is deliberate AT THIS
+ * LAYER: no cookie, a token that fails verification, an account with no admitted
+ * role, and an account with no usable tenant claim. The caller turns them into
+ * refusal codes through `authz.decide` — this function's job is only to refuse to
+ * invent an identity, and a route that could tell the four apart would be a route
+ * that could tell an unauthenticated caller which accounts exist.
+ *
+ * `login` NOT `email`, and NOT `sub`. It becomes `HumanDecision.by`, and it is
+ * what a person recognises on a timeline beside a gate decision — the whole
+ * difference between this surface and `approve_server`'s `by="ui-reviewer"`. An
+ * email would additionally be personal data in the append-only decision log,
+ * which is `runs/<run_id>.jsonl` and a DynamoDB audit trail — neither of which has
+ * a deletion path, because `Scan`, `DeleteItem` and `BatchWriteItem` are
+ * deliberately absent from that table's IAM grant. See `authorize.TokenIdentity`
+ * for the constraint that places on how the pool is provisioned.
  */
 export async function currentIdentity(): Promise<SessionIdentity | null> {
-  const session = await auth();
-  if (!session?.user) {
+  const identity = await verifiedToken();
+  const authorised = authorizeSession(identity, Date.now());
+  if (!authorised.permitted) {
     return null;
   }
 
-  const login = githubLoginFrom(session.user);
-  if (login === null) {
-    // A session with no usable login cannot attribute a decision, and this surface
-    // exists to attribute decisions. Refused rather than falling back to an email
-    // or a database id: `approve_server`'s `by="ui-reviewer"` is the failure this
-    // whole lane exists to fix, and a fallback would reintroduce it with a
-    // different constant.
-    return null;
-  }
-
-  const tenantId = await tenantForLogin(login);
+  // The tenant is validated rather than trusted for its shape: `tenantFromClaim`
+  // refuses blank, over-long and control characters, so a malformed claim fails
+  // here rather than several layers away inside a Python context manager.
+  const tenantId = tenantFromClaim(authorised.identity.tenantId);
   if (tenantId === null) {
     return null;
   }
 
-  return { login, tenantId };
+  return { login: authorised.identity.login, tenantId };
 }
 
 /**
- * The GitHub login off an Auth.js user, or `null`.
- *
- * Auth.js's `Session["user"]` declares `name`, `email` and `image` and NOT a
- * provider login, so the login is carried through a callback into `name` or read
- * from `web_identity`. This function reads the field and refuses a blank rather
- * than trusting it to be populated — a blank `by` recorded against a gate decision
- * is the same defect as a constant one.
- */
-function githubLoginFrom(user: { name?: string | null }): string | null {
-  const login = (user.name ?? "").trim();
-  return login === "" ? null : login;
-}
-
-/**
- * Which tenant this login belongs to, or `null`.
- *
- * Delegates to `web/lib/tenant.ts`, which carries the argument for why this one
- * query is not tenant-scoped and cannot be: it is what PRODUCES the scope, the way
- * Lane K's `auth.resolve()` produces the `Credential` everything scoped then
- * carries.
- *
- * `null` FOR A PERSON IN NO ORGANISATION, never tenant zero. That translation is
- * correct for a RUN written before multi-tenancy and catastrophic for a SESSION: it
- * would hand anybody who signs in the original single-tenant deployment's runs. The
- * first failure is a person reading "your account is not attached to an
- * organisation"; the second is a breach that looks like a working product.
- */
-async function tenantForLogin(login: string): Promise<string | null> {
-  const { membershipsFor, soleTenant } = await import("./tenant");
-  const { sessionPool } = await import("./auth");
-  return soleTenant(await membershipsFor(sessionPool(), login));
-}
-
-/**
- * Which repositories this tenant may act on.
+ * Which repositories this tenant may act on. UNCHANGED by the Cognito move.
  *
  * Reads Lane B's `repository` table through its scoped accessor, via the Python
  * reader — never with a query written here. See `web/lib/pipeline.ts`.
  *
- * AN EMPTY LIST IS A REAL ANSWER and `authz.decide` refuses against it, so a tenant
- * that has connected nothing cannot approve anything. Same direction as Lane K's
- * empty key store and `budgets.check` with no budget row: absent must not read as
- * unlimited.
+ * AN EMPTY LIST IS A REAL ANSWER and `authz.decide` refuses against it, so a
+ * tenant that has connected nothing cannot approve anything. Same direction as
+ * Lane K's empty key store and `budgets.check` with no budget row: absent must
+ * not read as unlimited.
  */
 export async function repositoriesInScope(
   tenantId: string,
