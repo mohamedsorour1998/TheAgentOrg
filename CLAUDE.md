@@ -54,11 +54,20 @@ somewhere other than where you are editing.
 ### Before you commit
 
 ```bash
-.venv-main/bin/python -m pytest -q                            # green; see the note below
-.venv-main/bin/python -m ruff check agentorg scripts tests    # exit 0
-actionlint .github/workflows/*.yml                            # exit 0
-cd infra/Terraform && terraform fmt -check -recursive          # exit 0
+.venv-main/bin/python -m pytest -q                                  # green; see the note below
+.venv-main/bin/python -m ruff check agentorg scripts tests infra    # exit 0
+actionlint .github/workflows/*.yml                                  # exit 0
+cd infra/Terraform && terraform fmt -check -recursive                # exit 0
 ```
+
+**`infra` WAS ADDED TO THAT LINE ON 2026-09-09 AND EVERYTHING IN IT WAS UNLINTED UNTIL
+THEN.** The path list is explicit — `agentorg scripts tests` — so `infra/ingress/handler.py`
+(the one component whose HMAC is the only access control in the whole webhook path),
+`infra/cognito/` and `infra/amplify/` were never read by the lint gate. This is the same
+shape as the `target_repo/` note further down: **the lint gate's paths and the test suite's
+`testpaths` are independent lists, and widening one does not widen the other in either
+direction.** Adding it found nothing, which is the good outcome and not a reason to have
+left it out.
 
 **If you touched `web/`, there are FOUR MORE GATES and the four above see NOTHING of
 them** — `pytest` never loads the app and `ruff` never reads TypeScript:
@@ -2768,21 +2777,78 @@ where it looks (`/agentorg`) rather than where it seemed to.
 `tenant_id` resolves in the container and would not with a properly-scoped role. It is
 the open item, not a fix: see `web/lib/tenant.ts:126`.
 
-### Making the sign-in button work — a real GitHub OAuth app
+### THE SIGN-IN FLOW IS COGNITO, AND IT IS LIVE — 2026-09-09
 
-The shipped credentials are `selfhost-dev-only` placeholders, so the button renders,
-CSRF-protects correctly, and cannot complete. Two settings make it real.
-
-**Create the app** at `github.com/settings/developers` → OAuth Apps → New:
+**The GitHub OAuth walkthrough that stood here is GONE, not merely stale.** `next-auth`
+is out of `web/package.json`, there is no GitHub provider, and `/api/auth/callback/github`
+is not a route. Lanes P and Q replaced the whole flow with a Cognito hosted-UI round trip,
+and the pool is now provisioned and verified end to end:
 
 ```
-Homepage URL          http://localhost:3000
-Authorization callback http://localhost:3000/api/auth/callback/github
+pool_id            us-east-1_Pyt161csn
+COGNITO_CLIENT_ID  2uc5d3stt4912418sh5m4btt0s          (PUBLIC — no secret)
+COGNITO_ISSUER     https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pyt161csn
+COGNITO_DOMAIN     https://theagentorg-shared-reviewers.auth.us-east-1.amazoncognito.com
+amplify app        d9lts7h24c9c8   https://main.d9lts7h24c9c8.amplifyapp.com
+
+GET /api/auth/signin -> 307
+  location: .../login?client_id=2uc5d3stt...&redirect_uri=...&state=<uuid>
+  set-cookie: agentorg_oauth_state=...; Path=/api/auth; Max-Age=600; HttpOnly; SameSite=lax
+following it -> HTTP 200, <title>Signin</title>, signInFormUsername
 ```
 
-**THE HOST MUST MATCH EXACTLY, AND `localhost` IS NOT `127.0.0.1` TO GITHUB.** They are the
-same machine and different *origins*: the callback is compared as a string, and a mismatch
-answers `redirect_uri_mismatch` — which reads as a broken app rather than a typo.
+Three values reach the app, none of them a credential. `COGNITO_CLIENT_SECRET` appears
+nowhere because the client is provisioned **public** (verified `has secret: False`), which
+is correct for a browser-driven authorization-code flow and removes a secret from every
+environment that would otherwise carry one.
+
+#### A STALE CONTAINER IMAGE SERVED A ROUTE THAT HAD BEEN REWRITTEN THAT MORNING
+
+**The most expensive hour of 2026-09-09, and the diagnosis was wrong twice before it was
+right.** `GET /api/auth/signin` answered **`HTTP/1.1 200 OK`** with an HTML body where a
+307 was expected. The body's CSS (`--color-error: #c94b4b`) is **next-auth's default
+sign-in page** — from a dependency that is no longer in `package.json`.
+
+The first two hypotheses were both about configuration, and both were wrong: the
+environment variables were missing, then `AUTH_URL` was missing. Measured, they were
+present and correct inside the container all along:
+
+```
+podman exec ... sh -c 'echo $COGNITO_ISSUER'
+  https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pyt161csn
+```
+
+The cause was the image:
+
+```
+theagentorg-selfhost-web:latest        built 12 days ago   (2026-08-28)
+web/app/api/auth/signin/route.ts       70eaddb 2026-09-09  (that morning)
+```
+
+**`podman compose up -d web` RESTARTS A CONTAINER; IT DOES NOT REBUILD AN IMAGE.** So
+every edit to `web/` since 2026-08-28 — the entire Cognito port, four route files, the
+`SignInPanel` rewrite — was on disk, committed, passing all four web gates, and **not in
+the thing serving traffic**. `podman compose build web` then `up -d web` fixed it in one
+step.
+
+**This is the named pattern in a new layer, and the layer is the point.** The repository
+already records a check that cannot fail, a correct answer nobody calls, and a dialect
+nobody ran. This is a fourth: **code that runs, and is not the code you edited.** Every
+gate reads the WORKING TREE — `pytest`, `ruff`, `tsc`, `eslint`, `vitest`, and even `next
+build`, which compiles the app but compiles it *here*. Not one of them can see what a
+container is actually serving. The only instrument is a request against the running thing,
+which is why the `next start` + `curl -i` habit already recorded above is worth its thirty
+seconds — and why it must be run **after a rebuild**, not after a restart.
+
+The tell was available and I did not read it: an HTML page from a library the project had
+deleted. **When a response mentions a dependency you removed, suspect the artifact, not the
+configuration.**
+
+#### The host still matters, and `localhost` is still not `127.0.0.1`
+
+Unchanged by the move to Cognito, and now it binds on the **Cognito callback list** rather
+than on a GitHub app's. The callback is compared as an exact string, and a mismatch is
+refused by Cognito — which reads as a broken app rather than a typo.
 
 **This stack uses `localhost`** (`AUTH_URL` in the compose file). Measured on macOS, and
 the asymmetry is worth knowing:
@@ -2801,42 +2867,126 @@ falls through does not. That is why `localhost` can appear broken on a machine w
 The port publish stays `127.0.0.1:` regardless: that is an address to BIND, and it is what
 keeps this off the network. `AUTH_URL` is a name to VISIT. They are different questions.
 
-Then put the id and secret in `infra/selfhost/docker-compose.yml`'s `web` service —
-`AUTH_GITHUB_ID`, `AUTH_GITHUB_SECRET` — and `podman compose up -d web`.
+The pool's callback list carries **both** origins at once, because
+`UpdateUserPoolClient` is a full replace and sending one silently removes the other.
+Verified live after the converge:
 
-**A GitHub OAUTH APP, NOT A GITHUB APP.** The two are different products: an OAuth app
-issues a user token and is what `next-auth`'s GitHub provider expects. A GitHub App issues
-installation tokens and would need a different provider and a JWT flow. `read:user repo`
-are the scopes this app asks for.
-
-**Sign-in still refuses after that, and it is not a bug.** `signed_in` becomes true and
-`tenant_id` stays `null`, because a fresh GitHub login has no `web_identity` row and no
-`membership` — so `tenantForLogin` returns null and every authenticated route 401s. That is
-fail-closed by design, and item 1 in the open list is the reason the lookup cannot resolve
-itself. To act as a real tenant, insert the two rows:
-
-```sql
-INSERT INTO app_user (id, email, created_at) VALUES ('u-you', '<your-email>', now());
-INSERT INTO membership (id, tenant_id, user_id, role, created_at)
-  VALUES ('m-you', 'tenant-zero', 'u-you', 'reviewer', now());
-INSERT INTO web_identity (auth_user_id, app_user_id, github_login)
-  SELECT id, 'u-you', '<what /api/session reports as login>' FROM users WHERE email = '<your-email>';
+```
+callbacks  http://localhost:3000/api/auth/callback
+           https://main.d9lts7h24c9c8.amplifyapp.com/api/auth/callback
+logouts    http://localhost:3000/signin
+           https://main.d9lts7h24c9c8.amplifyapp.com/signin
+read       ['custom:role', 'custom:tenant']      <- BOTH claims survived the replace
+write      ['email']                             <- and the write lock did too
+flows      ['code']
 ```
 
-`github_login` must equal what `/api/session` reports as `login` — `MEMBERSHIP_QUERY` joins
-on that column, and a display name where a handle was expected returns zero rows with no
-error. Measured: that exact mismatch is why the first seeded session resolved no tenant.
+Those last three lines are the point of reading it back. The reference deployment measured
+an update naming only `ClientName` leaving `ReadAttributes`, `CallbackURLs` and
+`AllowedOAuthFlows` all **absent** afterwards — so a converge that "worked" is exactly how
+both custom-claim guards get dropped, and every sign-in then fails closed with a valid
+signature.
 
-**To skip OAuth entirely for a demo**, insert a session row and set the cookie:
+#### `Mutable: False` MEANS `AdminCreateUser` OR NEVER — MEASURED 2026-09-09
 
-```sql
-INSERT INTO sessions ("sessionToken", "userId", expires)
-  SELECT 'demo-token', id, now() + interval '1 day' FROM users WHERE email = '<your-email>';
+`infra/cognito/provision.py:assign_tenant`'s docstring states an open question the lane
+could not answer without creating a pool: *whether `AdminUpdateUserAttributes` may set an
+immutable attribute that was **never given a value***. AWS's own model documentation does
+not distinguish the never-set case. **It is answered now, and the answer is no.**
+
+Probed against the live pool with a throwaway user created with a role and **no** tenant,
+then deleted:
+
+```
+created probe user with NO custom:tenant
+custom:tenant before: None
+ANSWER: it CANNOT -- InvalidParameterException
+        user.custom:tenant: Attribute cannot be updated.
+probe user deleted
 ```
 
-then in the browser console on `127.0.0.1:3000`:
-`document.cookie = "authjs.session-token=demo-token; path=/"`. The session strategy is
-`database`, so the row is the session — there is no JWT to forge.
+The already-set case refuses identically, so `reviewer-01` cannot be moved between tenants
+either:
+
+```
+assign_tenant('reviewer-01', 'tenant-other')
+  InvalidParameterException ... user.custom:tenant: Attribute cannot be updated.
+```
+
+**THE CONSEQUENCE IS A DEPLOYMENT DECISION, NOT A BUG, AND IT COLLIDES WITH REQUIREMENT 9.**
+Self-registration is deliberately **open** (`AllowAdminCreateUserOnly: False`, pinned by
+`test_self_registration_is_open`) because the judges ask for "sign up and in". But a
+self-registered account gets no `custom:tenant` — by design, `tenant` is not in
+`WriteAttributes`, so a caller cannot choose their own — and it now turns out **that tenant
+can never be assigned afterwards**. So a person can sign up, sign in, and be permanently
+unable to see anything, with `/api/session` answering `tenant_id: null` forever.
+
+That is fail-closed, which is the right direction, and it is still a dead end. The two
+honest options, and neither is free:
+
+| Option | Cost |
+|---|---|
+| Provision reviewers with `AdminCreateUser` (what `provision()` already does for `reviewer-01`) | self-signup produces a permanently useless account; requirement 9 demonstrates a flow that dead-ends |
+| Declare `tenant` `Mutable: True` and rely on the `WriteAttributes` exclusion alone | **a custom attribute's definition cannot be changed — this needs a NEW POOL.** New pool id, new issuer, every token invalid, every assigned tenant re-assigned. And it drops from two guards to one |
+
+`assign_tenant` raising rather than reporting success is what made this visible at all —
+its read-back is the arbiter, exactly as its docstring argued it should be. Update that
+docstring's open paragraph when the decision is made; do **not** delete the finding.
+
+### The Amplify app — PROVISIONED 2026-09-09, and it builds nothing yet
+
+`infra/amplify/spec.py` shipped without the module that applies it, so the lane was this
+repository's **second named pattern** in its purest form: correct code, eleven tests, and
+reached by nothing. `infra/amplify/provision.py` is that missing half.
+
+```
+.venv-main/bin/python -m infra.amplify.provision      # idempotent; re-running is the fix
+```
+
+Verified by reading the live app back rather than trusting the return value:
+
+```
+app_id       d9lts7h24c9c8
+domain       d9lts7h24c9c8.amplifyapp.com
+AUTH_URL     https://main.d9lts7h24c9c8.amplifyapp.com     <- DERIVED, see below
+platform     WEB_COMPUTE                                   <- not WEB; see spec.py
+branch main  Next.js - SSR · PRODUCTION · autoBuild=True
+environment  AMPLIFY_MONOREPO_APP_ROOT, AUTH_URL, COGNITO_{ISSUER,CLIENT_ID,DOMAIN}
+buildSpec    identical to the committed amplify.yml (modulo a trailing newline Amplify appends)
+repository   None
+```
+
+**`repository: None` MEANS NO BUILD HAS EVER RUN OR EVER WILL**, and the app is created,
+configured, and answers `get-app` perfectly all the same. That is why `provision()` returns
+`repository_connected` as an explicit key rather than letting a caller infer it: reading a
+green provisioning run as a deployed app is exactly the shape this repository keeps
+finding. Modern Amplify connects GitHub through a **GitHub App installation**, which is a
+console authorisation no script can perform — so the remaining step is an operator's click,
+after which re-running the script preserves the environment.
+
+**`AUTH_URL` IS DERIVED FROM THE APP, AND THE ORDER IS FORCED BY A CIRCULARITY.** It is one
+of the four variables `amplify.yml` writes into `.env.production`, and its value is the
+app's own branch URL — which does not exist until the app does. So `provision()` creates
+the app first, reads `defaultDomain` back, and only then converges the environment. Writing
+a placeholder "to fix later" is what `spec.environment_variables` refuses outright: an
+interrupted run pins the sign-in redirect blank forever while the console shows a key that
+is present.
+
+**THE PAGINATION TOKEN IS `nextToken`, LOWERCASE — COGNITO'S IS `NextToken`.** Verified
+against botocore 1.43.75's service model (`ListApps` declares `['maxResults',
+'nextToken']`), not assumed. The two provisioners sit beside each other in `infra/` and
+cannot share the helper; the copy-paste that reads correctly is the one that silently stops
+paging. A missed page creates a **second app** with a different `defaultDomain`, so
+`AUTH_URL`, the Cognito callback list and the app people actually reach become three
+different origins — and every sign-in fails the state check while holding a valid session.
+Pinned by a fake that genuinely pages one app at a time, because a `Mock` cannot express a
+second page.
+
+**One other Amplify app exists in this account and is NOT ours:** `grace-dashboard`
+(`dbi97xicbjbv8`), the reference deployment from `~/sorour/AgentsforHumansHackathon/` whose
+five post-green-build defects `tests/test_infra_amplify.py` pins three of. `find_app`
+matches on name, so it is never touched — but a `list-apps` in this account returns two
+rows and only one of them is this project's.
 
 ### Reproducing the Postgres paths on the host, without containers
 
@@ -2924,6 +3074,31 @@ worktree constant. **An existing test caught this lane's new workflow on the fir
 full-suite run** — `test_every_workflow_that_reaches_aws_is_one_we_expect` failed with
 `Extra items in the left set: 'deploy-platform.yml'`, which is that guard working
 exactly as designed; registering the name is the deliberate decision it asks for.
+
+**And at `95de957`, with the Cognito pool and the Amplify app APPLIED — all eight gates:**
+
+```
+pytest -q                              2029 passed, 7 skipped in 330.64s (0:05:30)
+ruff check agentorg scripts tests infra  All checks passed!
+actionlint .github/workflows/*.yml     exit 0
+terraform fmt -check -recursive        exit 0
+web: tsc                               exit 0
+web: eslint                            0 problems
+web: vitest                            14 files, 204 tests           <- READ THE FILE COUNT
+web: next build                        20 routes, all 3 auth routes present, signin ƒ dynamic
+test files                             84
+```
+
+`2022 → 2029` is **7 tests**, exactly `tests/test_infra_amplify_provision.py`, and `83 →
+84` is that one file — the two numbers agreeing is the cheap check that nothing else moved.
+**`ruff` now names `infra` as a fourth path**; it did not before, so the two provisioners
+were unlinted until this run.
+
+The `next build` line is the one worth re-reading before a demo: `/api/auth/signin`,
+`/api/auth/callback` and `/api/auth/logout` all appear as **ƒ (Dynamic)**. A static `○`
+there would mean the redirect URL and the client id had been baked into the bundle at build
+time, so rotating the app client would keep sending people to the old one until somebody
+rebuilt — which is why `route.ts` sets `force-dynamic` and says so.
 
 **And at `b9f0803`, with NINETEEN LANES merged and the app on Cognito:**
 
@@ -4157,8 +4332,15 @@ noise.**
 ## WHAT IS STILL OPEN, as of 2026-09-09
 
 All five phases and **nineteen lanes** are merged; the app runs locally, on Cognito, with
-the database behind a non-owning role. **Eight of the ten items below are closed** — six
-on 2026-09-09 — and the two that remain are an operator's click rather than code.
+the database behind a non-owning role. **Nine of the eleven items below are closed** —
+seven on 2026-09-09 — and of the two that remain, one is an operator's click and one is a
+decision only an operator can make.
+
+**The eleventh item is NEW and it was found by closing the sixth**, which is the argument
+for applying a thing rather than provisioning it and stopping: the pool went in, the sign-in
+round trip was measured working end to end, and the probe that confirmed it also proved that
+a self-registered account can never be given a tenant. Nothing in the suite, in the spec, or
+in a green provisioning run could have said so.
 
 Each was measured rather than suspected, and each closure carries the measurement that
 closed it. **Nothing here is unknown; the value of the list is that none of it is a
@@ -4171,7 +4353,8 @@ surprise.**
 | 3 | ~~**`state.cost` assigned nowhere**~~ — **CLOSED 2026-09-09** | `merge_cost_records` in both pipelines, not assignment: seven cloud jobs are seven processes, and an assignment erases every earlier row. **Wiring it exposed a defect underneath** — a fixture-only run reported a priced-and-free zero for a run where nothing was priced, because `price_stage` short-circuited zero-token rows. Its own docstring already said otherwise |
 | 4 | ~~**`/api/runs/[id]/scoring` empty**~~ — **CLOSED 2026-09-09** | Its own note said no deployed run carried a scoring row, which stopped being true when `score_findings` was wired into `_with_provenance` — all three returns pass through it. Measured on a poisoned run against the real Postgres: **3 rows**, with thresholds and blocking flags |
 | 5 | ~~**Selenium**~~ — **CLOSED 2026-09-09 (Lane T)** | A real browser ran all four: Chrome for Testing 152.0.7977.75 + chromedriver 152.0.7977.82, headless, `5 passed`. `testpaths` now carries `target_repo/tests/e2e` (**1969 → 1974** collected) and the three-direction skip is unchanged. The first run was `3 failed` — the form posted to `/login`, the JSON API, so the `/web/login` route the wrapper exists to add was reached by nothing. `docs/final/evidence/selenium-run.md` |
-| 6 | ~~**GitHub OAuth**~~ — **SUPERSEDED 2026-09-09 (Lanes P + Q)** | There is no GitHub OAuth provider any more. Cognito replaced Auth.js, `next-auth` is out of `package.json`, and the sign-in button is a `<form>` posting to `/api/auth/signin`. What remains is provisioning a pool — an operator's `aws` call, with the spec and an idempotent script written and tested |
+| 6 | ~~**GitHub OAuth**~~ — **CLOSED 2026-09-09 (Lanes P + Q, then applied)** | Superseded, then done. There is no GitHub OAuth provider: Cognito replaced Auth.js and `next-auth` is out of `package.json`. The pool is now PROVISIONED and the round trip measured — `GET /api/auth/signin` → **307** → the live hosted UI answering **200** with `signInFormUsername`. The Amplify app is provisioned too (`d9lts7h24c9c8`). **Two things remain and both are an operator's click**: connect the GitHub repository in the Amplify console (a GitHub App installation, which no script can perform, so `repository_connected: False` today and no build has ever run), and decide the `Mutable: False` tenant question below |
+| 11 | **A self-registered account can NEVER be assigned a tenant** — NEW, measured 2026-09-09 | `custom:tenant` is `Mutable: False`, and an immutable attribute cannot be set after creation **even when it was never given a value** — probed directly against the live pool. Sign-up is deliberately open (requirement 9), so a person can sign up, sign in, and be permanently unable to see anything. Fail-closed, and still a dead end. The two options — provision reviewers with `AdminCreateUser`, or rebuild the pool with `Mutable: True` and one guard instead of two — are written up under the sign-in section. **A pool cannot be converged onto the other choice; it needs a new pool, a new issuer, and every token invalidated** |
 | 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
 | 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
 | 9 | ~~**`time_to_merge` and `escaped_defects`**~~ — **CLOSED 2026-09-09 (Lane T)** | They needed "real runs over real time". The runs existed and nobody had asked GitHub. `scripts/measure_merge_history.py`: ticket→merge median **5.39 min** (n=8, max 27.07); **0** credential escapes over **9** merged PRs, positive control PR #50 carries 3. Survivorship stated — 8 merges of **37** runs |
@@ -4235,6 +4418,9 @@ built and what that costs.
 | `.github/workflows/{ci,deploy,terraform}.yml` | Lint/test/scan, runtime deploy, infra apply |
 | `infra/Terraform/` | All infrastructure. Nothing created by hand in the console |
 | `infra/ingress/handler.py` | The webhook Lambda (outside `agentorg/` on purpose) |
+| `infra/cognito/` | **The pool that makes `custom:tenant` trustworthy.** `spec.py` is the pool as DATA (no boto3, so the hermetic suite can pin it); `provision.py` applies it idempotently. The two guards are `Mutable: False` and the `WriteAttributes` exclusion, and **they guard different verbs** — one stops a signed-in user rewriting the claim, the other stops a sign-up choosing it. `assign_tenant` READS BACK rather than trusting the call, which is the only reason the immutability dead end above was found |
+| `infra/amplify/` | **The hosting app.** Same spec/provision split, same reason. `provision.py` derives `AUTH_URL` from the app it just created (a circularity, not a preference), reads FRESH before every environment converge (`update_app` is a full replace), pages on **lowercase `nextToken`**, and returns `repository_connected` because an app with no GitHub connection is healthy and builds nothing |
+| `amplify.yml` | The buildspec, in the `applications:`/`appRoot:` monorepo form. **Read by `spec.build_spec()`, never restated** — the reference deployment carries it twice and the two drifted. It writes four variables into `.env.production`, because Amplify does not expose its environment to the SSR runtime |
 | `fixtures/` | Seven files — a validated sample of every result shape |
 | `tickets/` | `clean.md` and `poisoned.md` — the same feature request |
 | `target_repo/` | The demo's subject app: a Flask login handler. The **deployed** copy is `mohamedsorour1998/auth-service`, which had **no CI at all** until 2026-08-22 — head commit `{"state":"pending","total_count":0}`. A `ci.yml` running `python -m pytest tests -q` on every push and PR is open as **PR #18** there. GitHub reports `pending` when NOTHING has run, so zero checks must read as `unknown`, never `passing` |
