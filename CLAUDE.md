@@ -2302,6 +2302,31 @@ The instances, briefly:
   through another term. Same class as `pytest -k triger` exiting 0 — a selection that
   silently matched nothing.
 
+- **A METRIC IN THE OPEN-ITEMS LIST THAT CANNOT EXPRESS ITS OWN FIXED CASE** — found
+  2026-09-09 by Lane T, and the first instance where the unfalsifiable measurement was
+  the **evidence cited for an open item** rather than a test or a harness. Item 5 read
+  *"`--collect-only | grep -ci selenium` is 0"* as proof the four browser tests were not
+  collected. Measured before and after the `testpaths` widening: **0 both times.**
+  Collection emits node ids, and no node id here contains the string "selenium" — the
+  file is `test_login_browser.py` and every test name is about a browser or a login. So
+  the number offered as proof would have read 0 on the day it was fixed.
+
+  The honest metric is the four test names, and `tests/test_e2e_collection.py` asserts
+  them as **literals** rather than deriving them from the file under test. General form:
+  **a number quoted as evidence for a gap must be shown to MOVE when the gap closes.**
+  Nobody had run it in the fixed direction, because there was no fixed direction to run
+  it in yet — which is exactly when to check.
+
+- **A ZERO WITH NO POSITIVE CONTROL IS NOT A MEASUREMENT.** `escaped_defects` came out
+  **0 credential escapes over 9 merged pull requests**, and a broken grep produces that
+  identical 0. So `scripts/measure_merge_history.py` runs the same scan over the pull
+  requests that did **not** merge and REFUSES if it finds nothing there. RED, with the
+  three credential patterns misspelled: the merged set still read `0` and the script
+  exited **1** — *"the credential scan found nothing in ANY unmerged pull request, so its
+  zero over the merged set is not evidence"*. Same shape as Lane H's
+  `test_the_attack_documents_are_actually_retrieved`: **an attack nobody retrieves is not
+  an attack, and a scanner that finds nothing anywhere has not cleared anything.**
+
 - **`yaml.safe_load` PARSES A WORKFLOW'S `on:` KEY AS THE BOOLEAN `True`.** YAML 1.1
   coerces `on`/`off`/`yes`/`no`, so `workflow["on"]` raises `KeyError` while
   `workflow[True]` is the trigger block. `actionlint` is happy either way because
@@ -3207,7 +3232,13 @@ actionlint .github/workflows/*.yml                            # must exit 0
   **ruff 0.16 defaults** — verified with `ruff check --isolated`. They fire without
   being selected.
 - `target_repo/` is **deliberately NOT** in the lint command. It is the demo's
-  subject repository, not our code, and it currently has 2 ruff errors on purpose.
+  subject repository, not our code, and it carries ruff errors on purpose. **The
+  count is 9, not the "2" this file claimed until 2026-09-09** — measured
+  `ruff check target_repo --output-format=concise` on `main`: 4×`I001`, 2×`RUF100`,
+  2×`F541`, 1×`PYI034`. Widening `testpaths` to collect `target_repo/tests/e2e` does
+  **not** widen the lint gate: `ruff check agentorg scripts tests` names its paths
+  explicitly and the two lists are independent. Do not assume widening one widens
+  the other, in either direction.
 - Ruff pinned `>=0.16,<0.17`; setuptools `>=61,<85` in both `[build-system]` and
   the `dev` extra. Bump both together, deliberately.
 
@@ -4122,12 +4153,12 @@ the list is that none of it is a surprise.**
 | 2 | **`migrations.migrate` cannot run on Postgres** | it calls `connection.executescript`, which psycopg has no such method for — so the forward-only ledger, its checksum guard and its idempotency have never run there. Every Postgres verification so far applied the DDL directly and bypassed the runner |
 | 3 | **`state.cost` is assigned nowhere** | so the SRE prompt's cost block renders `""` on every run. Two lines, one per pipeline |
 | 4 | **`/api/runs/[id]/scoring` answers empty** | the PR comment carries the scoring table; that endpoint has no producer on its path |
-| 5 | **Selenium** — *in progress, and the premise was wrong* | "no browser on this host" was MY conclusion and it was false: a real Chrome for Testing 152 sits in `~/.cache/puppeteer/`. See the note below. The real half is that `testpaths = ["tests"]` means the tests are not collected at all |
+| 5 | ~~**Selenium**~~ — **CLOSED 2026-09-09 (Lane T)** | A real browser ran all four: Chrome for Testing 152.0.7977.75 + chromedriver 152.0.7977.82, headless, `5 passed`. `testpaths` now carries `target_repo/tests/e2e` (**1969 → 1974** collected) and the three-direction skip is unchanged. The first run was `3 failed` — the form posted to `/login`, the JSON API, so the `/web/login` route the wrapper exists to add was reached by nothing. `docs/final/evidence/selenium-run.md` |
 | 6 | **GitHub OAuth cannot complete locally** | the credentials are `selfhost-dev-only` placeholders. A real app's id and secret make the sign-in button work; see the setup note below |
 | 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
 | 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
-| 9 | **`time_to_merge` and `escaped_defects`** | honest gaps in the scorecard. They need real runs over real time, not a harness |
-| 10 | **`docker compose up` for the model service** | the ollama half of the compose file is unused while the pipeline stays on GitHub. Lane F measured the local-model parity separately |
+| 9 | ~~**`time_to_merge` and `escaped_defects`**~~ — **CLOSED 2026-09-09 (Lane T)** | They needed "real runs over real time". The runs existed and nobody had asked GitHub. `scripts/measure_merge_history.py`: ticket→merge median **5.39 min** (n=8, max 27.07); **0** credential escapes over **9** merged PRs, positive control PR #50 carries 3. Survivorship stated — 8 merges of **37** runs |
+| 10 | ~~**`docker compose up` for the model service**~~ — **CLOSED BY DOCUMENTATION 2026-09-09 (Lane T)** | Not orphaned code: it is the compose half of Lane F's self-hosted path, dormant by the operator's decision. `docs/final/evidence/selfhost-model-service.md` says when it runs. **One real gap found and NOT taken** — there are no compose `profiles:`, so a bare `podman compose up` starts model + model-pull + worker (a 4.7 GB pull). Fix is three `profiles:` keys in `infra/selfhost/docker-compose.yml` |
 
 **Closed by decision rather than by work:** RDS. The database is local — see
 `infra/Terraform/modules/platform/main.tf`, which records why an `aws_db_instance` was not
@@ -4168,7 +4199,7 @@ built and what that costs.
 | `agentorg/common/diff.py` | What a diff PROPOSES — added lines only |
 | `agentorg/agents/` | The five agents + `server.py` (HTTP) + `Dockerfile`. Every prompt names the stack; four consume retrieval, three read the generated-tests record |
 | `agentorg/agents/testgen.py` | A SIXTH agent: generates pytest from `plan.acceptance_criteria`, **never from the diff**. Runs them, and reports a red result as binding and a green one as not evidence. **Not wired into any stage yet** |
-| `target_repo/tests/e2e/` | The browser surface + Selenium. Wraps `create_app()` rather than editing `app/auth.py`. **Skips here: no browser on this machine** |
+| `target_repo/tests/e2e/` | The browser surface + Selenium. Wraps `create_app()` rather than editing `app/auth.py`. **In `testpaths` since 2026-09-09, so `pytest` collects all five.** Skips on a clean checkout because `selenium` is in no requirements file — deliberately; `SELENIUM_REQUIRED=true` makes that a fault. A real Chrome HAS driven them: `docs/final/evidence/selenium-run.md` |
 | `agentorg/security/` | semgrep / gitleaks / trivy wrappers, `_run.py`, rule files |
 | `agentorg/security/scoring.py` | ONE severity table for all three scanners, the gitleaks policy, the threshold floor, and the `ScoreRow` audit trail |
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
