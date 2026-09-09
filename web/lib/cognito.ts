@@ -211,15 +211,55 @@ export async function verifySession(
   };
 }
 
-/** Where to send a signed-out visitor. `redirect_uri` must be a registered callback. */
-export function hostedUiUrl(redirectUri: string): string {
+/** The cookie carrying the OAuth `state` between `/api/auth/signin` and the callback. */
+export const OAUTH_STATE_COOKIE = "agentorg_oauth_state";
+
+/**
+ * Where to send a signed-out visitor. `redirect_uri` must be a registered callback.
+ *
+ * `/login` is the CLASSIC hosted UI path, which a pool at `ManagedLoginVersion: 1`
+ * serves. Managed login (version 2) uses a different URL shape and needs a
+ * branding style, so a pool provisioned at version 2 needs this builder rewritten
+ * and the round trip re-tested — it is not a cosmetic setting.
+ *
+ * `state` IS CARRIED, AND THE REFERENCE IMPLEMENTATION DOES NOT CARRY IT. That is
+ * the one deliberate addition this lane makes to the reference's flow, and the
+ * reason is what this surface can do: `POST /api/approvals` opens a security gate,
+ * so login-CSRF is not an abstract concern. Without `state` an attacker can hand a
+ * victim a callback URL carrying the ATTACKER's authorization code; the victim's
+ * browser completes the exchange and is silently signed in as the attacker, and
+ * every gate they then approve is recorded against the attacker's identity. The
+ * callback compares this value against a cookie the same browser was given and
+ * refuses on any mismatch.
+ *
+ * PKCE IS **NOT** IMPLEMENTED, and that is a stated gap rather than an oversight.
+ * It defends a different attack — an authorization code intercepted in transit or
+ * through a redirect leak — and it interacts with how the app client is
+ * provisioned. The reference implements neither; this lane adds the one that costs
+ * a cookie and names the one that does not.
+ *
+ * NAMED ARGUMENTS, AND THAT IS A MEASURED CHOICE RATHER THAN A STYLE ONE. The
+ * first draft of this function took `(redirectUri: string, state: string)` and
+ * the first caller written against it passed them the other way round —
+ * `hostedUiUrl(state, redirectUri)`. **`tsc` accepts that silently**, because
+ * both are `string`, and the failure it produces is a redirect to a URL that is
+ * not a registered callback: Cognito answers `redirect_mismatch`, which reads as
+ * a misconfigured pool rather than as a swapped argument. Two same-typed
+ * positional parameters on a security redirect is a defect the compiler cannot
+ * see; an object makes the swap unspellable.
+ */
+export function hostedUiUrl(options: {
+  redirectUri: string;
+  state: string;
+}): string {
   const params = new URLSearchParams({
     client_id: clientId(),
     response_type: "code",
     // `openid` alone. `email` and `profile` would put an address in a token this
     // application decodes and AWS logs, and nothing reads either.
     scope: "openid",
-    redirect_uri: redirectUri,
+    redirect_uri: options.redirectUri,
+    state: options.state,
   });
   return `${domain()}/login?${params.toString()}`;
 }
