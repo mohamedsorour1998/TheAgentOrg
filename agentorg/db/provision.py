@@ -71,7 +71,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from . import schema
-from ._dialect import Connection, query, require_matching_driver, run_script
+from ._dialect import Connection, column, query, require_matching_driver, run_script
 from .migrations import LEDGER_TABLE
 
 # The role the application connects as. A name, not a secret: the password belongs to the
@@ -206,7 +206,18 @@ def tables_present(connection: Connection, dialect: str = schema.POSTGRES) -> tu
         (),
         dialect,
     )
-    return tuple(row["tablename"] for row in rows)
+    # BY POSITION, NOT BY NAME, and that is a measured fix rather than a style
+    # choice. `row["tablename"]` requires psycopg's `dict_row` factory, which
+    # `engine.connect` sets — but this function takes ANY connection, and the
+    # provisioning sequence is run by an operator holding a plain
+    # `psycopg.connect(...)`. Measured, doing exactly that:
+    #
+    #     TypeError: tuple indices must be integers or slices, not str
+    #
+    # raised from inside this module, naming the row rather than the row factory
+    # nobody set. The query selects one column, so position 0 is unambiguous and
+    # works under every factory including sqlite3.Row.
+    return tuple(column(row, "tablename", 0) for row in rows)
 
 
 def escapes_for(
@@ -235,9 +246,12 @@ def escapes_for(
     scoped = {t.name for t in schema.SCOPED_TABLES}
     return Escapes(
         role=role,
-        superuser=bool(rows[0]["rolsuper"]),
-        bypassrls=bool(rows[0]["rolbypassrls"]),
-        owns=tuple(r["tablename"] for r in owned if r["tablename"] in scoped),
+        # `column`, not `row["name"]`. See its docstring: an operator runs this with a
+        # plain `psycopg.connect(...)`, which returns tuples, and the subscript raises
+        # TypeError from inside this module while naming the row.
+        superuser=bool(column(rows[0], "rolsuper", 0)),
+        bypassrls=bool(column(rows[0], "rolbypassrls", 1)),
+        owns=tuple(t for t in (column(r, "tablename", 0) for r in owned) if t in scoped),
     )
 
 

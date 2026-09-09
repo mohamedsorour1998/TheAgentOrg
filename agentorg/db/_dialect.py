@@ -270,3 +270,30 @@ def scalar(row: Any) -> Any:
     if isinstance(row, Mapping):
         return next(iter(row.values()))
     return row[0]
+
+
+def column(row: Any, name: str, index: int) -> Any:
+    """One NAMED column of a multi-column row, whatever shape the driver returned.
+
+    `scalar`'s argument, one step out. That function handles a one-column row, where
+    position 0 is unambiguous; this handles the case where a caller wants a particular
+    column out of several and neither spelling works everywhere.
+
+    BOTH COORDINATES ARE REQUIRED, and passing an index that disagrees with the SELECT
+    is the one way to misuse this. It is still better than the alternatives: `row[name]`
+    raises `TypeError: tuple indices must be integers` on a psycopg connection opened
+    without `dict_row`, and `row[index]` raises `KeyError` on one opened with it.
+    MEASURED — both halves, in the same session, from provisioning code an operator runs
+    with a plain `psycopg.connect(...)`:
+
+        tables_present  TypeError: tuple indices must be integers or slices, not str
+        escapes_for     TypeError: tuple indices must be integers or slices, not str
+
+    The second appeared only after the first was patched at its own call site, which is
+    the argument for fixing it here instead: a per-call-site fix leaves every other
+    reader of a multi-column row waiting to fail the same way, against whichever
+    connection shape nobody tested.
+    """
+    if isinstance(row, Mapping):
+        return row[name]
+    return row[index]

@@ -142,7 +142,7 @@ services:
     environment:
       # THE QUEUE AND THE APP SHARE ONE DATABASE. See the postgres service.
       QUEUE_BACKEND: postgres
-      QUEUE_DSN: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      QUEUE_DSN: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
 
       # THE MODEL. `LLM_API_KEY` MUST NOT BE `not-needed`: both
       # `llm.available()` and `common/model.create_model()` refuse that literal,
@@ -185,6 +185,34 @@ services:
   # ADDED 2026-08-28, on the terms the note below set: both lanes have landed, both
   # services bind 127.0.0.1 on the host, and both depend on postgres.
 
+  # ── THE APPLICATION CONNECTS AS A NON-OWNING ROLE ──────────────────────────
+  #
+  # Every DSN below names `agentorg_app`, NOT the `agentorg` owner, and that single
+  # choice decides whether six RLS policies enforce anything or are decoration.
+  # MEASURED against this container, same database, same policies, two connections:
+  #
+  #   OWNER (superuser)            attacker sees ['run-t-attacker', 'run-t-victim']
+  #                                unscoped read 2 rows          <- LEAK
+  #   agentorg_app (plain LOGIN)   attacker sees ['run-t-attacker']
+  #                                unscoped read 0 rows          <- refused
+  #
+  # Postgres skips row-level security for a superuser, for any role with BYPASSRLS,
+  # and for the table's OWNER. `FORCE ROW LEVEL SECURITY`, which schema.py emits and
+  # a test pins, addresses only the third — nothing in SQL can constrain a superuser.
+  # And `pg_policies` lists all six either way, so the wrong DSN reports perfectly
+  # healthy.
+  #
+  # The role is created by `agentorg/db/provision.py`; `render_sequence()` prints the
+  # four steps an operator runs. Two traps it encodes, each of which produced a wrong
+  # diagnosis first: `GRANT ... ON ALL TABLES` covers only tables that exist AT THE
+  # TIME, and table grants are useless without `GRANT USAGE ON SCHEMA public` — both
+  # surface as `relation "x" does not exist`, which names the table and hides the
+  # cause.
+  #
+  # THE MIGRATIONS STILL RUN AS THE OWNER. That is the point of two roles: the role
+  # that creates a table owns it and therefore escapes its policies, so it must not be
+  # the role the application uses.
+
   api:
     build:
       context: ../..
@@ -199,8 +227,8 @@ services:
         condition: service_healthy
     environment:
       QUEUE_BACKEND: postgres
-      QUEUE_DSN: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
-      TENANT_DB: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      QUEUE_DSN: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
+      TENANT_DB: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
       OFFLINE: "true"
       # 0.0.0.0 INSIDE THE NAMESPACE, 127.0.0.1 ON THE HOST. The container has to bind
       # every interface of its own namespace or the port publish below reaches nothing —
@@ -224,7 +252,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      DATABASE_URL: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
       # FAKE, LOCAL-ONLY VALUES. `next build` refuses without all four — Lane I's
       # fail-closed design firing at build time — and GitHub OAuth cannot complete
       # against them, which is correct for a self-hosted stack nobody registered an app
@@ -264,7 +292,7 @@ services:
       # first is what produced `PipelineError: the pipeline read failed` with
       # `/api/session` still answering 200 — the session path never touches a reader, so
       # the missing variable was invisible on the first route anybody checks.
-      TENANT_DB: postgresql://agentorg:selfhost-dev-only@postgres:5432/agentorg
+      TENANT_DB: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
       OFFLINE: "true"
       LLM_DISABLED: "true"
     volumes:
