@@ -113,9 +113,16 @@ include = ["agentorg*"]
 #     pytest tests -q             ->  ModuleNotFoundError: No module named 'app'
 #
 # THIS DOES NOT PUT target_repo/ INTO THE LINT GATE. `ruff check agentorg scripts
-# tests` names its paths explicitly and is unchanged; target_repo carries 2 ruff
-# errors on purpose. testpaths and the ruff argument list are separate lists, and
-# widening one must never be assumed to widen the other.
+# tests` names its paths explicitly and is unchanged; target_repo carries ruff errors
+# ON PURPOSE -- it is the demo's subject app, not our code. testpaths and the ruff
+# argument list are separate lists, and widening one must never be assumed to widen
+# the other.
+#
+# NO COUNT IS QUOTED HERE, deliberately. This comment said "2" and CLAUDE.md said "9",
+# and when measured on 2026-09-09 the answer was SEVEN (3xI001, 2xF541, RUF100,
+# PYI034) -- because the number moves whenever target_repo changes, and this lane's
+# own login.html fix moved it. Three records, three numbers, all true when written.
+# The command is the durable form: `ruff check target_repo`.
 testpaths = ["tests", "target_repo/tests/e2e"]
 pythonpath = ["."]
 # Registered so an unknown-marker warning cannot hide a typo. A misspelled
