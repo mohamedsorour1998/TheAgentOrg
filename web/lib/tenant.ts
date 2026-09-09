@@ -1,179 +1,144 @@
 /**
- * WHICH TENANT A PERSON BELONGS TO. The bootstrap, and why it cannot be scoped.
+ * WHICH TENANT A PERSON BELONGS TO — now a verified claim, not a database read.
  *
  * =========================================================================
- * THIS IS THE ONE QUERY THIS LAYER RUNS THAT IS NOT TENANT-SCOPED, AND IT
- * CANNOT BE. IT IS WHAT PRODUCES THE SCOPE.
+ * WHAT THIS CHANGE CLOSES, AND WHAT IT MOVES. READ BOTH LISTS BEFORE
+ * QUOTING EITHER, BECAUSE THEY ARE NOT THE SAME LIST.
  * =========================================================================
- * `web/lib/pipeline.ts` argues at length that this layer must not answer a tenancy
- * question with its own SQL, and that argument holds for every DATA read. This one
- * is different in kind, and the difference is structural rather than an exception
- * being carved out:
  *
- *   `engine.acting_as(tenant_id)` needs a tenant id. Something must produce one,
- *   and that something cannot itself require one — a scoped accessor answering
- *   "which tenant am I in" would need the answer as its input.
+ * WHAT IT CLOSES — the circularity, and only the circularity.
  *
- * Lane B recognises the same shape from the other side: there is deliberately NO
- * tenant-scoped accessor that reads `app_user`, because "no caller can enumerate the
- * user base", and `accessors.list_members(scope)` answers "who is in THIS tenant" —
- * the inverse of the question here. Lane K has the identical bootstrap:
- * `auth.resolve()` reads a credential with no tenant bound and PRODUCES the
- * `Credential` every scoped call then carries.
- *
- * So this is the session equivalent of `auth.resolve()`, and everything after it
- * goes through the Python accessors with the result bound.
- *
- * WHAT KEEPS IT FROM BEING A HOLE, precisely:
- *
- *   * IT IS KEYED ON THE SESSION'S OWN LOGIN, which the caller cannot choose — it
- *     comes from a verified Auth.js session, never from a request body.
- *   * IT RETURNS ONLY MEMBERSHIPS THAT LOGIN HOLDS. The `WHERE` clause is on
- *     `web_identity.github_login`, so the result set is the asker's own rows.
- *   * IT READS NO RUN, NO SECRET, NO BUDGET AND NO REPOSITORY. Two columns from two
- *     tables: which tenants this person is a member of, and their role.
- *   * IT NEVER WRITES. There is no INSERT, UPDATE or DELETE in this file.
- *
- * PARAMETERISED, ALWAYS. `github_login` arrives from a GitHub profile — not from a
- * request body, but not authored by us either — and a login is the kind of value an
- * attacker controls by choosing a username. `$1` rather than interpolation, which is
- * why this takes a query function rather than building a string.
- *
- * WHY IT TAKES A QUERY FUNCTION RATHER THAN A POOL
- * ===============================================
- * So the SQL and every refusal below are testable with NO POSTGRES. No Postgres has
- * ever been connected in this repository — `agentorg/db/engine.py` is sqlite3-only
- * and Lane B's own note says nothing in the suite connects to one — so a version of
- * this that took a `Pool` would be entirely unexercised, and its refusals would be
- * confidence that cannot be falsified.
- */
-
-/** The rows this module reads. Two columns, named explicitly. */
-export interface MembershipRow {
-  tenant_id: string;
-  role: string;
-}
-
-/**
- * Whatever can run a parameterised query. `pg.Pool` satisfies it structurally, and
- * so does a test double — which is the point.
- */
-export interface QueryRunner {
-  query(sql: string, values: readonly unknown[]): Promise<{ rows: MembershipRow[] }>;
-}
-
-/**
- * The query. NAMED COLUMNS, never `SELECT *`.
- *
- * Lane B measured why: `dict(sqlite3.Row)` "silently collapses duplicate column
- * names, keeping the first of each pair, nothing raised" — a `membership JOIN
- * app_user` shares `id` and `created_at`, so an unaliased `SELECT *` returns a dict
- * with the user's id simply gone, and the result still looks like a member. The
- * equivalent here is `pg` returning one `id` where two were selected. Naming the two
- * columns this module actually reads makes that impossible.
- *
- * ORDERED, so a person in several organisations resolves to the SAME one on every
- * request. Without `ORDER BY` the answer is whichever row Postgres returned first,
- * which can change between requests — and a tenant that changes under a person
- * mid-session means their run list changes with no action from them. `created_at`
- * ascending means the oldest membership wins, which is stable and explicable;
- * `tenant_id` breaks a tie so two memberships created in the same transaction do
- * not reintroduce the ambiguity.
- */
-export const MEMBERSHIP_QUERY = `
-  SELECT m.tenant_id AS tenant_id, m.role AS role
-    FROM web_identity w
-    JOIN membership m ON m.user_id = w.app_user_id
-   WHERE w.github_login = $1
-   ORDER BY m.created_at ASC, m.tenant_id ASC
-`;
-
-/**
- * THIS QUERY RETURNS NOTHING UNDER POSTGRES ROW-LEVEL SECURITY, AND THAT IS A
- * CIRCULAR DEPENDENCY RATHER THAN A BUG IN THE SQL.
- *
- * Found 2026-08-28, the first time the web app ran against a real PostgreSQL 16.15 —
- * every earlier run was sqlite-only, where nothing constrains a SELECT and this
- * query worked. Measured, one connection, same query, same role:
+ * The previous version of this file ran one query and could not scope it. Its
+ * whole argument is worth keeping, because the shape recurs: `membershipsFor`
+ * read `membership` to discover the tenant, `membership` is in
+ * `schema.SCOPED_TABLES` and therefore carries an RLS policy comparing against
+ * `current_setting('agentorg.tenant_id')`, RLS needs a bound tenant to return a
+ * row, and the bound tenant was the thing the function was trying to discover.
+ * Measured 2026-08-28, one connection, same query, same role:
  *
  *     no tenant bound      -> []
  *     tenant-zero bound    -> [('tenant-zero',)]
  *
- * The loop:
+ * So `/api/session` answered `signed_in: true` with `tenant_id: null` and every
+ * authenticated route 401'd. That loop is **gone**, and not by loosening
+ * anything: the tenant now arrives on the ID token, signature-verified against
+ * the pool's published JWKS, so nothing has to be read to discover it. The three
+ * options that file recorded — take `membership` out of `SCOPED_TABLES`, admit
+ * rows when no tenant is bound, or give the identity lookup its own unscoped path
+ * — are all moot, including (c), which was the right one and which nobody now has
+ * to build.
  *
- *   1. `membershipsFor` asks which tenant this login belongs to.
- *   2. It reads `membership`, which is in `schema.SCOPED_TABLES` and therefore
- *      carries an RLS policy comparing against `current_setting('agentorg.tenant_id')`.
- *   3. RLS needs a bound tenant to return any row.
- *   4. The bound tenant is the thing this function is trying to discover.
+ * WHAT IT DOES **NOT** CLOSE. CLAUDE.md's open item 1 is titled *"Two-role
+ * database model — the app must connect as a non-owning role"*, and that is a
+ * deployment decision in `infra/`, not a line of TypeScript. CLAUDE.md measures
+ * the current state plainly: "THE CONTAINER CONNECTS AS A SUPERUSER, SO RLS
+ * CONSTRAINS NOTHING THERE." Nothing in this file changes which role the DSN
+ * names. What this change does is **remove the reason that role could not be
+ * fixed** — with the circularity gone, switching the DSN to a plain non-owning
+ * LOGIN role no longer breaks sign-in.
  *
- * So `signed_in` is true, `tenant_id` is null, and every authenticated route
- * refuses with `no-tenant`. VERIFIED END TO END: /api/session answers
- * `{"signed_in":true,...,"tenant_id":null}` while /api/runs answers 401.
+ * WHAT IT MOVES, which is the part most easily mis-stated as a win:
  *
- * The behaviour is FAIL-CLOSED and correct as a default — the alternative,
- * returning tenant zero when the lookup finds nothing, would have worked in a demo
- * and handed every new signup the original deployment's runs.
+ *   * **Assignment moves from SQL to Cognito.** Somebody still has to decide
+ *     which tenant a person is in; it is now `admin-set-user-attributes` instead
+ *     of an `INSERT INTO membership`. A better place — server-side and
+ *     signature-verified — not an absent one.
+ *   * **`membership` and `custom:tenant` are now two declarations of one fact,
+ *     and NOTHING RECONCILES THEM.** This repository's own rule about second
+ *     declarations applies: they will keep agreeing while one moves. There is no
+ *     reconciliation check in this lane and building one with no caller would be
+ *     the "correct answer nobody asks for" pattern, so it is named here instead.
+ *   * **Revocation latency is reintroduced, and this file's predecessor argued
+ *     against exactly that.** `web/lib/session.ts` said: "Carrying it on the
+ *     session would be cheaper and is wrong: revoking somebody's membership would
+ *     leave their live session still scoped to the tenant they were removed from,
+ *     for up to thirty days, with nothing anywhere saying so." A token claim has
+ *     precisely that property. The bound is the token's lifetime, which is why
+ *     `cognito.SESSION_MAX_AGE_SECONDS` is **one hour** rather than thirty days
+ *     and is documented there as a security setting. Removing a person from a
+ *     tenant is therefore effective within an hour rather than immediately.
  *
- * FIXING IT IS A DESIGN DECISION, NOT A PATCH, and the three options are not
- * equivalent:
+ * =========================================================================
+ * WHAT THE CLAIM TRUSTS, AND THE TWO POOL SETTINGS THAT MAKE IT TRUSTWORTHY
+ * =========================================================================
+ * A tenant claim is only as good as who can set it, and self-service sign-up is
+ * allowed here (requirement 9), so the pool — not this file — is what stops a
+ * caller choosing their own tenant. Two settings, and they guard **different
+ * verbs**:
  *
- *   a. Take `membership` out of SCOPED_TABLES. Wrong: it holds who belongs to which
- *      organisation, which is exactly the data a cross-tenant read must not see.
- *   b. Add an RLS policy admitting a row when no tenant is bound. Wrong in the same
- *      direction as reading a blank provenance as `unknown` — it makes "nobody is
- *      scoped" mean "everybody is visible", on the one table that decides scope.
- *   c. Give the identity lookup its own unscoped path: a SECURITY DEFINER function,
- *      or a small role with SELECT on `web_identity` and `membership` only, used for
- *      this one query and nothing else. Narrow, auditable, and the standard answer
- *      to this shape.
+ *   * `custom:tenant` declared `Mutable: False` in the pool's schema stops
+ *     `UpdateUserAttributes` — a signed-in user rewriting the claim that
+ *     authorises them.
+ *   * `custom:tenant` **excluded from the app client's `WriteAttributes`** stops
+ *     `SignUp` from setting it in the first place. `Mutable: False` does **not**
+ *     help here: an immutable attribute set at creation is set forever, so a
+ *     self-signup that could name its own tenant would lock the wrong answer in.
  *
- * (c) is the right answer and it is deliberately not written here: it changes the
- * deployment's role model, which is Lane N's file and the operator's decision.
- * Recorded rather than half-built.
+ * The reference deployment measured that omitting `WriteAttributes` entirely
+ * **grants everything** rather than withholding it — an ungranted mutable custom
+ * attribute was written successfully by a signed-in user — so the list must be
+ * present and explicit, not absent. Neither setting is verified from here: this
+ * lane provisions no pool, and `infra/` belongs to Lane Q. **This file relies on
+ * both and can enforce neither**, which is why it is written down rather than
+ * assumed.
+ *
+ * What this file CAN do is refuse a claim that is not the shape of a tenant id,
+ * so a malformed value fails here rather than several layers away inside a
+ * Python context manager. That is the whole of `tenantFromClaim`.
  */
 
 /**
- * Every tenant this login is a member of, oldest membership first.
+ * The longest tenant id this application will carry.
  *
- * An empty array is a REAL ANSWER: a person who has signed in and belongs to no
- * organisation. The caller refuses with `no-tenant` rather than inventing one.
+ * Not a guess about a schema: it is a bound on a value that crosses a JSON
+ * subprocess boundary into `web/lib/reader/*.py` and ends up in an append-only
+ * log. 255 is longer than any identifier this repository issues (`tenant-zero`,
+ * a uuid, an organisation slug) and short enough that a claim carrying a payload
+ * is refused rather than written.
  */
-export async function membershipsFor(
-  runner: QueryRunner,
-  githubLogin: string,
-): Promise<readonly MembershipRow[]> {
-  const login = githubLogin.trim();
-  if (login === "") {
-    // A BLANK LOGIN IS NOT QUERIED. `w.github_login = ''` would match any row whose
-    // login was written blank, and this result decides a tenant scope. Refused
-    // before the query rather than trusted to return nothing.
-    return [];
+export const MAX_TENANT_ID_LENGTH = 255;
+
+/**
+ * A `custom:tenant` claim as a usable scope, or `null`.
+ *
+ * `null` HAS TWO CAUSES AND THAT IS DELIBERATE at this layer: the claim is absent
+ * (a signed-up account nobody has assigned yet — the normal state of every new
+ * account) or the claim is malformed. Both mean the same thing to every caller —
+ * there is no scope to act in — and `authz.decide` refuses both with `no-tenant`,
+ * which is the one declaration of that refusal. Splitting them here would put a
+ * second spelling of `no-tenant` in a second file.
+ *
+ * WHAT IS REFUSED, AND WHAT IS DELIBERATELY NOT:
+ *
+ *   * **Blank** is refused. `engine.acting_as` refuses it too — "a blank scope
+ *     matches a blank column and that is a row nobody owns" — and a blank
+ *     reaching that far becomes a `ValueError` in a stack trace naming a context
+ *     manager rather than a malformed claim. Refused here, where it can be named.
+ *   * **Control characters** are refused, newline and tab included. A tenant id
+ *     travels as a JSON argument to a Python subprocess and lands in a log line;
+ *     no legitimate identifier contains one, and a value that can forge a log row
+ *     is worth refusing at the boundary.
+ *   * **Over-long** is refused, per `MAX_TENANT_ID_LENGTH`.
+ *   * **INTERIOR SPACES AND UNUSUAL PUNCTUATION ARE ALLOWED**, and that is a
+ *     decision rather than an omission. `agentorg/db/engine.py:81` imposes
+ *     exactly one rule — not blank — so a stricter pattern here would be this
+ *     application inventing a constraint the database half does not share, and
+ *     the symptom would be a legitimately-issued tenant silently producing a
+ *     null session with nothing saying which of the two halves refused it. A
+ *     refusal nobody can read is the failure this repository exists to prevent.
+ */
+export function tenantFromClaim(value: string | undefined | null): string | null {
+  const tenant = (value ?? "").trim();
+  if (tenant === "") return null;
+  if (tenant.length > MAX_TENANT_ID_LENGTH) return null;
+  // Code points rather than a regex, on purpose twice over: a character class
+  // spelling this needs either literal control BYTES in the source -- invisible in
+  // every diff and every review, which is how the first draft of this line shipped --
+  // or `\x00-\x1f` escapes, which `no-control-regex` refuses and which would need a
+  // lint suppression on a security check. A loop over code points needs neither.
+  for (const character of tenant) {
+    const code = character.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return null;
   }
-  const result = await runner.query(MEMBERSHIP_QUERY, [login]);
-  return result.rows.filter((row) => row.tenant_id.trim() !== "");
-  // The filter is not decoration: `engine.acting_as` REFUSES a blank tenant, so a
-  // blank row reaching the caller becomes an exception several layers away, in a
-  // stack trace naming a context manager rather than a malformed membership row.
-}
-
-/**
- * The single tenant to act as, or `null`.
- *
- * ONE TENANT PER SESSION TODAY, AND THE MULTI-TENANT CASE IS NAMED RATHER THAN
- * GUESSED. `app_user` exists precisely because "one person may hold memberships in
- * several organisations", so this genuinely happens — and picking silently is the
- * wrong answer twice over: the person cannot tell which organisation they are
- * looking at, and a gate they approve is recorded against a tenant they did not
- * choose.
- *
- * The oldest membership is chosen because SOMETHING must be, and `null` for a person
- * with two organisations would lock out a legitimate user. It is stable and
- * explicable, and the honest fix is a tenant switcher — a screen, which is Lane J's,
- * plus a cookie this function would read. Recorded as a further step rather than
- * half-built.
- */
-export function soleTenant(rows: readonly MembershipRow[]): string | null {
-  const first = rows[0];
-  return first === undefined ? null : first.tenant_id;
+  return tenant;
 }

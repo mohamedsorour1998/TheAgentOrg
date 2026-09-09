@@ -159,9 +159,27 @@ export interface SessionView {
   login: string | null;
   name: string | null;
   image: string | null;
-  /** Which tenant the server resolved. A screen shows it; it cannot change it. */
+  /**
+   * Which tenant the server resolved, from the verified `custom:tenant` claim. A
+   * screen shows it; it cannot change it.
+   *
+   * `null` WITH `signed_in: true` IS THE STATE A SCREEN MUST NAME IN WORDS: the
+   * account exists and no administrator has assigned it a tenant yet, which is
+   * every account between self-service sign-up and assignment. Every
+   * authenticated route refuses until it resolves. Rendering that as an empty run
+   * list, or as "no runs yet", is the "did not run versus passed" conflation this
+   * repository exists to refuse.
+   */
   tenant_id: string | null;
-  /** `true` once a GitHub grant is linked and not revoked. */
+  /**
+   * `false` ON THIS DEPLOYMENT, ALWAYS, and the field is kept rather than removed
+   * because two Lane J components read it.
+   *
+   * It meant "an Auth.js `accounts` row holds a GitHub access token". The GitHub
+   * OAuth provider is gone, so nothing writes that row and this application holds
+   * no GitHub grant for anybody — see `web/app/api/session/route.ts` for why
+   * reporting `true` would be a "linked" mark backed by no credential.
+   */
   github_linked: boolean;
 }
 
@@ -203,19 +221,35 @@ export interface Endpoint {
  * client-chosen threshold is a client-chosen security verdict.
  */
 export const ENDPOINTS: readonly Endpoint[] = [
+  // THREE NAMED ROUTES WHERE THERE WAS ONE CATCH-ALL. Auth.js owned the whole
+  // `/api/auth/*` namespace and its own protocol inside it; Cognito's hosted UI
+  // owns the credential exchange, so what is left here is three navigations this
+  // application writes itself. All three are GETs and none mutates: `signin`
+  // mints a one-time `state` and redirects, `callback` exchanges a code and sets
+  // a cookie, `logout` clears one. A cookie is a session, not a record — nothing
+  // in the audit trail moves, which is what `mutates` tracks and why
+  // `POST /api/approvals` remains the only entry with it set.
   {
     method: "GET",
-    path: "/api/auth/[...nextauth]",
-    summary: "Auth.js: sign in, sign out, callback, CSRF token, session",
+    path: "/api/auth/signin",
+    summary: "Redirect to the Cognito hosted UI, carrying a one-time state",
     authenticated: false,
     mutates: false,
   },
   {
-    method: "POST",
-    path: "/api/auth/[...nextauth]",
-    summary: "Auth.js: the sign-in and sign-out POSTs, CSRF-protected by Auth.js",
+    method: "GET",
+    path: "/api/auth/callback",
+    summary:
+      "Verify the state, exchange the code, verify the ID token, set the session cookie",
     authenticated: false,
-    mutates: true,
+    mutates: false,
+  },
+  {
+    method: "GET",
+    path: "/api/auth/logout",
+    summary: "Clear this application's cookie and Cognito's, then land on /signin",
+    authenticated: false,
+    mutates: false,
   },
   {
     method: "GET",
