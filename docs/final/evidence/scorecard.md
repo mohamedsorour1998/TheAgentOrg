@@ -79,12 +79,54 @@ ends it. Three dimensions have no source at this commit.
 
 | Dimension | Why not | Command that closes it |
 |---|---|---|
-| **time to merge** | the local walk is 1.23–2.43 s while a real run is minutes, most of it a human deciding at a gate. Quoting the local figure would be wrong by two orders of magnitude in the flattering direction | `gh run list --workflow=run-pipeline.yml --limit 20 --json databaseId,createdAt,updatedAt,conclusion` |
 | **cost per merged change** | **nothing records tokens.** `state.StageCost` declares `input_tokens` / `output_tokens` / `cached_tokens` and no code path writes them; `agentorg/common/llm.py` has no usage accounting at all | Lane E's instrumentation. Until then: `grep -rn 'input_tokens' agentorg/` returns only the declaration |
-| **escaped defects** | a rate over shipped changes, and the denominator is two merged PRs on the target repository | `gh pr list --repo mohamedsorour1998/auth-service --state merged --json number,mergedAt,title` |
 
-**Zero escaped defects over two merges is not evidence of a low rate.** Report the
-count and the denominator; never the ratio.
+**`time to merge` and `escaped defects` WERE in this table and are now measured.**
+Both were recorded as gaps needing "real runs over real time, not a harness". The
+real runs already existed — eight pipeline-produced merges on the target repository
+and thirty-seven `run-pipeline.yml` runs — and nobody had asked GitHub. Measured
+2026-09-09 by `scripts/measure_merge_history.py`, which **refuses rather than
+inventing** when `gh` is absent, unauthenticated, or answers nothing:
+
+```
+TIME TO MERGE   n=8 pipeline-produced merges
+  ticket opened -> merged   min 4.47  median  5.39  max 27.07  minutes
+  pr opened     -> merged   min 2.52  median  2.65  max  5.22  minutes
+
+ESCAPED DEFECTS  0 credential escapes over 9 merged pull requests
+  positive control: PR #50 (not merged) carries 3 credential match(es)
+```
+
+**Three things those numbers do not say, and all three are printed beside them.**
+
+- **SURVIVORSHIP.** 8 merges out of **37** runs (`cancelled=11, failure=13,
+  success=13`). Every blocked and every failed run is excluded from that median by
+  construction, because a run that did not merge has no merge time. The median
+  describes the runs that worked.
+- **The human was watching.** A 4.47-minute floor means somebody clicked three gates
+  within four and a half minutes. This is a floor on *machine* time, not an estimate
+  of what a reviewer with a day job costs — and human touches are a **floor**
+  dimension here, so shortening that wait is not the goal.
+- **A COUNT AND A DENOMINATOR, NEVER A RATE.** Zero over nine merges is not evidence
+  of a low rate. And the three scanners bind on credentials, CVEs and injectable
+  patterns only, so this figure is *silent* about a logic defect that shipped —
+  exactly the class `agentorg/agents/testgen.py` exists for and which
+  `compute_security_verdict` is structurally blind to.
+
+**The positive control is what makes the zero mean anything.** A broken grep reports
+`0` over the merged set precisely as a clean history does, so the same scan is run
+against the pull requests that did **not** merge and the script refuses if it finds
+nothing there. RED, with the three credential patterns misspelled: the merged set
+still read `0` and the script exited **1** with *"the credential scan found nothing
+in ANY unmerged pull request, so its zero over the merged set is not evidence"*.
+
+The scan matches **added lines only**, via `common/diff.py`'s rule — a key on a `-`
+line is a key being removed, and counting it would report the remediation as the
+defect. That is `developer._key_is_in_the_change`'s measured lesson, where the
+whole-diff form once let a poisoned ticket promote.
+
+**The old denominator in this file said "two merged PRs" and was stale**; it is nine.
+A denominator quoted from memory ages exactly the way a pass count does.
 
 ### The conditions, which are part of the numbers
 
