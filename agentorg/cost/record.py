@@ -67,11 +67,31 @@ def price_stage(row: StageCost) -> float | None:
     to a total it can still compute from its priced siblings.
     """
     if row.input_tokens == 0 and row.output_tokens == 0 and row.cached_tokens == 0:
-        # A zero-token stage costs zero whatever the model is -- including a fixture
-        # fallback, whose `model` is deliberately blank. Answering None here would
-        # make a whole run unpriceable the moment one agent fell back, which is the
-        # common case rather than the edge one.
-        return 0.0
+        # A ZERO-TOKEN STAGE COSTS ZERO ONLY IF WE KNEW THE RATE. This branch used to
+        # `return 0.0` unconditionally, and its comment argued that answering None
+        # "would make a whole run unpriceable the moment one agent fell back".
+        #
+        # THAT ARGUMENT WAS FALSE, and `total_usd` three functions down says so in its
+        # own docstring: "A run with three priced stages and one unpriced one reports
+        # the sum of the three." It skips Nones and sums the rest, so one fallback has
+        # never been able to make a run unpriceable.
+        #
+        # What the unconditional zero DID do is collapse the distinction this whole
+        # module exists for. MEASURED, on a run where every agent served a fixture and
+        # `price_for("")` returned None at every row:
+        #
+        #     **total** 0 input (0 cached) + 0 output = $0.0000
+        #
+        # "Priced and free" rendered for a run where nothing was priced — the exact
+        # reading `total_usd` promises never to produce ("A run where NOTHING could be
+        # priced reports None, never 0.0"). This function's own docstring already said
+        # a blank model "prices to None. That is correct and deliberate", so the two
+        # halves of one function disagreed and the code half won.
+        #
+        # Note the asymmetry that made it visible: `report.render`'s CACHE line gets
+        # this right — "not measured … This is not a zero" — while its cost line said
+        # $0.0000 flatly. Same distinction, same function, one half missing.
+        return 0.0 if price_for(row.model) is not None else None
 
     price = price_for(row.model)
     if price is None:

@@ -587,22 +587,43 @@ def test_a_fixture_row_is_added_alongside_a_real_call_not_instead_of_it():
     assert rows[1].fixture is True
 
 
-def test_a_fixture_only_stage_prices_to_zero_and_does_not_unprice_the_run():
-    """A fixture row carries no model, and that must not make the run unpriceable.
+def test_a_fixture_stage_does_not_change_a_priced_run_and_does_not_price_itself():
+    """A fixture row carries no model. Two facts, and they used to be confused.
 
-    An agent falling back is the COMMON case, so answering None for its zero-token
-    stage would report an unpriced total for most real runs -- which would make the
-    None-means-unpriced signal useless by crying wolf.
+    THIS TEST PREVIOUSLY ASSERTED `price_stage(fixture) == 0.0`, and that assertion
+    was the collapse this module exists to prevent. Its stated reason -- "answering
+    None for its zero-token stage would report an unpriced total for most real runs,
+    which would make the None-means-unpriced signal useless by crying wolf" -- is
+    false, and `total_usd`'s own docstring is the refutation: it SKIPS unpriced rows
+    and sums the rest, so a mixed run has never been at risk. The second assertion
+    below is that property, and it is preserved unchanged.
+
+    The only run the old spelling changed was the one where EVERY row is a fixture,
+    which is precisely the run that must report None. MEASURED before the fix, with
+    `price_for("")` returning None at every row:
+
+        **total** 0 input (0 cached) + 0 output = $0.0000
+
+    "Priced and free" rendered for a run where nothing was priced. After the fix the
+    same run renders "priced 0 of 1 stages; the total EXCLUDES 1."
     """
     fixture_stage = StageCost(stage="review", model="", input_tokens=0, output_tokens=0)
 
-    assert record.price_stage(fixture_stage) == 0.0, (
-        "a zero-token fixture stage did not price to exactly 0.0"
+    assert record.price_stage(fixture_stage) is None, (
+        "a stage whose model is not in the price table priced to a number; `0.0` is a "
+        "specific, wrong, plausible answer to a question nobody could answer"
     )
+    # THE PROPERTY THE OLD TEST WAS PROTECTING, and it still holds: one fallback must
+    # not unprice a run that has real rows in it.
     assert record.total_usd([
         StageCost(stage="plan", model=MODEL, input_tokens=1_000_000),
         fixture_stage,
     ]) == pytest.approx(0.33), "a fixture stage changed the run's total"
+    # And the case the old spelling got wrong.
+    assert record.total_usd([fixture_stage]) is None, (
+        "a run where NOTHING could be priced reported a number, which is the free-run "
+        "misreading `total_usd`'s docstring promises never to produce"
+    )
 
 
 # ── E2 / E5: building the record, and summing it ─────────────────────────────

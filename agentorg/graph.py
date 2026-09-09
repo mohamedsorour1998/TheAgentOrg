@@ -60,6 +60,7 @@ from collections.abc import Callable
 from . import gates, integrations, log
 from .agents import testgen
 from .common import agent_client, config, llm
+from .cost import record as cost_record
 from .security import scoring
 from .state import (
     DevResult,
@@ -470,6 +471,25 @@ def run_pipeline(ticket_id: str, ticket_text: str, *, poisoned: bool = False,
         return _walk(state, poisoned=poisoned, auto_approve=auto_approve)
     finally:
         state.model_provenance = llm.last_source() or ""
+        # WHAT THE RUN COST, folded from what `llm` recorded, BEFORE `gates.save` so the
+        # saved document carries it. Lane E built the whole instrumentation and Lane M
+        # wrote the SRE prompt's cost block; neither could assign this, because both
+        # pipelines are integrator files — so `state.cost` was None on every run and the
+        # block rendered "" forever. The fourth instance of a feature complete, tested,
+        # and reached by nothing.
+        #
+        # `merge_cost_records` rather than a plain assignment, and NOT because a merge is
+        # tidier: on the cloud path each of the seven jobs is a separate process, so
+        # `llm`'s module state starts empty every time and an assignment would erase every
+        # earlier stage's row. `record.py` names the shape — "the same as the rejection
+        # recorder that overwrote a block with a rejection, and just as invisible, because
+        # the surviving record would look complete."
+        #
+        # In the `finally` for the same reason `gates.save` is: `_walk` has seven `return
+        # state` exits, and the run that RAISED is the one whose cost is most worth having.
+        state.cost = cost_record.merge_cost_records(
+            state.cost, cost_record.build_cost_record()
+        )
         gates.save(state)
         # The index follows the run to its ending, in the `finally` beside `gates.save`
         # for the same reason that call is here: `_walk` has seven `return state` exits

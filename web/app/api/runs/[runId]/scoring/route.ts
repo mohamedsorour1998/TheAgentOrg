@@ -26,12 +26,23 @@
  * an empty list, and so does a run written before `SecurityResult.scoring` existed.
  * `scan_provenance` is what distinguishes them — `""` means nobody recorded it.
  *
- * KNOWN GAP, STATED: Lane C's note says `SecurityResult.scoring` is populated by
- * `score_findings` but its two call sites belong to other lanes, so **no deployed run
- * carries a scoring row yet**. This endpoint reads the field correctly and will be
- * empty until `agents/security.py` emits them. That is a wiring gap in another lane's
- * file, not something this route can close, and an empty table here is the honest
- * answer rather than a fabricated one.
+ * THAT GAP IS CLOSED. This note used to say "no deployed run carries a scoring row
+ * yet", because `score_findings` had no caller — Lane C built it and could not wire
+ * it, since `agents/security.py` was not in its ownership row. The integrator wired
+ * it into `_with_provenance`, which ALL THREE returns pass through (the real scan and
+ * both fixture paths), so any run's saved state now carries rows.
+ *
+ * MEASURED end to end against a real Postgres, on a poisoned run:
+ *
+ *     {"run_id": "6015d974-…", "threshold": "high", "rows": [
+ *        {"tool": "gitleaks", "rule": "aws-access-key-id",   "mapped": "critical",
+ *         "native": "", "threshold": "high", "blocking": true},
+ *        {"tool": "gitleaks", "rule": "aws-secret-access-key", … "blocking": true},
+ *        {"tool": "semgrep",  "rule": "…flask.missing-timeout", … }]}
+ *
+ * The empty-list handling above stays, because it is still reachable and still means
+ * two different things: a clean run that found nothing, and a run written before the
+ * field existed. `scan_provenance` is what tells them apart.
  */
 
 import { NextResponse } from "next/server";

@@ -87,6 +87,7 @@ import typing
 from agentorg import gates, graph, integrations, log
 from agentorg.agents import testgen
 from agentorg.common import agent_client, config, llm
+from agentorg.cost import record as cost_record
 from agentorg.state import HumanDecision, LogEvent, RunState
 from agentorg.tenancy import run_index
 
@@ -293,6 +294,19 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     source = llm.last_source()
     if source:
         state.model_provenance = source
+    # WHAT THIS STAGE COST, MERGED onto what earlier stages recorded — beside
+    # `model_provenance` above, and for the same reason: this is the one place every
+    # stage's state is written, so a per-stage call site would be seven chances to
+    # forget one.
+    #
+    # THE MERGE IS NOT OPTIONAL HERE and this is the path that proves it. Each of the
+    # seven jobs is a separate PROCESS, so `llm`'s module state starts empty every time
+    # — a plain assignment would erase every earlier stage's row and leave a record that
+    # looks complete. `cost/record.py` names that shape as the rejection recorder's,
+    # "just as invisible, because the surviving record would look complete."
+    state.cost = cost_record.merge_cost_records(
+        state.cost, cost_record.build_cost_record()
+    )
     ref = gates.pause(state, pausing_for) if pausing_for else gates.save(state)
     print(f"run_id={state.run_id}")
     print(f"status={state.status}")
