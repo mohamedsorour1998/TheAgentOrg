@@ -620,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
         check_the_worker_service_matches_the_image_it_should_run,
     )
     from scripts.preflight_rls import check_the_dsn_role_is_bound_by_rls
+    from scripts.preflight_tenancy import check_leading_keys_refuses_another_tenant
 
     checks.extend([
         (5, "the WORKER's task role can invoke the model and reach the runtimes",
@@ -629,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
              args.ecs_cluster, args.ecs_service)),
         (7, "the queue's DSN names a database role that RLS actually binds for",
          lambda: check_the_dsn_role_is_bound_by_rls(args.queue_dsn)),
+        (8, "dynamodb:LeadingKeys REFUSES another tenant, and the index Deny is EXPLICIT",
+         lambda: check_leading_keys_refuses_another_tenant(ACCOUNT, REGION)),
     ])
 
     for number, name, run in checks:
