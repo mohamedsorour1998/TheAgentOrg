@@ -201,18 +201,48 @@ things must be added rather than ported:
 
 Ordered so that nothing is deleted before its replacement is proven.
 
-| # | Step | Done when |
-|---|---|---|
-| 1 | Table + 3 GSIs in `modules/state`, `PAY_PER_REQUEST` | `terraform plan` clean; table ACTIVE |
-| 2 | `agentorg/db/_dynamo.py` — key construction only, pure functions | unit tests; no AWS call |
-| 3 | `tenancy/accessors.py` gains a DynamoDB backend behind the existing interface | the 52 leak tests pass against it |
-| 4 | The two NEW leak tests (§6) | both fail before the IAM policy exists, pass after |
+| # | Step | Done when | State |
+|---|---|---|---|
+| 1 | Table + 3 GSIs, `PAY_PER_REQUEST` | table ACTIVE | **DONE** — `modules/tenancy`, applied by CI. Table ACTIVE, 3 GSIs ACTIVE all KEYS_ONLY, PITR enabled |
+| 2 | `agentorg/db/_dynamo.py` — key construction, pure functions | unit tests; no AWS call | **DONE** — 18 tests, RED both directions on the cross-language prefix check |
+| 3 | `tenancy/accessors.py` gains a DynamoDB backend | the 52 leak tests pass against it | **PARTIAL** — `_dynamo_store.py` + 9 tests done (item ops, GSI1 breach, pagination). The ~20 accessors are NOT ported |
+| 4 | The two NEW leak tests (§6) | both fail before the IAM policy exists, pass after | **DONE** — GSI1 breach is hermetic; the tag breach is `preflight.py` check 8, measured below |
 | 5 | Queue backend | `test_queue_*.py` 92 tests pass |
 | 6 | STS session-tag path for the web app | wrong-tag breach refused, measured |
 | 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured |
 | 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app |
 | 9 | Backfill marker + one-time copy from Postgres | row counts agree both ways |
 | 10 | Retire the Postgres path | only after 1–9; `_memory.py` stays forever |
+
+### What check 8 measured, 2026-09-10
+
+```
+tag=t1  -> TENANT#t1     allowed        <- the POSITIVE CONTROL
+tag=t1  -> TENANT#t2     implicitDeny   <- THE BREACH, refused
+no tag  -> TENANT#t1     implicitDeny   <- fails closed
+tag=t1  -> Query gsi1    explicitDeny   <- the index gap, shut deliberately
+```
+
+RED, proving the check is not passing by construction:
+
+```
+condition REMOVED  -> tag=t1 reaching TENANT#t2 = allowed
+index Deny REMOVED -> Query gsi1 = implicitDeny
+```
+
+**So §4's claim that the web path gets a STRONGER guarantee is now measured
+rather than argued.** The pipeline half is still the open regression, and step 7
+is still mandatory.
+
+### One design assumption that did not survive contact
+
+`tenant_assumer_arns = []` was written as a fail-closed default: a role nothing
+can assume. **IAM refuses to create it at all** — `MalformedPolicyDocument: The
+passed in policy has a statement with no principals!` — so the apply died two
+minutes in, after the table had already been attempted. The role is count-gated
+now, following `modules/ingress`. An output documenting the unreachable state was
+corrected too: a stale comment claiming a safe state is worse than none, because
+a reader stops looking.
 
 Steps 1–5 are reversible; the repo keeps working on Postgres throughout. **Step 10 is the
 only irreversible one** and should lag the rest by a comfortable margin.
