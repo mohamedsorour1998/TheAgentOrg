@@ -113,6 +113,33 @@ module "state" {
 }
 
 ################################################################################
+# Tenancy: the single DynamoDB table that will replace Postgres. STEP 1 ONLY.
+#
+# `docs/design/dynamodb-migration.md` is the plan. This creates the table and two
+# IAM policies and NOTHING READS IT YET -- the Postgres path stays authoritative
+# until step 10 of that document, and the table costs nothing empty under
+# PAY_PER_REQUEST.
+#
+# BOTH ROLE LISTS ARE DELIBERATELY EMPTY AND THAT IS THE SAFE STATE, not an
+# oversight. `tenant_assumer_arns` empty means the tenant-scoped role exists with
+# a trust policy nothing can satisfy, so no AssumeRole succeeds; `service_role_arns`
+# empty means the pipeline has no access. Both fail CLOSED, and the outputs report
+# which state you are in -- `modules/ingress`'s `dispatch_target_enabled` lesson,
+# where a rule with no target fires into nothing while looking healthy.
+#
+# Populate them only as the corresponding step of the plan lands, and read §4
+# before adding to `service_role_arns`: every ARN there is a principal that
+# `dynamodb:LeadingKeys` does not constrain.
+################################################################################
+
+module "tenancy" {
+  source = "../../modules/tenancy"
+
+  name = local.name
+  tags = local.tags
+}
+
+################################################################################
 # Platform: where the queue worker runs. LANE N.
 #
 # The registry, the log group and two IAM roles are always created and cost

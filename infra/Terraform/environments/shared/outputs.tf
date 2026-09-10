@@ -70,3 +70,28 @@ output "worker_hourly_usd_estimate" {
   description = "Fargate ARM cost per hour for the running worker(s), EXCLUDING the database this module does not create."
   value       = module.platform.worker_hourly_usd_estimate
 }
+
+################################################################################
+# Tenancy (docs/design/dynamodb-migration.md, step 1). Nothing reads this table
+# yet; these outputs exist so an apply says which state it left behind.
+################################################################################
+
+output "tenancy_table_name" {
+  description = "The single tenancy table. Empty and unread until the application is ported; PAY_PER_REQUEST, so an unused table bills nothing."
+  value       = module.tenancy.table_name
+}
+
+output "tenancy_scoped_role_arn" {
+  description = "The role the web app assumes per request, tagged with the tenant from the verified Cognito claim. This is the ARN web/lib/ needs -- read it here rather than assembling it from account id and name, which would be a second declaration free to drift."
+  value       = module.tenancy.tenant_scoped_role_arn
+}
+
+output "tenancy_scoped_is_assumable" {
+  description = "FALSE while tenant_assumer_arns is empty, which is the default and the safe state: the role exists with a trust policy nothing can satisfy. Reported because from inside the application that is indistinguishable from a misconfigured session tag -- both surface as AccessDenied."
+  value       = module.tenancy.tenant_scoped_is_assumable
+}
+
+output "tenancy_cross_tenant_principals" {
+  description = "How many principals hold access dynamodb:LeadingKeys does NOT constrain. Zero is correct until step 7 of the plan lands. This is the one figure in the module worth reading on every apply."
+  value       = module.tenancy.service_roles_attached
+}
