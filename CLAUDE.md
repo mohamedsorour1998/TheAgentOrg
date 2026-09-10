@@ -2943,26 +2943,65 @@ reached by nothing. `infra/amplify/provision.py` is that missing half.
 .venv-main/bin/python -m infra.amplify.provision      # idempotent; re-running is the fix
 ```
 
-Verified by reading the live app back rather than trusting the return value:
+**THE LIVE APP IS `d15q7tk62qnlxt`, CREATED IN THE CONSOLE.** An earlier CLI-created app
+(`d9lts7h24c9c8`) was deleted — do not chase that id, it appears in commits from
+2026-09-09. The console route was chosen because it performs the GitHub connection, which
+no script can do; everything after that was applied from here. Verified by reading the live
+app back:
 
 ```
-app_id       d9lts7h24c9c8
-domain       d9lts7h24c9c8.amplifyapp.com
-AUTH_URL     https://main.d9lts7h24c9c8.amplifyapp.com     <- DERIVED, see below
-platform     WEB_COMPUTE                                   <- not WEB; see spec.py
+app_id       d15q7tk62qnlxt
+custom domain https://theagentorg.rosettacloud.app     AVAILABLE, TLS valid
+AUTH_URL     https://theagentorg.rosettacloud.app      <- the CUSTOM domain, see below
+platform     WEB_COMPUTE                               <- not WEB; see spec.py
+repository   https://github.com/mohamedsorour1998/TheAgentOrg   cloneMethod TOKEN
 branch main  Next.js - SSR · PRODUCTION · autoBuild=True
-environment  AMPLIFY_MONOREPO_APP_ROOT, AUTH_URL, COGNITO_{ISSUER,CLIENT_ID,DOMAIN}
-buildSpec    identical to the committed amplify.yml (modulo a trailing newline Amplify appends)
-repository   None
+environment  AMPLIFY_{MONOREPO_APP_ROOT,DIFF_DEPLOY}, _LIVE_UPDATES,
+             AUTH_URL, COGNITO_{ISSUER,CLIENT_ID,DOMAIN}
+
+GET https://theagentorg.rosettacloud.app/api/auth/signin -> 307
+  redirect_uri=https%3A%2F%2Ftheagentorg.rosettacloud.app%2Fapi%2Fauth%2Fcallback
+following it -> HTTP 200, <title>Signin</title>
 ```
 
-**`repository: None` MEANS NO BUILD HAS EVER RUN OR EVER WILL**, and the app is created,
-configured, and answers `get-app` perfectly all the same. That is why `provision()` returns
-`repository_connected` as an explicit key rather than letting a caller infer it: reading a
-green provisioning run as a deployed app is exactly the shape this repository keeps
-finding. Modern Amplify connects GitHub through a **GitHub App installation**, which is a
-console authorisation no script can perform — so the remaining step is an operator's click,
-after which re-running the script preserves the environment.
+**`_LIVE_UPDATES` PINS NODE 22 AND IS COPIED VERBATIM FROM `grace-dashboard`**, which
+builds Next.js on this image today — a copied measurement rather than a guess at an
+undocumented schema. `amplify.yml` also runs `nvm use 22`; both are kept, because the
+build image has shipped Node 18 and `next@16.3.3` requires `>=20.9.0`.
+
+#### THE FIRST BUILD RUNS BEFORE YOU HAVE SET ANY ENVIRONMENT VARIABLE
+
+Measured on this app. Creating it in the console starts job `1` immediately, and that build
+**SUCCEEDED in 2m22s** having executed our `amplify.yml` correctly — verified from the build
+log, which shows `nvm use 22`, all three gates, and the four `.env.production` writes. Every
+one of those writes produced `NAME=` with an empty value, because the variables did not
+exist yet.
+
+**Nothing failed, and nothing could have.** Lane P removed the module-scope `sessionPool()`
+call, so `next build` needs no environment variable at all — measured at exit 0 with every
+one unset. So the sequence is: green build, green deploy, green VERIFY, and a running app
+that refuses every session. `amplify.yml`'s own header says there is "no backstop under this
+list"; this is what that reads like in practice.
+
+The fix is one `start-job --job-type RELEASE` **after** the variables are set. The rule:
+**setting an environment variable does not rebuild the app**, and the artifact serving
+traffic was built from whatever was there at the time. Check `.env.production` by testing
+`/api/auth/signin` for a 307, never by reading the console's variable list — the list is
+correct and the deployed bundle is a separate fact.
+
+**`repository_connected` IS RETURNED RATHER THAN INFERRED**, because an app with no
+repository is created, configured, and answers `get-app` perfectly while building nothing.
+It now reads `True`. The connection itself was made in the console: Amplify's GitHub App
+authorisation is a browser flow no script can perform. `grace-dashboard` and this app both
+record `cloneMethod: TOKEN`, so a PAT-based `update-app --access-token` is the CLI
+alternative — it needs `repo` **and** `admin:repo_hook`, and without the second the connect
+succeeds while no push webhook is installed, which looks identical until a push does
+nothing.
+
+**AUTH_URL IS THE CUSTOM DOMAIN EVEN WHEN THE APP IS REACHED ON THE AMPLIFY ONE.** Measured:
+signing in at `main.d15q7tk62qnlxt.amplifyapp.com` redirects with
+`redirect_uri=https://theagentorg.rosettacloud.app/...`. That is correct — one canonical
+origin — and it is why both origins are in the pool's callback list.
 
 **`AUTH_URL` IS DERIVED FROM THE APP, AND THE ORDER IS FORCED BY A CIRCULARITY.** It is one
 of the four variables `amplify.yml` writes into `.env.production`, and its value is the
