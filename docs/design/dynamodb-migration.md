@@ -1,0 +1,233 @@
+# Moving tenancy from Postgres to DynamoDB
+
+**Status: PLAN, not a decision to implement.** Written 2026-09-10 at the operator's
+request after a three-option comparison. The timing objection is recorded in
+§8 and was overruled deliberately; it is kept here so a future reader sees it was
+weighed rather than missed.
+
+## 1. Why this is being considered at all
+
+One reason, and it is not preference. **Amplify Hosting's SSR compute cannot join a
+VPC** — measured against botocore 1.43.75, where the entire Amplify service model
+carries zero `vpc`/`subnet`/`securityGroup` fields while Lambda's `CreateFunction`
+carries `VpcConfig`; and confirmed by AWS's own answer on re:Post: *"Recently there is
+launch of Amplify Hosting Compute even that does not have VPC configuration... RDS needs
+to be open to public. However we do not recommend making the DB public."*
+
+So any Postgres the deployed app reaches directly is a Postgres on the public internet
+with `0.0.0.0/0` on 5432 — Amplify's egress addresses are not fixed, so the security
+group cannot be narrowed. DynamoDB removes the question: no port, no DSN, no password,
+IAM authentication from the SSR compute role.
+
+The secondary benefit is real but must not be the argument: `PAY_PER_REQUEST` on this
+workload is effectively free, against $13.98/month for `db.t4g.micro` + 20 GiB.
+
+## 2. What is actually being replaced
+
+Measured, not estimated:
+
+| | |
+|---|---|
+| SQL-bearing modules | **11 files** |
+| Lines in `db/` + `tenancy/` + `queue/` | **~4,900** |
+| Tests on that layer | **232** across 7 files |
+| Consumers of the layer | 12 modules, incl. 4 `web/lib/reader/*.py` |
+
+Seven tables. Six are tenant-scoped; `app_user` is deliberately not, and its
+`unscoped_reason` states why: *"one person may hold memberships in several
+organisations, so no single tenant owns the row. It is unreachable from tenant scope --
+membership is the only route in, and that table IS scoped."*
+
+## 3. The key design
+
+**Single table, `theagentorg`, and the partition key IS the tenant.** That is not an
+idiom choice — it is what makes `dynamodb:LeadingKeys` able to enforce isolation at all.
+
+```
+PK                    SK                    was
+────────────────────────────────────────────────────────────
+TENANT#<tenant_id>    ORG                   organisation
+TENANT#<tenant_id>    MEMBER#<user_id>      membership
+TENANT#<tenant_id>    REPO#<full_name>      repository
+TENANT#<tenant_id>    RUN#<run_id>          run
+TENANT#<tenant_id>    SECRET#<name>         secret
+TENANT#<tenant_id>    BUDGET                budget
+TENANT#<tenant_id>    JOB#<job_id>          queue_jobs
+
+USER#<user_id>        PROFILE               app_user   (unscoped, by design)
+```
+
+**Three `unique_together` constraints become free.** `repository(tenant_id, full_name)`,
+`secret(tenant_id, name)` and `membership(tenant_id, user_id)` are exactly the composite
+key, so uniqueness is the primary key rather than an index that has to be declared and
+can be forgotten.
+
+**`organisation` has `tenant_column='id'`** — it is scoped by itself — which lands
+naturally as `TENANT#<id> / ORG`.
+
+### Indexes
+
+| Index | Keys | Answers |
+|---|---|---|
+| `GSI1` | PK `RUN#<run_id>`, SK `TENANT#<t>` | `gates.load(run_id)` and `jobs_for_run` without knowing the tenant |
+| `GSI2` | PK `STATUS#<status>`, SK `created_at` | the queue's "next READY job" |
+| `GSI3` | PK `EMAIL#<email>` | `app_user` unique-email lookup |
+
+GSI1 is the one to scrutinise: a run id is an unguessable uuid, but a GSI keyed on it is
+reachable **without** a tenant in the key, so `LeadingKeys` does not constrain it. Any
+accessor reading through GSI1 must compare the returned `TENANT#` against the caller's
+scope and refuse on mismatch — and that comparison is application code, so it needs a
+leak test of its own rather than trust.
+
+## 4. Where isolation comes from — and the honest regression
+
+This is the part that decides whether the migration is acceptable.
+
+### The web path gets a STRONGER guarantee
+
+Today the browser's tenant reaches Postgres as `SET agentorg.tenant_id`, set by
+application code. Under this design the chain becomes:
+
+```
+Cognito ID token   custom:tenant  (immutable, absent from WriteAttributes)
+      │
+      ▼  STS AssumeRole with session tag  tenant=<t>
+scoped credentials
+      │
+      ▼  IAM condition  dynamodb:LeadingKeys = ["TENANT#${aws:PrincipalTag/tenant}"]
+DynamoDB refuses anything else
+```
+
+**No application code is in that chain.** And it lands on work already done and
+verified: `custom:tenant` is `Mutable: False`, is not in `WriteAttributes`, and was
+measured to be unsettable after creation — so a caller cannot choose the tag that
+authorises them. That is a better story than `SET agentorg.tenant_id`, which is one
+forgotten call away from unscoped.
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:PutItem",
+             "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+  "Resource": "arn:aws:dynamodb:us-east-1:339712964409:table/theagentorg",
+  "Condition": {
+    "ForAllValues:StringEquals": {
+      "dynamodb:LeadingKeys": ["TENANT#${aws:PrincipalTag/tenant}"]
+    }
+  }
+}
+```
+
+### The pipeline path gets a WEAKER one, and this is the cost
+
+The worker, `run_stage.py` and the five agents do **not** run as a tenant. They process
+every tenant's jobs, so they need a credential that can read across tenants — and
+`LeadingKeys` cannot apply to a principal that legitimately spans partitions.
+
+Today those callers connect as `agentorg_app`, a non-owning role, and **Postgres RLS
+enforces isolation for them too** — measured: owner sees 2 tenants' rows, `agentorg_app`
+sees 1. Under DynamoDB with one service credential, the only thing keeping a stage
+inside its tenant is the accessor building `PK=TENANT#<t>` correctly. **That is
+application code, and it is exactly what this repository argues against.**
+
+**The mitigation, and it should be treated as mandatory rather than optional:** the
+worker assumes a per-tenant role for the duration of a job. The job row names its
+tenant, so the worker can `AssumeRole` with `tenant` as a session tag before running the
+stage and drop the credential after. That restores enforcement-outside-the-code for the
+pipeline too, at the cost of one STS call per job (~50ms, cacheable for the job's life).
+
+**If that mitigation is cut for time, the migration should not proceed.** Without it the
+project trades a guarantee it has evidence for against one it does not, which is the
+opposite of the direction every other decision here has gone.
+
+## 5. Operations that get better, and one that gets harder
+
+**Better — the budget check.** Today it is read-modify-write behind `_require`. It
+becomes one atomic conditional update, which cannot race:
+
+```
+UpdateItem  SET spent_cents = spent_cents + :amt
+ConditionExpression:  unlimited = :true OR spent_cents + :amt <= ceiling_cents
+```
+
+A tenant with **no budget row** must still be REFUSED, not admitted — the condition
+fails on a missing item, which is the correct direction and matches the existing rule
+that absent must not read as unlimited.
+
+**Better — the queue claim.** `UpdateItem` with
+`ConditionExpression: attribute_not_exists(claimed_by)` is an atomic claim. A pause stays
+a durable item with no visibility timeout, so the 12-hour cap that disqualified SQS does
+not exist here. This is the one part of the system DynamoDB genuinely suits better than
+SQL.
+
+**Harder — anything that was a transaction across tables.** `TransactWriteItems` caps at
+**100 items** and cannot span tables in the way a SQL transaction spans rows. Every
+current multi-statement write needs auditing; most are single-partition and become one
+`TransactWriteItems` within `TENANT#<t>`, which is fine.
+
+**Gone — the migration ledger.** `migrations.migrate` and its checksum guard become
+moot; DynamoDB is schemaless. Lane R's work closing item 2 is superseded. Backfills stop
+being DDL and become code, which is *less* safe, not more — a backfill script has no
+ledger saying it ran. A replacement marker item (`TENANT#_meta / BACKFILL#<name>`) should
+be part of the plan, not an afterthought.
+
+## 6. Keeping the test suite honest
+
+**The hermetic suite must not gain an AWS dependency.** The pattern already exists:
+`agentorg/queue/_memory.py` is the in-process backend that keeps 232 tests offline while
+`_sql.py` is the durable one. DynamoDB joins as a **third backend behind the same
+interface**, not as a replacement for the memory one.
+
+- `boto3` is already a dependency of the five arm64 images (`agent_client` uses it), so
+  importing it in `tenancy/` ships nothing new — verify with
+  `test_requirements_covers_every_third_party_import_in_the_package` rather than assuming.
+- Integration tests run against **DynamoDB Local** in podman, the way Postgres does now.
+  `moto` is the alternative and is a test-only dependency; either is acceptable, neither
+  may be imported from `agentorg/`.
+
+**`tests/test_tenancy_leak.py` is the acceptance criterion for this whole migration.** It
+drives *every registered accessor* and attempts real breaches. If the accessor interface
+is unchanged, most of those 52 tests are unchanged — they assert behaviour, not SQL. Two
+things must be added rather than ported:
+
+1. a breach attempt through **GSI1**, which is the one index reachable without a tenant
+   in the key;
+2. a breach attempt with **the wrong session tag**, asserting IAM refuses it — the
+   DynamoDB analogue of the measured `agentorg_app` result, and the only test that can
+   show `LeadingKeys` is doing anything. Without it the IAM condition is a check that
+   cannot be observed failing.
+
+## 7. Sequence
+
+Ordered so that nothing is deleted before its replacement is proven.
+
+| # | Step | Done when |
+|---|---|---|
+| 1 | Table + 3 GSIs in `modules/state`, `PAY_PER_REQUEST` | `terraform plan` clean; table ACTIVE |
+| 2 | `agentorg/db/_dynamo.py` — key construction only, pure functions | unit tests; no AWS call |
+| 3 | `tenancy/accessors.py` gains a DynamoDB backend behind the existing interface | the 52 leak tests pass against it |
+| 4 | The two NEW leak tests (§6) | both fail before the IAM policy exists, pass after |
+| 5 | Queue backend | `test_queue_*.py` 92 tests pass |
+| 6 | STS session-tag path for the web app | wrong-tag breach refused, measured |
+| 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured |
+| 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app |
+| 9 | Backfill marker + one-time copy from Postgres | row counts agree both ways |
+| 10 | Retire the Postgres path | only after 1–9; `_memory.py` stays forever |
+
+Steps 1–5 are reversible; the repo keeps working on Postgres throughout. **Step 10 is the
+only irreversible one** and should lag the rest by a comfortable margin.
+
+## 8. The objection, recorded
+
+This is the largest rewrite available in this repository, it replaces the isolation
+layer, and it is being done close to a Final Evaluation. The thing it puts at risk —
+tenant isolation — is the thing the project has the *strongest* evidence for: a leak
+suite that attempts real breaches, and a measured owner-vs-`agentorg_app` result.
+
+The alternative that solves the stated problem with none of that risk is **API Gateway +
+Lambda in the VPC** (~$14/month), which keeps RLS and all 232 tests untouched and is
+AWS's own documented answer to the Amplify-VPC limitation.
+
+Recorded because the repository's rule is that a lane which names what it could not run
+is worth more than one reporting green. If this plan is executed and step 7 is skipped,
+that trade has been made silently, and this paragraph is the thing that says so.
