@@ -16,17 +16,25 @@ output "tenant_scoped_role_arn" {
     from account id and name: an assembled ARN is a second declaration that keeps
     agreeing while the real one moves.
   EOT
-  value       = aws_iam_role.tenant_scoped.arn
+  # `""` rather than null when the role is counted off: a consumer interpolating
+  # this into a config file gets an empty string, which fails closed, where null
+  # would render the literal "null" and read as a configured value.
+  value = length(aws_iam_role.tenant_scoped) > 0 ? aws_iam_role.tenant_scoped[0].arn : ""
 }
 
 output "tenant_scoped_is_assumable" {
   description = <<-EOT
     FALSE when `tenant_assumer_arns` is empty, which is the default.
 
-    The role exists in that state with a trust policy nothing can satisfy, so
-    every AssumeRole fails and the web path has no database access at all. That
-    is the correct fail-closed default and it is also indistinguishable, from
-    inside the application, from a misconfigured tag -- both surface as
+    FALSE means the role DOES NOT EXIST -- it is counted off, not created empty.
+    An earlier draft of this output claimed it existed "with a trust policy
+    nothing can satisfy", and that state is unreachable: IAM refuses to create a
+    role whose trust policy has a statement with no principals, so the apply
+    failed outright rather than producing a locked role.
+
+    Either way the web path has no database access, which is the correct
+    fail-closed default -- and it is indistinguishable from inside the
+    application from a misconfigured session tag, since both surface as
     AccessDenied. So it is reported as data here, the way `modules/ingress`
     reports `dispatch_target_enabled`: a rule with no target fires into nothing
     while looking perfectly healthy in the console.

@@ -101,7 +101,25 @@ resource "aws_iam_policy" "tenant_scoped" {
 # verified Cognito claim. `max_session_duration` is the AWS floor of one hour:
 # these credentials are minted per request and cached for the request, so a long
 # ceiling buys nothing and widens the window on a leaked credential.
+#
+# **COUNT-GATED, BECAUSE A TRUST POLICY WITH NO PRINCIPALS CANNOT BE CREATED.**
+# The first draft left `tenant_assumer_arns` empty and reasoned that a role
+# nothing can assume is the correct fail-closed default. MEASURED, and it is not
+# a default at all -- IAM refuses the resource outright:
+#
+#   Error: creating IAM Role (theagentorg-shared-tenancy-scoped):
+#   MalformedPolicyDocument: The passed in policy has a statement with no
+#   principals!
+#
+# So "empty means nobody can assume it" was never a state this module could
+# reach; the apply simply failed, and it failed AFTER the DynamoDB table had
+# already been attempted. The gate is `modules/ingress`'s pattern instead -- what
+# costs nothing is always created, what needs configuration is counted off -- and
+# `tenant_scoped_is_assumable` reports which state an apply left behind, exactly
+# as `dispatch_target_enabled` does for a rule with no target.
 resource "aws_iam_role" "tenant_scoped" {
+  count = length(var.tenant_assumer_arns) > 0 ? 1 : 0
+
   name                 = "${var.name}-tenancy-scoped"
   max_session_duration = 3600
   tags                 = var.tags
@@ -114,9 +132,17 @@ data "aws_iam_policy_document" "assume_tenant_scoped" {
     sid    = "CallersThatMaySetATenantTag"
     effect = "Allow"
 
-    principals {
-      type        = "AWS"
-      identifiers = var.tenant_assumer_arns
+    dynamic "principals" {
+      # NO PRINCIPALS BLOCK AT ALL when the list is empty, rather than an empty
+      # `identifiers`. IAM rejects the second (`a statement with no
+      # principals!`), and the role above is counted off in that case anyway --
+      # but a data source that renders invalid JSON is a trap waiting for the
+      # next person who references it.
+      for_each = length(var.tenant_assumer_arns) > 0 ? [1] : []
+      content {
+        type        = "AWS"
+        identifiers = var.tenant_assumer_arns
+      }
     }
 
     # `TagSession` is REQUIRED and is not implied by AssumeRole. Without it the
@@ -130,7 +156,9 @@ data "aws_iam_policy_document" "assume_tenant_scoped" {
 }
 
 resource "aws_iam_role_policy_attachment" "tenant_scoped" {
-  role       = aws_iam_role.tenant_scoped.name
+  count = length(aws_iam_role.tenant_scoped)
+
+  role       = aws_iam_role.tenant_scoped[0].name
   policy_arn = aws_iam_policy.tenant_scoped.arn
 }
 
