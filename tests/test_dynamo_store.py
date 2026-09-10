@@ -70,11 +70,14 @@ class FakeTable:
             # existence from a leak of contents.
             wanted = values[":k"]
             rows = [
-                {"pk": pk, "sk": sk}
-                for (pk, sk) in sorted(self.items)
-                if sk == wanted
+                {"pk": v["pk"], "sk": v["sk"]}
+                for v in [self.items[k] for k in sorted(self.items)]
+                if v.get("gsi1pk") == wanted
             ]
-            return {"Items": rows}
+            # SPARSE: a row without `gsi1pk` is absent from the index entirely,
+            # which is what keeps the three singleton rows out of it.
+            limit = kwargs.get("Limit")
+            return {"Items": rows[:limit] if limit else rows}
 
         pk, prefix = values[":pk"], values[":sk"]
         rows = [

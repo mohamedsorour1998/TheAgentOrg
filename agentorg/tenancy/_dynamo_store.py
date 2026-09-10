@@ -123,12 +123,55 @@ def put(client: TableClient, tenant_id: str, sort_key: str, attributes: dict) ->
     item = dict(attributes)
     item["pk"] = _dynamo.tenant_pk(tenant_id)
     item["sk"] = sort_key
+
+    # `gsi1pk` MIRRORS THE SORT KEY, which makes GSI1 a generic "which tenant
+    # holds this identifier" index rather than a run-only one. `_require`'s
+    # existence probe needs it for every table whose id is unguessable, not just
+    # `run`.
+    #
+    # SET ONLY WHEN THE KEY CARRIES AN IDENTIFIER, so the index stays SPARSE. The
+    # three singleton rows -- ORG, BUDGET, PROFILE -- would otherwise put every
+    # tenant's row under one index partition, which is a hot key that answers no
+    # question anybody asks: "does a BUDGET exist anywhere" is true the moment a
+    # second tenant exists.
+    if _dynamo.SEP in sort_key:
+        item["gsi1pk"] = sort_key
+
     client.put_item(Item=item)
 
 
 def delete(client: TableClient, tenant_id: str, sort_key: str) -> None:
     """Remove a row from the caller's own partition."""
     client.delete_item(Key={"pk": _dynamo.tenant_pk(tenant_id), "sk": sort_key})
+
+
+def exists_anywhere(client: TableClient, sort_key: str) -> bool:
+    """Does a row with this sort key exist in ANY tenant?
+
+    **THIS IS AN ORACLE, AND IT IS ONLY SAFE FOR UNGUESSABLE IDENTIFIERS.**
+    `accessors._require` draws that line already and this function inherits it
+    verbatim: a run id and a repository id are UUID-shaped, so answering tells a
+    caller nothing they could enumerate. A secret NAME is not -- `GITHUB_TOKEN`
+    exists for every tenant, so answering would confirm "does that tenant hold
+    this credential" for any name somebody guesses. A `user_id` is worse: it
+    answers a question about a PERSON.
+
+    So callers pass `oracle_safe=False` for those, and this function is never
+    reached. It exists to serve the ONE distinction `_require` makes when the id
+    is unguessable -- "no such row" versus "not yours" -- because collapsing them
+    everywhere would tell a legitimate caller that a run they typed correctly
+    does not exist.
+
+    Reads GSI1, which is KEYS_ONLY: this returns a BOOLEAN and cannot return a
+    row even by accident.
+    """
+    answer = client.query(
+        IndexName="gsi1",
+        KeyConditionExpression="gsi1pk = :k",
+        ExpressionAttributeValues={":k": sort_key},
+        Limit=1,
+    )
+    return bool(answer.get("Items"))
 
 
 def find_by_run_id(client: TableClient, tenant_id: str, run_id: str) -> dict | None:
