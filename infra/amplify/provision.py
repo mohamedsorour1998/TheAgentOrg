@@ -84,6 +84,54 @@ def branch_url(app: dict, branch: str = spec.BRANCH) -> str:
     return f"https://{branch}.{domain}"
 
 
+# A domain association in this state is not a place anybody can reach, and its
+# subdomain settings are the ones that FAILED. Using it as the origin would write
+# an `AUTH_URL` naming a host that does not resolve.
+_DEAD_DOMAIN_STATUS = "FAILED"
+
+
+def custom_origin(client, app_id: str, branch: str = spec.BRANCH) -> str:
+    """The custom-domain origin bound to `branch`, or `""` if there is none.
+
+    **THIS EXISTS BECAUSE `branch_url` STOPS BEING THE ANSWER THE MOMENT A CUSTOM
+    DOMAIN IS ATTACHED, AND NOTHING ANNOUNCES THAT.** The app keeps its
+    `defaultDomain` forever -- `main.d9lts7h24c9c8.amplifyapp.com` still resolves
+    and still serves the app -- so a provisioner that derives `AUTH_URL` from it
+    goes on returning a working URL that is no longer the one people use. The
+    damage is not a 404: sign-in redirects to Cognito with
+    `redirect_uri=https://main.<id>.amplifyapp.com/api/auth/callback`, which is
+    NOT in the pool's callback list, and Cognito refuses it. So the symptom of a
+    re-run is "sign-in broke on the real domain" with every value in the console
+    looking present and correct.
+
+    A `FAILED` association is skipped rather than trusted: its subdomains are the
+    ones that did not take, so naming one would point `AUTH_URL` at a host that
+    does not resolve.
+
+    Returns the FIRST match. One branch should own one public origin; if two
+    associations both bind `main`, the deployment already has two answers to
+    "where does this app live" and this function cannot invent the right one.
+    """
+    for assoc in _paginate(
+        client.list_domain_associations, "domainAssociations", appId=app_id, maxResults=50
+    ):
+        if assoc.get("domainStatus") == _DEAD_DOMAIN_STATUS:
+            continue
+        domain = str(assoc.get("domainName", "")).strip()
+        if not domain:
+            continue
+        for sub in assoc.get("subDomains", []):
+            setting = sub.get("subDomainSetting", {})
+            if setting.get("branchName") != branch:
+                continue
+            prefix = str(setting.get("prefix", "")).strip()
+            # An empty prefix is the ROOT domain, which is a legitimate setting
+            # and not a missing value -- `spec.callback_urls` must receive
+            # `https://example.com`, never `https://.example.com`.
+            return f"https://{prefix}.{domain}" if prefix else f"https://{domain}"
+    return ""
+
+
 def converge_environment(client, app_id: str, **values: str) -> set[str]:
     """Merge this module's variables over a FRESH read. Returns what it carried.
 
@@ -174,7 +222,13 @@ def provision(client=None, repository: str = "", access_token: str = "", **value
         )
 
     app_id = str(app["appId"])
-    origin = branch_url(app)
+
+    # A CUSTOM DOMAIN WINS OVER THE AMPLIFY ONE, and the fallback is not a
+    # degraded case -- it is the correct answer for an app nobody has attached a
+    # domain to. See `custom_origin` for what a re-run costs when this is the
+    # other way round.
+    custom = custom_origin(client, app_id)
+    origin = custom or branch_url(app)
 
     # AUTH_URL is derived from the app that now exists -- see this module's
     # header for why it cannot be supplied by the caller.
@@ -184,6 +238,11 @@ def provision(client=None, repository: str = "", access_token: str = "", **value
     return {
         "app_id": app_id,
         "AUTH_URL": origin,
+        # Which of the two rules produced the origin. Reported rather than left
+        # to be inferred from the string, because "the custom domain is not
+        # attached yet" and "the custom domain is attached and I used it" are
+        # different facts that a reader would otherwise have to spot by eye.
+        "origin_source": "custom-domain" if custom else "amplify-default",
         "branch_created": made,
         "carried_keys": sorted(carried),
         # Named rather than inferred. See `provision`'s docstring.

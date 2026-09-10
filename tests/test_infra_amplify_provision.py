@@ -46,11 +46,22 @@ class FakeAmplify:
     provisioner that ignores `nextToken` sees exactly one of them.
     """
 
-    def __init__(self, apps=(), branches=(), environment=None):
+    def __init__(self, apps=(), branches=(), environment=None, domains=()):
         self.apps = [dict(a) for a in apps]
         self.branches = list(branches)
         self.environment = dict(environment or {})
+        # DEFAULTS TO EMPTY, WHICH IS THE REAL DEFAULT: an app with no custom
+        # domain attached. The three tests written before `custom_origin`
+        # existed failed with AttributeError the moment it was added, which is
+        # this double doing its job -- a fake that cannot express a call the
+        # code now makes is the fifteen-times-over pattern, and the fix is to
+        # model the call rather than to stub the method away at each call site.
+        self.domains = [dict(d) for d in domains]
         self.calls: list[tuple] = []
+
+    def list_domain_associations(self, appId, maxResults=None, nextToken=None):
+        self.calls.append(("list_domain_associations", appId))
+        return {"domainAssociations": self.domains}
 
     def list_apps(self, maxResults=None, nextToken=None):
         index = int(nextToken or 0)
@@ -248,3 +259,86 @@ def test_the_platform_is_resent_on_every_converge():
               if name == "update_app" and k.get("platform")]
     assert resent, "an existing app's platform was never resent"
     assert resent[0]["platform"] == "WEB_COMPUTE", resent[0]["platform"]
+
+
+# ── the custom domain, and the re-run that would silently break sign-in ───────
+
+def _with_domains(client, associations):
+    """Attach domain associations to an existing fake.
+
+    Sets the DATA the fake's own method reads, rather than replacing the method
+    with a lambda -- a replaced method stops recording into `calls`, so a test
+    could no longer tell whether the call was made at all.
+    """
+    client.domains = [dict(a) for a in associations]
+    return client
+
+
+def test_a_custom_domain_wins_over_the_amplify_default():
+    """The app keeps its `defaultDomain` forever, so `branch_url` goes on
+    returning a URL that WORKS and is no longer the one people use.
+
+    The damage is not a 404. Sign-in would redirect to Cognito carrying
+    `redirect_uri=https://main.<id>.amplifyapp.com/api/auth/callback`, which is
+    not in the pool's callback list, so Cognito refuses it -- and every value in
+    the Amplify console still reads present and correct.
+    """
+    client = _with_domains(FakeAmplify(apps=[
+        {"appId": "d-ours", "name": spec.APP_NAME, "defaultDomain": "d9.amplifyapp.com"},
+    ]), [{
+        "domainName": "rosettacloud.app",
+        "domainStatus": "AVAILABLE",
+        "subDomains": [{"subDomainSetting": {"prefix": "theagentorg", "branchName": "main"}}],
+    }])
+
+    result = provision.provision(client, **LIVE_VALUES)
+
+    assert result["AUTH_URL"] == "https://theagentorg.rosettacloud.app", result["AUTH_URL"]
+    assert result["origin_source"] == "custom-domain", result["origin_source"]
+    assert client.environment["AUTH_URL"] == "https://theagentorg.rosettacloud.app"
+
+
+def test_a_FAILED_association_is_skipped_rather_than_trusted():
+    """Its subdomains are the ones that did NOT take, so naming one points
+    `AUTH_URL` at a host that does not resolve -- measured live: a failed
+    association left `theagentorg.rosettacloud.app` CNAMEd to a deleted
+    CloudFront distribution with no A record at all."""
+    client = _with_domains(FakeAmplify(apps=[
+        {"appId": "d-ours", "name": spec.APP_NAME, "defaultDomain": "d9.amplifyapp.com"},
+    ]), [{
+        "domainName": "rosettacloud.app",
+        "domainStatus": "FAILED",
+        "subDomains": [{"subDomainSetting": {"prefix": "theagentorg", "branchName": "main"}}],
+    }])
+
+    result = provision.provision(client, **LIVE_VALUES)
+
+    assert result["AUTH_URL"] == "https://main.d9.amplifyapp.com", (
+        "a FAILED association was used as the origin; that host does not resolve"
+    )
+    assert result["origin_source"] == "amplify-default"
+
+
+def test_a_root_domain_association_does_not_produce_a_leading_dot():
+    """An empty prefix is the ROOT domain -- a legitimate setting, not a missing
+    value. `https://.rosettacloud.app` is what a naive f-string produces and it
+    reaches Cognito's callback list, where it matches nothing."""
+    client = _with_domains(FakeAmplify(), [{
+        "domainName": "rosettacloud.app",
+        "domainStatus": "AVAILABLE",
+        "subDomains": [{"subDomainSetting": {"prefix": "", "branchName": "main"}}],
+    }])
+
+    assert provision.custom_origin(client, "d-ours") == "https://rosettacloud.app"
+
+
+def test_a_domain_bound_to_a_DIFFERENT_branch_is_not_this_branchs_origin():
+    """Two branches, two origins. A preview branch's domain must not become the
+    production `AUTH_URL`."""
+    client = _with_domains(FakeAmplify(), [{
+        "domainName": "rosettacloud.app",
+        "domainStatus": "AVAILABLE",
+        "subDomains": [{"subDomainSetting": {"prefix": "preview", "branchName": "staging"}}],
+    }])
+
+    assert provision.custom_origin(client, "d-ours") == ""
