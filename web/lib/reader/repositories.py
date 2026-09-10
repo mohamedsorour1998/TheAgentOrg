@@ -40,8 +40,10 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
-from agentorg.db import engine
+from agentorg.tenancy import _dynamo_accessors as dynamo
 from agentorg.tenancy import accessors, tenant_zero
+
+from . import _client
 
 
 def _fail(message: str, detail: str = "") -> int:
@@ -73,36 +75,40 @@ def set_scope(tenant_id: str, full_names: list[str], by: str) -> dict:
     if not path:
         return {"repositories": [], "indexed": False}
 
-    connection = engine.connect(path)
-    with engine.acting_as(tenant_id):
-        scope = accessors.scope_for(connection, tenant_id)
-        existing = {row["full_name"] for row in accessors.list_repositories(scope)}
+    client = _client.table()
+    existing = {row["full_name"] for row in dynamo.list_repositories(client, tenant_id)}
 
-        for full_name in full_names:
-            if full_name in existing:
-                continue
-            accessors.add_repository(
-                scope,
-                # A UUID rather than the name as an id. `full_name` is UNIQUE PER
-                # TENANT, so using it as a primary key would collide the moment two
-                # tenants connect the same repository -- and the table's own comment
-                # says a global unique constraint there "would make one customer's
-                # onboarding fail with a message about a repository they cannot see".
-                str(uuid.uuid4()),
-                full_name,
-            )
+    for full_name in full_names:
+        if full_name in existing:
+            continue
+        dynamo.add_repository(
+            client,
+            tenant_id,
+            # A UUID rather than the name as an id. `full_name` is UNIQUE PER
+            # TENANT, so using it as a primary key would collide the moment two
+            # tenants connect the same repository -- and the table's own comment
+            # says a global unique constraint there "would make one customer's
+            # onboarding fail with a message about a repository they cannot see".
+            #
+            # On DynamoDB that per-tenant uniqueness is now the PRIMARY KEY
+            # (`TENANT#<t> / REPO#<full_name>`) rather than a declared index, so
+            # it cannot be forgotten. The UUID stays as the row's `id` because the
+            # contract and the UI both carry it.
+            str(uuid.uuid4()),
+            full_name,
+        )
 
-        # LOGGED WITH THE PERSON WHO DID IT, before the commit, so a refused commit
-        # does not leave a log line claiming a change that did not land. `by` comes
-        # from a verified session; the repository names are interpolated because they
-        # passed an anchored `owner/name` pattern in the route, and the tenant is the
-        # bound scope rather than caller-supplied.
-        logging.getLogger(__name__).info(
-            "repository scope changed by %s for tenant %s: added %s",
-            by, tenant_id, sorted(set(full_names) - existing))
+    # LOGGED WITH THE PERSON WHO DID IT. There is no commit to precede any more --
+    # each add is its own conditional write, so a partial failure leaves the
+    # repositories that did land rather than rolling back. That is a REAL change
+    # from the Postgres path and the honest one to state: the log line now
+    # describes what was attempted, and the read-back below is what says what
+    # exists.
+    logging.getLogger(__name__).info(
+        "repository scope changed by %s for tenant %s: added %s",
+        by, tenant_id, sorted(set(full_names) - existing))
 
-        connection.commit()
-        rows = accessors.list_repositories(scope)
+    rows = dynamo.list_repositories(client, tenant_id)
 
     return {
         "repositories": [{"full_name": row["full_name"]} for row in rows],

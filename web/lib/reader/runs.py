@@ -52,8 +52,10 @@ import sys
 # `agentorg` to a DIFFERENT checkout, and three lanes each lost time to it. One
 # place sets it, and that place is the caller.
 from agentorg import gates, log, queue
-from agentorg.db import engine
+from agentorg.tenancy import _dynamo_accessors as dynamo
 from agentorg.tenancy import accessors, tenant_zero
+
+from . import _client
 
 # The five statuses `RunState.status` may hold -- `state.py:307`. Restated rather than
 # imported because importing `RunState` to read a Literal's members costs pydantic at
@@ -150,9 +152,7 @@ def list_runs(tenant_id: str) -> dict:
     if not path:
         return {"runs": [], "indexed": False}
 
-    connection = engine.connect(path)
-    with engine.acting_as(tenant_id):
-        rows = accessors.list_runs(accessors.scope_for(connection, tenant_id))
+    rows = dynamo.list_runs(_client.table(), tenant_id)
 
     paused = _awaiting_by_run()
     runs = []
@@ -196,11 +196,9 @@ def run_facts(tenant_id: str, run_id: str) -> dict:
         # caller learns only what they already tried.
         raise accessors.NotFound("no run index is configured")
 
-    connection = engine.connect(path)
-    with engine.acting_as(tenant_id):
-        row = accessors.get_run(accessors.scope_for(connection, tenant_id), run_id)
-        repositories = accessors.list_repositories(
-            accessors.scope_for(connection, tenant_id))
+    client = _client.table()
+    row = dynamo.get_run(client, tenant_id, run_id)
+    repositories = dynamo.list_repositories(client, tenant_id)
 
     state = _state_for(run_id)
     status = getattr(state, "status", "") or ""
@@ -248,9 +246,7 @@ def list_repositories(tenant_id: str) -> dict:
     if not path:
         return {"repositories": [], "indexed": False}
 
-    connection = engine.connect(path)
-    with engine.acting_as(tenant_id):
-        rows = accessors.list_repositories(accessors.scope_for(connection, tenant_id))
+    rows = dynamo.list_repositories(_client.table(), tenant_id)
     return {
         "repositories": [{"full_name": row["full_name"]} for row in rows],
         "indexed": True,

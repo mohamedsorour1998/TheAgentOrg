@@ -42,9 +42,11 @@ import sys
 from agentorg import gates, log, queue
 from agentorg.cost import record as cost_record
 from agentorg.cost import report as cost_report
-from agentorg.db import engine
 from agentorg.security import scoring
+from agentorg.tenancy import _dynamo_accessors as dynamo
 from agentorg.tenancy import accessors, tenant_zero
+
+from . import _client
 
 
 def _fail(message: str, detail: str = "") -> int:
@@ -73,10 +75,8 @@ def _load(tenant_id: str, run_id: str):
     if not path:
         raise accessors.NotFound("no run index is configured")
 
-    connection = engine.connect(path)
-    with engine.acting_as(tenant_id):
-        # OWNERSHIP FIRST. See the module docstring.
-        row = accessors.get_run(accessors.scope_for(connection, tenant_id), run_id)
+    # OWNERSHIP FIRST. See the module docstring.
+    row = dynamo.get_run(_client.table(), tenant_id, run_id)
 
     try:
         state = gates.load(run_id)
