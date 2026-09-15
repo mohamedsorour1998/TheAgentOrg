@@ -42,6 +42,7 @@ LIVE_VALUES = {
     "TENANT_SCOPED_ROLE_ARN": "arn:aws:iam::339712964409:role/theagentorg-shared-tenancy-scoped",
     "TENANCY_TABLE": "theagentorg-tenancy",
     "QUEUE_BACKEND": "dynamodb",
+    "STATE_BACKEND": "dynamodb",
 }
 
 

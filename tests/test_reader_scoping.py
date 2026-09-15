@@ -314,3 +314,66 @@ def test_the_writer_and_every_reader_name_THE_SAME_env_var():
             f"is DynamoDB only, so that variable is never set and this gate is always "
             f"closed -- which reads as 'this tenant has no runs'."
         )
+
+
+# ── ownership before the cross-tenant read ───────────────────────────────────
+
+def test_detail_establishes_OWNERSHIP_before_it_loads_the_state_document():
+    """ORDER IS THE ONLY CHECK THERE IS, and swapping two lines removes it.
+
+    `gates.load(run_id)` reads `theagentorg-runs`, whose partition key is the run
+    id with **no tenant in it** -- so `dynamodb:LeadingKeys` has nothing to compare
+    and cannot constrain that read. The Amplify compute role holds Query/GetItem on
+    that table directly (added 2026-09-15 so `/runs/[id]` can show a verdict at
+    all), which makes the call cross-tenant capable by construction.
+
+    What constrains it is that `detail.py` first reads the tenancy index through the
+    TENANT-SCOPED handle. A caller who does not own the run gets `NotFound` from a
+    credential that physically cannot see another tenant's index row, and the
+    document is never reached.
+
+    Reversed, the code still reads as correct -- load the state, then check who owns
+    it -- and every test that asserts on the RESPONSE keeps passing, because the
+    refusal still happens. What changes is that a cross-tenant document has already
+    been read. Same shape as `test_the_sre_stage_measures_ci_before_invoking_the_agent`,
+    and asserted over the AST for the same reason: a substring check would be
+    satisfied by the comment explaining the ordering.
+    """
+    tree = ast.parse((READER_DIR / "detail.py").read_text())
+
+    fn = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.FunctionDef)
+         and any(
+             isinstance(c, ast.Call)
+             and isinstance(c.func, ast.Attribute)
+             and c.func.attr == "load"
+             for c in ast.walk(n))),
+        None,
+    )
+    assert fn is not None, (
+        "no function in detail.py calls `.load(...)`; if the state document is no "
+        "longer read here, this ordering no longer applies -- delete this test and "
+        "say so in main.tf, which grants the read on the strength of it."
+    )
+
+    def _line_of(pred) -> int | None:
+        return next((n.lineno for n in ast.walk(fn)
+                     if isinstance(n, ast.Call) and pred(n)), None)
+
+    ownership = _line_of(
+        lambda c: isinstance(c.func, ast.Attribute) and c.func.attr == "get_run")
+    document = _line_of(
+        lambda c: isinstance(c.func, ast.Attribute) and c.func.attr == "load")
+
+    assert ownership is not None, (
+        f"{fn.name} never calls `get_run`, so nothing establishes that this tenant "
+        f"owns the run before its state document is read."
+    )
+    assert document is not None, "this test would pin nothing"
+    assert ownership < document, (
+        f"{fn.name} loads the state document at line {document} BEFORE establishing "
+        f"ownership at line {ownership}. `gates.load` reads a table keyed on run_id "
+        f"with no tenant in the partition key, so LeadingKeys cannot constrain it -- "
+        f"the ownership read through the scoped handle is the only thing that does."
+    )

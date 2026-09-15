@@ -197,6 +197,16 @@ applications:
             # written into a Lambda that then exits, and the gate never opens. The
             # response is a 200 either way, which is this project's signature defect.
             - echo "QUEUE_BACKEND=${QUEUE_BACKEND}" >> .env.production
+            # WHERE `/runs/[id]` FINDS A VERDICT.
+            #
+            # `detail.py` reads the tenancy index for ownership, then calls
+            # `gates.load(run_id)` for the document carrying `security.verdict`,
+            # `scan_provenance`, `blocking` and the cost rows. `gates` dispatches
+            # on this; the `local` default points it at a JSONL file that does not
+            # exist in a Lambda, so the reader logs a warning and degrades to the
+            # indexed row -- a detail screen with every security field blank, which
+            # is the one screen the demo exists for.
+            - echo "STATE_BACKEND=${STATE_BACKEND}" >> .env.production
             - npm run typecheck
             - npm run lint
             - npm run test

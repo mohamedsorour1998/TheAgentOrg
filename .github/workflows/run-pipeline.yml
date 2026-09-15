@@ -19,14 +19,22 @@
 # `agentorg.gates.save`/`resume`, which existed for exactly this handoff before
 # this file did.
 #
-# CORRECTED 2026-08-21: an earlier version of this note claimed Task 6 replaces
-# the artifact with DynamoDB and "this chain does not change". That was never
-# true. MEASURED with STATE_BACKEND=dynamodb: every stage after `plan` raises,
-# because `scripts/run_stage.py:_load` calls `gates._state_path`, which refuses
-# on that backend by design (agentorg/gates.py:116-121). This workflow uses the
-# artifact handoff below and deliberately does NOT set STATE_BACKEND, so it runs
-# on the `local` default. Moving this chain to DynamoDB needs a change in
-# run_stage.py -- read through `gates.load` -- not only in gates.py.
+# CORRECTED 2026-08-21, and CLOSED 2026-09-15. The 2026-08-21 note recorded that
+# `STATE_BACKEND=dynamodb` made every stage after `plan` raise, because
+# `scripts/run_stage.py:_load` called `gates._state_path`, which refuses on that
+# backend by design -- and it named the fix: read through `gates.load` instead.
+# That fix landed. `_load` dispatches through `gates.load`, which handles both
+# backends, and the round trip is measured against the live table:
+#
+#     saved  -> dynamodb://theagentorg-runs/<run_id>
+#     loaded -> same run_id, ticket_id and status
+#     absent -> FileNotFoundError, on BOTH backends, deliberately the same
+#
+# So this workflow now sets STATE_BACKEND below. THE ARTIFACT HANDOFF STAYS, and
+# that is not redundancy: it is the fallback that has carried every verified run
+# this project has done, and a DynamoDB outage mid-demo would otherwise have no
+# path at all. Two writers of one document is safe here because `gates.save` is
+# the only writer and each stage saves after it finishes.
 #
 # WHAT `develop` CONTAINS, AND WHY THAT IS NOT A SHORTCUT. develop runs the
 # developer/reviewer revision loop, opens the PR, and evaluates the deterministic
@@ -176,6 +184,17 @@ env:
   # revise a run (plan, develop, sre, promote) and a per-job list is four chances to
   # omit one -- and the omission is silent by construction.
   TENANCY_TABLE: theagentorg-tenancy
+  # RUN STATE LIVES IN DYNAMODB, NOT ON THE RUNNER.
+  #
+  # `gates.save`/`gates.load` dispatch on this. With the `local` default a run's
+  # state is a JSONL file on whichever runner executed the stage, handed forward as
+  # an artifact -- so `web/lib/reader/detail.py` can read the tenancy INDEX row but
+  # never the document, and every security field on `/runs/[id]` renders blank.
+  # Measured before this line: `theagentorg-runs` held 0 items after every run this
+  # project had ever done.
+  #
+  # The header above records why this was previously refused and what closed it.
+  STATE_BACKEND: dynamodb
 
 jobs:
   # ── PLAN ────────────────────────────────────────────────────────────────────

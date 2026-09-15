@@ -330,6 +330,7 @@ if __name__ == "__main__":
         # backend this deployment has.
         TENANCY_TABLE=os.getenv("TENANCY_TABLE", "theagentorg-tenancy"),
         QUEUE_BACKEND=os.getenv("QUEUE_BACKEND", "dynamodb"),
+        STATE_BACKEND=os.getenv("STATE_BACKEND", "dynamodb"),
     )
     for key, value in result.items():
         print(f"{key}: {value}")

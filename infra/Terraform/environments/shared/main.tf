@@ -214,6 +214,60 @@ resource "aws_iam_role_policy" "amplify_compute_may_assume_tenant" {
   policy = data.aws_iam_policy_document.amplify_compute_may_assume_tenant.json
 }
 
+################################################################################
+# READ-ONLY ON THE RUN-STATE TABLE, so `/runs/[id]` can show a verdict at all.
+#
+# `web/lib/reader/detail.py` reads the tenancy index for OWNERSHIP and then calls
+# `gates.load(run_id)` for the document that carries `security.verdict`,
+# `scan_provenance`, `blocking` and the cost rows. Without this grant that second
+# call raises, the reader logs a warning and degrades to the indexed row -- so the
+# detail screen renders with every security field blank, which is the one screen
+# the demo exists for.
+#
+# **THIS IS CROSS-TENANT AND THERE IS NO WAY TO MAKE IT OTHERWISE.** The run-state
+# table is keyed on `run_id` with no tenant in the partition key, so
+# `dynamodb:LeadingKeys` has nothing to compare and cannot constrain it. That is the
+# same asymmetry §4 of the migration plan admits for the pipeline, arriving on the
+# read path.
+#
+# WHAT ACTUALLY CONSTRAINS IT IS ORDER, AND ORDER IS ASSERTED OVER THE AST.
+# `detail.py` establishes ownership through the TENANT-SCOPED handle first -- a
+# caller who does not own the run gets `NotFound` from a credential that physically
+# cannot see another tenant's index row -- and only then loads the document. A run
+# id is an unguessable uuid4, so the residual exposure is a caller who already knows
+# one they do not own. `tests/test_reader_scoping.py` pins the ordering, because
+# swapping the two lines reads as correct code and removes the only check there is.
+#
+# QUERY AND GETITEM ONLY. No PutItem, no UpdateItem: the SSR runtime must never
+# write a run's state. `modules/state`'s own policy grants writes to the pipeline
+# roles, and this deliberately is not that policy.
+#
+# INLINE, AND NOT BY ADDING THIS ROLE TO `module.state.runtime_role_arns`. That
+# variable drives `aws_iam_role_policy_attachment`, and CI holds neither
+# `iam:AttachRolePolicy` nor `iam:DetachRolePolicy` -- both measured `implicitDeny`
+# against every ARN shape, see `modules/tenancy/iam.tf`. Widening that list would
+# fail the apply the way `e2e4423` did; converting the module would fail at DESTROY
+# for the same reason. Left alone deliberately.
+data "aws_iam_policy_document" "amplify_compute_may_read_run_state" {
+  statement {
+    sid    = "ReadRunStateDocumentsOnly"
+    effect = "Allow"
+
+    actions = [
+      "dynamodb:Query",
+      "dynamodb:GetItem",
+    ]
+
+    resources = [module.state.table_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_read_run_state" {
+  name   = "read-run-state"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_read_run_state.json
+}
+
 module "tenancy" {
   source = "../../modules/tenancy"
 
