@@ -103,14 +103,20 @@ from pptx.util import Emu, Inches, Pt
 # 116.88s -> 149.68s -> 102.83s for one unchanged test snapshot, purely load-dependent,
 # so "measured" is a value PLUS its conditions and spread. A cost quoted as a point
 # value would be the most repeated and least reproducible number on the deck.
-TESTS_PASSING = 1860     # pytest -q | tail -1   (4 skip in a worktree, 3 on main)
-TEST_FILES = 73          # ls tests/test_*.py | wc -l
-WEB_TESTS = 166          # cd web && npm test   -> READ THE FILE COUNT: 10 files
-WEB_TEST_FILES = 10      # same command. `Tests` counts what RAN; `Test Files` does not
-TF_RESOURCES = 20        # grep -rhc '^resource ' infra/Terraform/modules/*/main.tf
-AGENTORG_LINES = 20475   # find agentorg -name '*.py' | xargs wc -l | tail -1
-WEB_LINES = 8769         # find web -name '*.ts' -o -name '*.tsx' | xargs wc -l
-RUNTIME_VERSION = 37     # scripts/preflight.py check 2 — all five READY at the SAME one
+TESTS_PASSING = 2143     # pytest -q | tail -1   (7 skipped: 3 scanner + 4 selenium)
+TEST_FILES = 90          # ls tests/test_*.py | wc -l
+WEB_TESTS = 204          # cd web && npm test   -> READ THE FILE COUNT: 14 files
+WEB_TEST_FILES = 14      # same command. `Tests` counts what RAN; `Test Files` does not
+TF_RESOURCES = 36        # cat infra/Terraform/modules/*/*.tf | grep -c '^resource '
+                         # WAS `-rhc ... modules/*/main.tf`, which counted ONE file per
+                         # module and missed iam.tf/ecs.tf entirely -- 20 of 36.
+AGENTORG_LINES = 22694   # find agentorg -name '*.py' | xargs wc -l | tail -1
+WEB_LINES = 10669        # find web -path web/node_modules -prune -o \
+                         #   \( -name '*.ts' -o -name '*.tsx' \) -print | xargs wc -l
+                         # THE PRUNE IS REQUIRED. The old command here had none, and
+                         # with node_modules installed it answers 471,432 -- a recorded
+                         # command that no longer reproduces its own number.
+RUNTIME_VERSION = 47     # scripts/preflight.py check 2 — all five READY at the SAME one
 CLEAN_MINUTES = 5        # measured, run 32585658981
 POISONED_MINUTES = 3     # measured, run 32586453254
 TRIGGER_SECONDS = 6      # issue created 16:45:09 -> run created 16:45:15
@@ -834,7 +840,7 @@ def slide_platform(prs):
         "A machine API to submit, watch and cancel — it cannot open a gate.",
         "Tests written from the ticket, never from the change.",
         "Agents read past decisions; that text cannot reach the verdict.",
-        "A web app: watch a run live, approve or refuse.",
+        "A hosted web app: sign in, watch a run live, approve or refuse.",
     ], top=Inches(3.05), size=17, gap=0.72, left=Inches(7.0), width=Inches(5.3))
     note = _text(slide,
         f"{AGENTORG_LINES:,} lines of pipeline and {WEB_LINES:,} of application, "
