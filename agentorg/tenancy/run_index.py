@@ -46,9 +46,38 @@ may assert on in tests. Silent in production, observable in the log, checkable i
 TENANCY IS OPTIONAL AND STAYS THAT WAY
 ======================================
 `config.TENANT_MODE` defaults to `single` and `RunState.tenant_id` defaults to `""`. This
-module is a no-op when there is no database to write to -- `QUEUE_DSN`/`TENANT_DB` unset
-means the single-tenant deployment behaves exactly as it did, which is the property every
-knob in `config.py` is chosen to preserve.
+module is a no-op when there is no table to write to -- `TENANCY_TABLE` unset means the
+single-tenant deployment behaves exactly as it did, which is the property every knob in
+`config.py` is chosen to preserve.
+
+IT WROTE TO POSTGRES UNTIL 2026-09-15, AND THAT MADE THE WHOLE UI DARK
+=====================================================================
+Step 8 of `docs/design/dynamodb-migration.md` repointed `web/lib/reader/*.py` at
+DynamoDB and step 6 gave them a tenant-scoped credential. **Nobody moved the writer.**
+This module still opened `engine.connect(TENANT_DB)` -- a Postgres DSN -- so the half
+that WRITES a run row and the half that READS one were pointed at two different
+databases, and under the DynamoDB-only decision the DSN is never set at all.
+
+The symptom was perfect silence. `record_run` returns False for "no database
+configured" and never raises, by the design above, so every run indexed nothing and
+every gate stayed green. Measured 2026-09-15 against the live table:
+
+    aws dynamodb scan --table-name theagentorg-tenancy   ->  "count": 0
+
+Zero rows after every run this project has ever done. The same `TENANT_DB` gate was
+declared in FOUR places -- here and in three readers -- so one Postgres-shaped flag
+decided whether the entire tenancy UI had anything to show.
+
+**THE GATE IS NOW `TENANCY_TABLE`, READ WITH NO DEFAULT**, and the no-default part is
+the load-bearing half. `config.TENANCY_TABLE` carries `theagentorg-tenancy` as a
+convenience for building a client; using that here would make indexing unconditional,
+and `graph.run_pipeline` is driven by hundreds of hermetic tests -- so every one of them
+would reach DynamoDB. `tests/conftest.py` has guards for the model, GitHub, git, the
+terminal, the scanner cache and the repo clone, and none for AWS, which this repository
+measured the hard way on the same day. Blank therefore still means "not configured", and
+the deployed environments set it explicitly; `tests/test_run_index_is_reachable.py`
+asserts both of them do, because an unset variable that silently indexes nothing is the
+exact defect being fixed here.
 """
 
 from __future__ import annotations
@@ -67,47 +96,66 @@ from ..state import RunState
 # is one optional path's location; adding a knob there for it would be the fifteenth
 # field arriving mid-phase that the Phase 0 batch exists to prevent. If tenancy becomes
 # the default deployment, it moves there in one batch with everything else.
-_DB_ENV = "TENANT_DB"
+_TABLE_ENV = "TENANCY_TABLE"
 
 
-def _database_path() -> str:
-    """The tenancy database, or "" when there is none. Blank means "do not index"."""
-    return os.environ.get(_DB_ENV, "").strip()
+def _index_table_name() -> str:
+    """The tenancy table, or "" when there is none. Blank means "do not index".
+
+    NO DEFAULT HERE, deliberately, and `config.TENANCY_TABLE` is not consulted -- see
+    the module docstring. That constant exists so a client can be built without
+    repeating a literal; reading it here would make every hermetic test that drives
+    `graph.run_pipeline` open a boto3 client and write to the real account.
+    """
+    return os.environ.get(_TABLE_ENV, "").strip()
+
+
+def _table(name: str):
+    """A boto3 Table for the pipeline's own credential.
+
+    AMBIENT, NOT TENANT-SCOPED, and that is the same ruling `queue/_dynamo.dynamo_queue`
+    records. This runs on the GitHub Actions runner (and, when it is deployed, the
+    worker), which legitimately spans tenants -- it indexes whichever run just executed.
+    `dynamodb:LeadingKeys` cannot constrain a principal that does not know the tenant
+    until after it reads the state, so the isolation here is the `tenant_id` this module
+    resolves through `tenant_zero`, exactly as §4 of the migration plan admits for the
+    pipeline half.
+
+    Imported inside the function so the package imports with no boto3 call.
+    """
+    import boto3
+
+    from ..common import config
+
+    return boto3.resource("dynamodb", region_name=config.AWS_REGION).Table(name)
 
 
 def record_run(state: RunState) -> bool:
     """Index `state` against its tenant. Returns whether a row was written.
 
-    False means "not indexed", for any reason: no database configured, the schema is
-    absent, the row already exists, or the write failed. The caller does not branch on
-    it -- it exists so a test can assert the write happened rather than inferring it
-    from a green run, which is what let this gap exist in the first place.
+    False means "not indexed", for any reason: no table configured, no credential, the
+    row already exists, or the write failed. The caller does not branch on it -- it
+    exists so a test can assert the write happened rather than inferring it from a green
+    run, which is what let this gap exist in the first place.
     """
-    path = _database_path()
-    if not path:
+    name = _index_table_name()
+    if not name:
         return False
 
     try:
-        from ..db import engine
-        from ..tenancy import accessors, tenant_zero
+        from . import _dynamo_accessors, tenant_zero
 
         tenant_id = tenant_zero.for_run_state(state.tenant_id)
-        connection = engine.connect(path)
-        try:
-            with engine.acting_as(tenant_id):
-                scope = accessors.scope_for(connection, tenant_id)
-                accessors.record_run(
-                    scope,
-                    state.run_id,
-                    state.ticket_id,
-                    state.status,
-                    # The path a reader would open, formatted the way `gates.StateRef`
-                    # formats itself. Not the document: one writer, and it is `gates.save`.
-                    state_ref=str(state.run_id),
-                )
-            connection.commit()
-        finally:
-            connection.close()
+        _dynamo_accessors.record_run(
+            _table(name),
+            tenant_id,
+            state.run_id,
+            state.ticket_id,
+            state.status,
+            # The reference a reader would resolve, formatted the way `gates.StateRef`
+            # formats itself. Not the document: one writer, and it is `gates.save`.
+            state_ref=str(state.run_id),
+        )
     except Exception:
         # BROAD ON PURPOSE, and the logger is fetched INLINE -- CLAUDE.md records that
         # ruff's BLE001 cannot resolve a module-level alias, so `_log.exception(...)`
@@ -135,23 +183,19 @@ def update_status(state: RunState) -> bool:
     would turn a wrong-tenant update into a new row under the caller's tenant, which is
     the cross-tenant write Lane B's leak suite exists to catch.
     """
-    path = _database_path()
-    if not path:
+    name = _index_table_name()
+    if not name:
         return False
 
     try:
-        from ..db import engine
-        from ..tenancy import accessors, tenant_zero
+        from . import _dynamo_accessors, tenant_zero
 
         tenant_id = tenant_zero.for_run_state(state.tenant_id)
-        connection = engine.connect(path)
-        try:
-            with engine.acting_as(tenant_id):
-                scope = accessors.scope_for(connection, tenant_id)
-                accessors.update_run_status(scope, state.run_id, state.status)
-            connection.commit()
-        finally:
-            connection.close()
+        # `update_run_status` calls `_require` first, so it refuses a run this tenant
+        # does not own rather than inserting one -- the reason this is not an upsert.
+        _dynamo_accessors.update_run_status(
+            _table(name), tenant_id, state.run_id, state.status,
+        )
     except Exception:
         logging.getLogger(__name__).warning(
             "could not update the index for run %s (status %r); the UI will show a "

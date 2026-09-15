@@ -29,39 +29,44 @@ import pathlib
 
 import pytest
 
-from agentorg.db import engine, migrations
 from agentorg.state import RunState
-from agentorg.tenancy import accessors, run_index, tenant_zero
+from agentorg.tenancy import _dynamo_accessors, run_index, tenant_zero
+from tests.test_dynamo_store import FakeTable
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+TABLE = "theagentorg-tenancy-test"
+
 
 @pytest.fixture
-def tenancy_db(tmp_path, monkeypatch):
-    """A migrated database with tenant zero adopted, wired to `TENANT_DB`."""
-    path = str(tmp_path / "tenancy.db")
-    connection = engine.connect(path)
-    migrations.migrate(connection)
-    tenant_zero.adopt(connection)
-    connection.commit()
-    connection.close()
-    monkeypatch.setenv("TENANT_DB", path)
-    return path
+def tenancy_table(monkeypatch):
+    """One in-memory table, wired to `TENANCY_TABLE`, with no AWS call anywhere.
+
+    **THE GATE MOVED FROM `TENANT_DB` TO `TENANCY_TABLE` ON 2026-09-15**, and the three
+    tests that used a sqlite file moved with it. The writer used to open
+    `engine.connect(TENANT_DB)` -- a Postgres DSN -- while the readers had already been
+    repointed at DynamoDB by step 8 of the migration plan. Two databases, one of them
+    never configured, and `record_run` returns False for "not configured" without
+    raising: so every run indexed nothing and `aws dynamodb scan` read `"count": 0`
+    after every run this project has ever done.
+
+    `FakeTable` is imported from `test_dynamo_store` rather than redeclared -- Lane B's
+    own double, already driving the store's nine tests and the DynamoDB leak suite, so
+    a change in its behaviour reaches all three files at once.
+    """
+    table = FakeTable()
+    monkeypatch.setenv("TENANCY_TABLE", TABLE)
+    monkeypatch.setattr(run_index, "_table", lambda name: table)
+    return table
 
 
-def _rows(path):
-    connection = engine.connect(path)
-    try:
-        with engine.acting_as(tenant_zero.TENANT_ZERO_ID):
-            scope = accessors.scope_for(connection, tenant_zero.TENANT_ZERO_ID)
-            return accessors.list_runs(scope)
-    finally:
-        connection.close()
+def _rows(table):
+    return _dynamo_accessors.list_runs(table, tenant_zero.TENANT_ZERO_ID)
 
 
 # ── the write, and the marker tenant ──────────────────────────────────────────
 
-def test_a_run_is_indexed_against_tenant_zero(tenancy_db):
+def test_a_run_is_indexed_against_tenant_zero(tenancy_table):
     """The blank `RunState.tenant_id` every existing run carries must resolve.
 
     `scope_for` REFUSES a blank tenant, deliberately: "a blank scope matches a blank
@@ -74,12 +79,12 @@ def test_a_run_is_indexed_against_tenant_zero(tenancy_db):
 
     assert run_index.record_run(state) is True
 
-    rows = _rows(tenancy_db)
+    rows = _rows(tenancy_table)
     assert len(rows) == 1, f"expected one indexed run, got {rows}"
     assert rows[0]["ticket_id"] == "41"
 
 
-def test_the_status_follows_the_run_to_its_ending(tenancy_db):
+def test_the_status_follows_the_run_to_its_ending(tenancy_table):
     """A blocked run must not be listed as still running.
 
     The index is written at `plan`, when the status is `running`, and revised at the
@@ -92,24 +97,24 @@ def test_the_status_follows_the_run_to_its_ending(tenancy_db):
     state.status = "blocked"
     assert run_index.update_status(state) is True
 
-    assert _rows(tenancy_db)[0]["status"] == "blocked"
+    assert _rows(tenancy_table)[0]["status"] == "blocked"
 
 
 def test_indexing_is_a_no_op_with_no_database_configured(monkeypatch):
-    """`TENANT_DB` unset is the single-tenant deployment, and must stay silent.
+    """`TENANCY_TABLE` unset is the single-tenant deployment, and must stay silent.
 
     Every knob in this repository is chosen so the default preserves today's behaviour.
     An indexing call that raised or logged an error here would make the existing
     deployment noisy about a feature it does not use.
     """
-    monkeypatch.delenv("TENANT_DB", raising=False)
+    monkeypatch.delenv("TENANCY_TABLE", raising=False)
     state = RunState(ticket_id="7", ticket_text="x")
 
     assert run_index.record_run(state) is False
     assert run_index.update_status(state) is False
 
 
-def test_a_broken_database_does_not_fail_the_run(tmp_path, monkeypatch, caplog):
+def test_a_broken_database_does_not_fail_the_run(monkeypatch, caplog):
     """An index is not the run's record, so it may never fail a run that did its work.
 
     A poisoned run that correctly blocked and then died writing an index row would
@@ -117,7 +122,12 @@ def test_a_broken_database_does_not_fail_the_run(tmp_path, monkeypatch, caplog):
     silent failure leaves the list short -- so the WARNING is the load-bearing half, and
     the return value is what a test can assert on.
     """
-    monkeypatch.setenv("TENANT_DB", str(tmp_path / "no-schema.db"))
+    class Refusing(FakeTable):
+        def put_item(self, **kwargs):
+            raise RuntimeError("ProvisionedThroughputExceededException")
+
+    monkeypatch.setenv("TENANCY_TABLE", TABLE)
+    monkeypatch.setattr(run_index, "_table", lambda name: Refusing())
     state = RunState(ticket_id="7", ticket_text="x")
 
     with caplog.at_level("WARNING"):
@@ -183,7 +193,7 @@ def test_both_paths_update_the_status_too(path):
     assert calls, f"{path} never calls run_index.update_status"
 
 
-def test_update_status_does_not_insert_a_row_it_could_not_find(tenancy_db):
+def test_update_status_does_not_insert_a_row_it_could_not_find(tenancy_table):
     """No upsert. A wrong-tenant update must not become a new row under the caller.
 
     `accessors.update_run_status` calls `_require` first, which refuses a run this
@@ -196,7 +206,7 @@ def test_update_status_does_not_insert_a_row_it_could_not_find(tenancy_db):
     assert run_index.update_status(state) is False, (
         "update_status reported success for a run that was never indexed"
     )
-    assert _rows(tenancy_db) == [], (
+    assert _rows(tenancy_table) == [], (
         "update_status INSERTED a row. It must only ever update one that exists, or a "
         "wrong-tenant update becomes a cross-tenant write."
     )
