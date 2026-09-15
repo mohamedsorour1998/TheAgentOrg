@@ -4561,6 +4561,59 @@ be about the wrong thing.* Probing the backend answered "does DynamoDB round-tri
 RunState", when the question was "does every job still find the state the previous one
 left". Name the claim the measurement is standing in for before trusting it.
 
+### THE PYTHON READERS COULD NEVER RUN ON AMPLIFY — 2026-09-15
+
+**The largest instance of this repository's second named pattern, and only a real
+browser found it.** Every fix of that day — the tenant-scoped credential, the
+`TENANCY_TABLE` gate, the queue backend, the compute role — was correct and
+*unreachable*. Signed in as a real reviewer whose session carried the right tenant:
+
+```
+/api/session       {"signed_in": true, "login": "reviewer-01", "tenant_id": "tenant-zero"}
+/api/runs          PipelineError: the pipeline reader could not be started
+/api/repositories  PipelineError: the pipeline reader could not be started
+```
+
+`web/lib/pipeline.ts` spawned `.venv-main/bin/python`. **An Amplify SSR Lambda has no
+Python, no virtualenv and no repository checkout.** Sign-in worked; every screen
+behind it was an error. No gate could see it: `tsc`, `eslint`, `vitest` and even
+`next build` all read the working tree, where the interpreter exists.
+
+**THE RULING AGAINST A NODE CLIENT WAS ABOUT SQL, AND THE DATABASE IS NO LONGER SQL.**
+`pipeline.ts`'s header argued — correctly, and it is kept in full — that a Node reader
+would be a second weaker copy of `WHERE tenant_id = ?` and would miss the SQLite
+triggers, which compare against `current_tenant()`, a function only
+`db.engine.connect()` registers. Under DynamoDB there is no predicate to re-derive:
+scoping is `dynamodb:LeadingKeys` against an **IAM session tag**. `web/lib/dynamo/`
+assumes the same role with the same tag and AWS applies the same condition; a wrong
+partition key returns AccessDenied, not rows.
+
+So the enforcement did not move into TypeScript — **it moved out of application code
+entirely, into the credential.** That is the point of the migration, and it is why a
+Node reader went from "the worst option" to the only one that runs. Re-read that header
+before citing it: its reasoning is sound and its conclusion is superseded.
+
+`readPipeline` kept its signature and `{error, detail}` contract, so none of the six
+routes changed. `readPipelineViaSubprocess` is retained and exported for the
+self-hosted stack, where Python and the repository both exist.
+
+**`web/lib/dynamo/keys.ts` IS A SECOND DECLARATION OF `agentorg/db/_dynamo.py`**, and
+`web/__tests__/dynamo-keys.test.ts` reads both files and compares them. Drift produces
+a reader querying a partition nothing writes — zero rows, exit 0, rendered as "this
+tenant has no runs", with no error anywhere.
+
+**VERIFIED END TO END, in a real browser against the deployed app:**
+
+```
+sign in  -> /runs          session: login reviewer-01, tenant_id tenant-zero
+/api/runs          ticket 59, indexed: true      <- a real pipeline run
+/api/repositories  mohamedsorour1998/auth-service
+sign out -> /signin        session: signed_in false
+```
+
+`scripts/` has no equivalent instrument, and none of the eight gates can substitute:
+**the only way to learn this was to sign in.**
+
 ### `gh run list --json databaseId --template` RENDERS SCIENTIFIC NOTATION
 
 Measured 2026-09-15: a run id comes back as `3.5009260743e+10`, because Go's template
