@@ -286,3 +286,58 @@ def test_the_approval_server_is_not_a_service(compose: dict):
             f"{name} runs approve_server, which has no authentication and can "
             f"resume a paused run past the security gate"
         )
+
+
+def test_every_backend_this_stack_selects_is_one_the_package_implements(compose: dict):
+    """MEASURED DEFECT, 2026-09-15: the whole stack refused to start.
+
+    `QUEUE_BACKEND: dynamodb` is set on the worker and the api. `config.QUEUE_BACKENDS`
+    did not contain that name, so the validator raised at IMPORT -- before any fixture,
+    in every container:
+
+        ValueError: QUEUE_BACKEND='dynamodb' is not a queue backend; expected one of
+        memory, sqs, postgres
+
+    `agentorg/queue/_dynamo.py` had shipped with seven passing tests and no caller, and
+    `queue/__init__.py` dispatched nothing for the name. So three files disagreed about
+    which backends exist and the only witness was starting a container.
+
+    THIS TEST READS BOTH SIDES, which is the only reason it can see the disagreement. A
+    test of the compose file alone sees a plausible string; a test of `config` alone sees
+    a list that is internally consistent. The check that matters is that the value one
+    file SETS is a value the other ACCEPTS -- the same shape as
+    `test_the_queue_and_the_application_share_one_table` comparing two services rather
+    than reading one.
+
+    It asserts the name is DISPATCHABLE, not merely spelled in a tuple. Adding the string
+    to `QUEUE_BACKENDS` without wiring `queue/__init__.py` moves the failure from import
+    to first use and turns a refused container into a run that vanishes -- which is the
+    outcome that validator's own error message exists to prevent.
+    """
+    from agentorg.common import config
+
+    selected = {
+        name: _environment(service)["QUEUE_BACKEND"]
+        for name, service in compose["services"].items()
+        if "QUEUE_BACKEND" in _environment(service)
+    }
+    assert selected, "no service selects a queue backend; this test would pin nothing"
+
+    for service, backend in selected.items():
+        assert backend in config.QUEUE_BACKENDS, (
+            f"{service} sets QUEUE_BACKEND={backend!r}, which config refuses at import: "
+            f"expected one of {', '.join(config.QUEUE_BACKENDS)}. The container cannot "
+            f"start"
+        )
+
+    # DISPATCHABLE, not merely named. `_backend()` raises NotImplementedError for a
+    # recognised value the package does not implement, and that is the state this
+    # assertion exists to catch -- a name in the tuple with no branch behind it.
+    import agentorg.queue as queue_package
+
+    for service, backend in selected.items():
+        assert backend in queue_package._DISPATCHABLE, (
+            f"{service} selects {backend!r}, which config accepts but "
+            f"queue/__init__.py has no branch for. The container would start and fail "
+            f"at the first enqueue, which is worse than refusing at import"
+        )

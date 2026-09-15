@@ -224,3 +224,37 @@ class DynamoQueue:
             start = answer.get("LastEvaluatedKey")
             if not start:
                 return rows
+
+
+def dynamo_queue() -> DynamoQueue:
+    """The backend `QUEUE_BACKEND=dynamodb` selects.
+
+    **THIS FUNCTION IS WHY THE BACKEND EXISTS AT ALL, AND IT WAS MISSING.** The class
+    above shipped in `2a62254` with seven passing tests and no caller: `queue/__init__.py`
+    dispatched `memory` and `postgres` and raised `NotImplementedError` for everything
+    else, while `config.QUEUE_BACKENDS` did not even admit the name -- so the compose
+    file's `QUEUE_BACKEND: dynamodb` raised at import and neither container started.
+    Correct code, tested, reached by nothing; this repository's second named pattern.
+
+    THE CLIENT IS BUILT HERE AND NOWHERE ABOVE. `DynamoQueue.__init__` takes an injected
+    client so the hermetic suite can drive every path against a double with no
+    credentials and no network -- the split `_memory.py` established. A module-level
+    `boto3.resource(...)` would undo that for the whole package, because importing the
+    queue would then require credentials.
+
+    NO CROSS-TENANT CREDENTIAL IS MINTED HERE, deliberately. The worker legitimately
+    spans partitions -- it claims whichever job is next and only then learns whose tenant
+    it is -- so it uses the ambient service credential that `modules/tenancy`'s
+    `service_role_arns` grants. A caller that wants ONE tenant's rows under the
+    `LeadingKeys` condition uses `db/tenant_credentials.scoped_table` instead, and the
+    difference between those two is the whole of §4 of the migration plan.
+    """
+    import boto3
+
+    from ..common import config
+
+    return DynamoQueue(
+        boto3.resource("dynamodb", region_name=config.AWS_REGION).Table(
+            config.TENANCY_TABLE
+        )
+    )

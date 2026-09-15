@@ -279,6 +279,22 @@ class QueueBackend(Protocol):
 
 _BACKENDS: dict[str, QueueBackend] = {}
 
+# THE NAMES `_backend()` BELOW ACTUALLY HAS A BRANCH FOR -- not the names the knob
+# validates, which is a longer list. `config.QUEUE_BACKENDS` is what a value is allowed
+# to BE; this is what the package can BUILD, and the gap between them is where `sqs`
+# lives and where `dynamodb` lived until 2026-09-15.
+#
+# A SECOND DECLARATION, DELIBERATELY, and the same exception Lane C made for
+# `SEVERITY_ORDER`: deriving it from the if/elif chain is not possible without parsing
+# this module, and a literal is the only thing a test can compare the chain against. The
+# error message below renders it rather than restating the names, so a backend added to
+# the chain and not to this tuple makes the message wrong in a way a reader sees.
+_DISPATCHABLE: tuple[str, ...] = (
+    config.QUEUE_BACKEND_MEMORY,
+    config.QUEUE_BACKEND_POSTGRES,
+    config.QUEUE_BACKEND_DYNAMODB,
+)
+
 
 def _backend() -> QueueBackend:
     """The configured backend, built once.
@@ -308,6 +324,10 @@ def _backend() -> QueueBackend:
         from ._sql import postgres_queue
 
         _BACKENDS[name] = postgres_queue()
+    elif name == config.QUEUE_BACKEND_DYNAMODB:
+        from ._dynamo import dynamo_queue
+
+        _BACKENDS[name] = dynamo_queue()
     else:
         raise NotImplementedError(
             f"QUEUE_BACKEND={name!r} is a recognised value that this package does "
@@ -316,7 +336,7 @@ def _backend() -> QueueBackend:
             f"paused run when the worker restarts, and a run that vanished while "
             f"the worker reported healthy is the failure shape this project "
             f"exists to make impossible. Implemented backends: "
-            f"{config.QUEUE_BACKEND_MEMORY!r}, {config.QUEUE_BACKEND_POSTGRES!r}."
+            f"{', '.join(repr(backend) for backend in _DISPATCHABLE)}."
         )
     return _BACKENDS[name]
 

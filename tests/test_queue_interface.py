@@ -383,3 +383,70 @@ def test_neither_rendering_leaves_an_unfilled_placeholder():
             f"the {dialect} DDL still contains a format placeholder: "
             f"{[ln for ln in ddl.splitlines() if '{' in ln or '}' in ln]}"
         )
+
+
+def test_the_dispatchable_tuple_agrees_with_the_branches_that_exist():
+    """`_DISPATCHABLE` is a second declaration, so something must anchor it.
+
+    THE LITERAL EXISTS FOR A GOOD REASON AND CANNOT DEFEND ITSELF. `_backend()`
+    selects a backend with an if/elif chain, which no expression can enumerate, so
+    the only way a test can ask "which backends does this package actually build"
+    is to compare the chain against a written-down list. That is Lane C's ruling on
+    `SEVERITY_ORDER` -- a second declaration is the only way to detect a change in
+    the first -- and it carries Lane C's obligation with it: anchor it, or it
+    drifts and keeps reading as correct.
+
+    BOTH DIRECTIONS, because they are different defects:
+
+      in the CHAIN, absent from the tuple  -> the NotImplementedError message
+                                              under-reports what works, and the
+                                              compose test admits too little
+      in the TUPLE, absent from the chain  -> the compose test admits a backend
+                                              that raises at first use. A container
+                                              starts, claims a job, and dies -- which
+                                              is strictly worse than refusing at
+                                              import, and is what `dynamodb` did
+                                              before 2026-09-15
+
+    Read over the AST rather than by importing and probing, because building a
+    backend is exactly what this test must not do: `postgres` would want a DSN and
+    `dynamodb` a live table, so a probe would need credentials to answer a question
+    about source code.
+    """
+    import ast
+    import pathlib
+
+    import agentorg.queue as queue_package
+
+    source = pathlib.Path(queue_package.__file__).read_text()
+    tree = ast.parse(source)
+
+    function = next(
+        (node for node in ast.walk(tree)
+         if isinstance(node, ast.FunctionDef) and node.name == "_backend"),
+        None,
+    )
+    assert function is not None, (
+        "_backend() is gone or renamed; this test would pin nothing"
+    )
+
+    # Every `config.QUEUE_BACKEND_*` the chain COMPARES against, resolved to its value.
+    from agentorg.common import config
+    branches = {
+        getattr(config, node.attr)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Attribute)
+        and node.attr.startswith("QUEUE_BACKEND_")
+        and hasattr(config, node.attr)
+    }
+    # The fallback message names MEMORY too; it is genuinely dispatched, so it belongs.
+    assert branches, "no config.QUEUE_BACKEND_* reference found inside _backend()"
+
+    declared = set(queue_package._DISPATCHABLE)
+    assert declared == branches, (
+        f"_DISPATCHABLE and _backend()'s branches disagree.\n"
+        f"  declared but has no branch: {sorted(declared - branches)}  "
+        f"(a container would start and die at first use)\n"
+        f"  has a branch but undeclared: {sorted(branches - declared)}  "
+        f"(the error message under-reports what works)"
+    )

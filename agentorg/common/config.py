@@ -237,7 +237,20 @@ if STATE_BACKEND not in STATE_BACKENDS:
 QUEUE_BACKEND_MEMORY = "memory"
 QUEUE_BACKEND_SQS = "sqs"
 QUEUE_BACKEND_POSTGRES = "postgres"
-QUEUE_BACKENDS = (QUEUE_BACKEND_MEMORY, QUEUE_BACKEND_SQS, QUEUE_BACKEND_POSTGRES)
+# ADDED 2026-09-15, AND ITS ABSENCE WAS A LIVE DEFECT. `infra/selfhost/docker-compose.yml`
+# sets `QUEUE_BACKEND: dynamodb` on both the worker and the api, and this tuple did not
+# contain it -- so the refusal below raised at IMPORT and neither container could start:
+#
+#   ValueError: QUEUE_BACKEND='dynamodb' is not a queue backend; expected one of
+#   memory, sqs, postgres
+#
+# `agentorg/queue/_dynamo.py` had existed with 7 passing tests since `2a62254`, and
+# `queue/__init__.py` dispatched to nothing for this name. That is the second named
+# pattern in this repository -- a correct answer nobody asks for -- with the twist that
+# the caller DID ask and was refused by a validator nobody updated.
+QUEUE_BACKEND_DYNAMODB = "dynamodb"
+QUEUE_BACKENDS = (QUEUE_BACKEND_MEMORY, QUEUE_BACKEND_SQS, QUEUE_BACKEND_POSTGRES,
+                  QUEUE_BACKEND_DYNAMODB)
 
 QUEUE_BACKEND = os.environ.get("QUEUE_BACKEND", QUEUE_BACKEND_MEMORY).lower()
 if QUEUE_BACKEND not in QUEUE_BACKENDS:
@@ -307,3 +320,22 @@ RETRIEVAL_ENABLED = os.environ.get("RETRIEVAL_ENABLED", "false").lower() == "tru
 # infra/Terraform/modules/state/, whose IAM grant is exactly PutItem, Query,
 # GetItem and UpdateItem on this table and nothing else.
 STATE_TABLE = os.environ.get("STATE_TABLE", "theagentorg-runs")
+
+# THE TENANCY TABLE -- tenants, memberships, budgets, secrets, repositories, the run
+# index and the job queue, all in one table under `TENANT#<id>` partitions.
+#
+# A DIFFERENT TABLE FROM `STATE_TABLE` ABOVE, and the two must not be merged. That one
+# is the append-only decision log, whose sort key carries an `event_id` precisely so two
+# events in the same clock tick cannot overwrite each other. This one is keyed for
+# item-level reads and carries three GSIs. `modules/state` grants four actions on the
+# first; `modules/tenancy` grants five on the second under a `LeadingKeys` condition.
+#
+# The same literal as `infra/Terraform/modules/tenancy`'s default and the compose file's
+# `TENANCY_TABLE` -- three places, one value, deliberately, so changing one obliges
+# changing the others rather than letting a rename drift silently.
+TENANCY_TABLE = os.environ.get("TENANCY_TABLE", "theagentorg-tenancy")
+
+# THE ROLE A CALLER ASSUMES TO ACT AS ONE TENANT. Empty means "not configured", which
+# `db/tenant_credentials.py` REFUSES rather than falling back to ambient credentials --
+# see that module. Its name matches `modules/tenancy`'s `${var.name}-tenancy-scoped`.
+TENANT_SCOPED_ROLE_ARN = os.environ.get("TENANT_SCOPED_ROLE_ARN", "")
