@@ -71,10 +71,6 @@ EXPECTED_RUNTIME_VARIABLES = frozenset({
     # exits -- a 200 for an approval that opened no gate.
     "TENANCY_TABLE",
     "QUEUE_BACKEND",
-    # Added 2026-09-15. Where `gates.load` looks for the run's state document.
-    # The `local` default is a JSONL file on a runner, so the deployed detail
-    # screen rendered every security field blank.
-    "STATE_BACKEND",
 })
 
 
@@ -217,7 +213,7 @@ def test_merging_preserves_keys_this_module_does_not_own():
         COGNITO_ISSUER="fresh", COGNITO_CLIENT_ID="c",
         COGNITO_DOMAIN="d", AUTH_URL="https://example.invalid",
         TENANT_SCOPED_ROLE_ARN="arn:aws:iam::339712964409:role/fake-scoped",
-        TENANCY_TABLE="t", QUEUE_BACKEND="dynamodb", STATE_BACKEND="dynamodb",
+        TENANCY_TABLE="t", QUEUE_BACKEND="dynamodb",
     )
 
     assert merged["AMPLIFY_DIFF_DEPLOY"] == "false", (

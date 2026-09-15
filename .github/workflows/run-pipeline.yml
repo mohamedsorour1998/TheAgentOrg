@@ -19,22 +19,35 @@
 # `agentorg.gates.save`/`resume`, which existed for exactly this handoff before
 # this file did.
 #
-# CORRECTED 2026-08-21, and CLOSED 2026-09-15. The 2026-08-21 note recorded that
-# `STATE_BACKEND=dynamodb` made every stage after `plan` raise, because
-# `scripts/run_stage.py:_load` called `gates._state_path`, which refuses on that
-# backend by design -- and it named the fix: read through `gates.load` instead.
-# That fix landed. `_load` dispatches through `gates.load`, which handles both
-# backends, and the round trip is measured against the live table:
+# CORRECTED 2026-08-21, and ATTEMPTED AND REVERTED 2026-09-15. The 2026-08-21 note
+# recorded that `STATE_BACKEND=dynamodb` made every stage after `plan` raise, and
+# named the fix: read through `gates.load`. That fix landed, and the round trip is
+# measured working against the live table -- save, load, and FileNotFoundError for
+# an absent run. So the knob was set here, and the very next dispatched run FAILED
+# at the plan job:
 #
-#     saved  -> dynamodb://theagentorg-runs/<run_id>
-#     loaded -> same run_id, ticket_id and status
-#     absent -> FileNotFoundError, on BOTH backends, deliberately the same
+#     ##[error]No files were found with the provided path: runs/.
+#     No artifacts will be uploaded.
 #
-# So this workflow now sets STATE_BACKEND below. THE ARTIFACT HANDOFF STAYS, and
-# that is not redundancy: it is the fallback that has carried every verified run
-# this project has done, and a DynamoDB outage mid-demo would otherwise have no
-# path at all. Two writers of one document is safe here because `gates.save` is
-# the only writer and each stage saves after it finishes.
+# **THE ARTIFACT HANDOFF AND THE DYNAMODB BACKEND ARE MUTUALLY EXCLUSIVE, NOT
+# BELT-AND-BRACES**, which the commit that set the knob asserted without measuring.
+# `log.py` dispatches on the SAME `config.STATE_BACKEND` as `gates.py`, so with
+# `dynamodb` neither the state document nor the decision log is written under
+# `runs/` -- and `if-no-files-found: error` is deliberate (the default `warn`
+# publishes an empty artifact as a SUCCESSFUL step, and the next job then downloads
+# nothing).
+#
+# Moving this chain therefore means REMOVING the handoff, not setting a variable:
+# 20 upload/download references across seven jobs, plus the blast-radius suite that
+# encodes the chain as the design. `run_id` already flows as a job OUTPUT
+# (`needs.plan.outputs.run_id`), so nothing else blocks it -- it is a real change
+# that deserves its own pass, not a one-line env var before a demo.
+#
+# WHAT IT COSTS TO LEAVE: `web/lib/reader/detail.py` reads the tenancy INDEX row
+# but never the state document, so `/runs/[id]` renders `verdict`,
+# `scan_provenance` and `blocking` blank. The reader degrades deliberately, logging
+# a warning. The Amplify compute role already holds read-only on the table for the
+# day this moves.
 #
 # WHAT `develop` CONTAINS, AND WHY THAT IS NOT A SHORTCUT. develop runs the
 # developer/reviewer revision loop, opens the PR, and evaluates the deterministic
@@ -184,17 +197,6 @@ env:
   # revise a run (plan, develop, sre, promote) and a per-job list is four chances to
   # omit one -- and the omission is silent by construction.
   TENANCY_TABLE: theagentorg-tenancy
-  # RUN STATE LIVES IN DYNAMODB, NOT ON THE RUNNER.
-  #
-  # `gates.save`/`gates.load` dispatch on this. With the `local` default a run's
-  # state is a JSONL file on whichever runner executed the stage, handed forward as
-  # an artifact -- so `web/lib/reader/detail.py` can read the tenancy INDEX row but
-  # never the document, and every security field on `/runs/[id]` renders blank.
-  # Measured before this line: `theagentorg-runs` held 0 items after every run this
-  # project had ever done.
-  #
-  # The header above records why this was previously refused and what closed it.
-  STATE_BACKEND: dynamodb
 
 jobs:
   # ── PLAN ────────────────────────────────────────────────────────────────────
