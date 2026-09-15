@@ -4614,6 +4614,80 @@ sign out -> /signin        session: signed_in false
 `scripts/` has no equivalent instrument, and none of the eight gates can substitute:
 **the only way to learn this was to sign in.**
 
+### OPEN ITEM 11 IS CLOSED: SELF-SERVICE SIGN-UP WITH AN EMAILED CODE — 2026-09-15
+
+The dead end was real and the recorded options were both expensive: provision every
+reviewer by hand (sign-up dead-ends), or rebuild the pool with `Mutable: True` (new
+issuer, every token invalid, one guard instead of two). **There was a third, and it
+needed no new pool.**
+
+`custom:tenant` can still be set at **creation** — `Mutable: False` only forbids
+*updating* it. What stopped a sign-up setting it is that the browser's app client
+excludes it from `WriteAttributes`, deliberately, so a self-registration cannot name
+its own tenant. **So the SERVER signs the user up:** a second, CONFIDENTIAL app client
+(`theagentorg-signup`) whose `WriteAttributes` carries both claims, with its secret in
+Secrets Manager read by the compute role at request time. A client id is public by
+nature; the secret is not.
+
+**The guard is unchanged in substance** — a self-registering user still cannot choose
+the claim that authorises them. The server chooses it, and the value never appears in
+a request or a response.
+
+| | browser client | sign-up client |
+|---|---|---|
+| `WriteAttributes` | `email` | `email`, `custom:tenant`, `custom:role` |
+| secret | none (public) | **yes** |
+| OAuth flows | `code` | **none** — it cannot mint a session |
+
+**EVERY NEW ACCOUNT GETS ITS OWN TENANT.** Handing a signup `tenant-zero` would show
+them the original deployment's runs. A fresh tenant means `{"runs": [], "indexed":
+true}` — empty *and* configured, which is the honest answer and the one that
+demonstrates the isolation instead of bypassing it.
+
+Verified end to end on the deployed app, in a real browser:
+
+```
+sign up   -> 202, custom:tenant t-62fcdca0…, custom:role reviewer
+confirm   -> CONFIRMED
+sign in   -> /runs, session carries THAT tenant
+/api/runs -> {"runs": [], "indexed": true}     <- its own empty workspace
+sign out  -> signed_in false
+```
+
+Meanwhile `reviewer-01` sees ticket 59 and `auth-service`, and the new account sees
+neither. **That is the isolation, demonstrated rather than argued.**
+
+#### Four things this cost, all worth keeping
+
+- **`AutoVerifiedAttributes` WAS `None`, so `SignUp` EMAILED NOTHING.** A sign-up form
+  that appears to work and produces an account nobody can confirm. Converging it is
+  dangerous in its own right: **`UpdateUserPool` is a FULL REPLACE**, so sending that
+  one field alone resets `Policies` to Cognito's default — 8 characters, no symbol —
+  on a pool whose accounts approve security gates. Merge over a fresh read, and read
+  the password policy back afterwards.
+
+- **THE ROLE WAS THE SECOND DEAD END, ONE SCREEN LATER.** The first draft excluded
+  `custom:role` on the reasoning that "a self-registration does not become a
+  reviewer". Measured: the account signed in, carried its own tenant, and every data
+  route refused it, because `authorizeSession` refuses a blank role. **The role is not
+  what isolates anything; the tenant is.** `REVIEWER_ROLE` means "an account this
+  application acts on", and `LeadingKeys` is what decides *what* it may act on.
+
+- **AN EXISTENCE ORACLE SURVIVED IN THE STATUS CODE.** `describeFailure` matched the
+  *message* for `UsernameExistsException` and the response still differed where it
+  counted: `202` for a new address, `400` for one already registered. An attacker
+  enumerating customers reads the status, not the prose. Closed by *returning* rather
+  than rewording. **Matching the message is not closing an oracle.**
+
+- **`python -m infra.cognito.provision` WITH NO ARGUMENT BROKE SIGN-IN.** It called
+  `provision(dashboard_urls=())`, and since `UpdateUserPoolClient` is a full replace
+  the client came back with only `http://localhost:3000/...`. Every sign-in then hit
+  `/error?error=redirect_mismatch`, which reads as "auth is broken". **CLAUDE.md
+  already recorded this exact hazard and it still happened, because the DEFAULT was
+  the dangerous value** — the entrypoint now supplies `AUTH_URL`. And after fixing it,
+  the hosted UI kept serving `redirect_mismatch` for about two minutes: **Cognito
+  propagation, not configuration.** Re-check before diagnosing.
+
 ### `gh run list --json databaseId --template` RENDERS SCIENTIFIC NOTATION
 
 Measured 2026-09-15: a run id comes back as `3.5009260743e+10`, because Go's template
@@ -4648,7 +4722,7 @@ surprise.**
 | 4 | ~~**`/api/runs/[id]/scoring` empty**~~ — **CLOSED 2026-09-09** | Its own note said no deployed run carried a scoring row, which stopped being true when `score_findings` was wired into `_with_provenance` — all three returns pass through it. Measured on a poisoned run against the real Postgres: **3 rows**, with thresholds and blocking flags |
 | 5 | ~~**Selenium**~~ — **CLOSED 2026-09-09 (Lane T)** | A real browser ran all four: Chrome for Testing 152.0.7977.75 + chromedriver 152.0.7977.82, headless, `5 passed`. `testpaths` now carries `target_repo/tests/e2e` (**1969 → 1974** collected) and the three-direction skip is unchanged. The first run was `3 failed` — the form posted to `/login`, the JSON API, so the `/web/login` route the wrapper exists to add was reached by nothing. `docs/final/evidence/selenium-run.md` |
 | 6 | ~~**GitHub OAuth**~~ — **CLOSED 2026-09-09 (Lanes P + Q, then applied)** | Superseded, then done. There is no GitHub OAuth provider: Cognito replaced Auth.js and `next-auth` is out of `package.json`. The pool is now PROVISIONED and the round trip measured — `GET /api/auth/signin` → **307** → the live hosted UI answering **200** with `signInFormUsername`. The Amplify app is provisioned too (`d9lts7h24c9c8`). **Two things remain and both are an operator's click**: connect the GitHub repository in the Amplify console (a GitHub App installation, which no script can perform, so `repository_connected: False` today and no build has ever run), and decide the `Mutable: False` tenant question below |
-| 11 | **A self-registered account can NEVER be assigned a tenant** — NEW, measured 2026-09-09 | `custom:tenant` is `Mutable: False`, and an immutable attribute cannot be set after creation **even when it was never given a value** — probed directly against the live pool. Sign-up is deliberately open (requirement 9), so a person can sign up, sign in, and be permanently unable to see anything. Fail-closed, and still a dead end. The two options — provision reviewers with `AdminCreateUser`, or rebuild the pool with `Mutable: True` and one guard instead of two — are written up under the sign-in section. **A pool cannot be converged onto the other choice; it needs a new pool, a new issuer, and every token invalidated** |
+| 11 | ~~**A self-registered account can NEVER be assigned a tenant**~~ — **CLOSED 2026-09-15** — a second CONFIDENTIAL app client sets both claims at CREATION, which `Mutable: False` permits; see the sign-up section above. Verified end to end on the deployed app. The text below is the state before that. | `custom:tenant` is `Mutable: False`, and an immutable attribute cannot be set after creation **even when it was never given a value** — probed directly against the live pool. Sign-up is deliberately open (requirement 9), so a person can sign up, sign in, and be permanently unable to see anything. Fail-closed, and still a dead end. The two options — provision reviewers with `AdminCreateUser`, or rebuild the pool with `Mutable: True` and one guard instead of two — are written up under the sign-in section. **A pool cannot be converged onto the other choice; it needs a new pool, a new issuer, and every token invalidated** |
 | 7 | **Admins bypass all three gates** | `can_admins_bypass=True` on every Environment. An operator setting, reported by `preflight.py` check 4, deliberately not failed on |
 | 8 | **A leaked `github_pat_` may be unrotated** | nothing in this repository can settle it. One click at `github.com/settings/personal-access-tokens`, compared against 2026-08-22 |
 | 9 | ~~**`time_to_merge` and `escaped_defects`**~~ — **CLOSED 2026-09-09 (Lane T)** | They needed "real runs over real time". The runs existed and nobody had asked GitHub. `scripts/measure_merge_history.py`: ticket→merge median **5.39 min** (n=8, max 27.07); **0** credential escapes over **9** merged PRs, positive control PR #50 carries 3. Survivorship stated — 8 merges of **37** runs |
