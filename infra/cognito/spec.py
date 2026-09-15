@@ -180,11 +180,31 @@ SIGNUP_CLIENT_SPEC: dict = {
     # start a session by any route; it can only create an unconfirmed user and
     # confirm one.
     "ReadAttributes": [*CLAIMS],
-    # THE ONE DIFFERENCE FROM THE BROWSER CLIENT, and the reason this file needed a
-    # second spec rather than a flag. `email` so the address can be supplied, and
-    # `TENANT_CLAIM` so the server can set it at the only moment it can ever be set.
-    # `ROLE_CLAIM` is NOT here: a self-registration does not become a reviewer.
-    "WriteAttributes": [*WRITABLE_ATTRIBUTES, TENANT_CLAIM],
+    # THE DIFFERENCE FROM THE BROWSER CLIENT, and the reason this file needed a
+    # second spec rather than a flag: both CLAIMS, so the server can set them at the
+    # only moment either can ever be set. Both are `Mutable: False`.
+    #
+    # **`ROLE_CLAIM` WAS EXCLUDED IN THE FIRST DRAFT, ON THE REASONING THAT "A
+    # SELF-REGISTRATION DOES NOT BECOME A REVIEWER". THAT WAS WRONG, AND MEASURED
+    # WRONG.** A self-signed-up account signed in, carried its own tenant, and every
+    # data route still refused it:
+    #
+    #     /api/session  {"signed_in": true, "tenant_id": "t-b877b3cd205541b7bf549acd"}
+    #     /api/runs     {"error": "sign in to see your runs"}
+    #
+    # `authorize.authorizeSession` refuses `no-role` for a blank `custom:role`, so
+    # sign-up was still a dead end -- a different one, reached one screen later.
+    #
+    # THE ROLE IS NOT WHAT ISOLATES ANYTHING; THE TENANT IS. `REVIEWER_ROLE` means
+    # "an account this application acts on", and an account may only ever act on the
+    # runs in its own `custom:tenant` partition -- enforced by `LeadingKeys` at AWS,
+    # not by this claim. Granting it to a self-registration therefore widens nothing:
+    # it admits them to their OWN empty workspace, which is the whole point of giving
+    # them a fresh tenant.
+    #
+    # What must never appear here is a way for the REQUEST to choose either value.
+    # `lib/signup.ts` sets both server-side and consults the body for neither.
+    "WriteAttributes": [*WRITABLE_ATTRIBUTES, TENANT_CLAIM, ROLE_CLAIM],
 }
 
 # ── EMAIL VERIFICATION ────────────────────────────────────────────────────────

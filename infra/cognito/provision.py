@@ -399,5 +399,25 @@ def provision(client=None, dashboard_urls: tuple[str, ...] = ()) -> dict:
 
 
 if __name__ == "__main__":
-    for key, value in provision().items():
+    import os
+
+    # **A BARE RUN USED TO SILENTLY NARROW THE CALLBACK LIST, AND IT BROKE SIGN-IN.**
+    # Measured 2026-09-15: `python -m infra.cognito.provision` with no argument
+    # called `provision()` with `dashboard_urls=()`, and because
+    # `UpdateUserPoolClient` is a FULL REPLACE the deployed client came back with
+    # only `http://localhost:3000/api/auth/callback`. The custom domain was gone, and
+    # every sign-in then failed at the hosted UI with
+    #
+    #     /error?error=redirect_mismatch
+    #
+    # -- which reads as "auth is broken" rather than as "a list was replaced".
+    # CLAUDE.md records this exact hazard for the callback list and it still
+    # happened, because the DEFAULT was the dangerous value.
+    #
+    # So the entrypoint now supplies the deployed origin rather than relying on the
+    # caller to remember. `AUTH_URL` is the same name `amplify.yml` writes into
+    # `.env.production` and the same origin the app actually serves on, so the two
+    # cannot disagree; the literal is the fallback for a machine that has not set it.
+    origin = os.getenv("AUTH_URL", "https://theagentorg.rosettacloud.app").strip()
+    for key, value in provision(dashboard_urls=(origin,)).items():
         print(f"{key}: {value}")

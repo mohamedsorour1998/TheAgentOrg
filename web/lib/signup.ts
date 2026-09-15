@@ -198,9 +198,17 @@ export async function startSignUp(email: string, password: string): Promise<{ te
         Password: password,
         UserAttributes: [
           { Name: "email", Value: email },
-          // THE ONE MOMENT THIS CAN EVER BE SET. `Mutable: False` means there is
-          // no second chance, and the browser's client is not permitted to send it.
+          // THE ONE MOMENT EITHER OF THESE CAN EVER BE SET. Both are
+          // `Mutable: False`, so there is no second chance, and the browser's
+          // client is permitted to send neither.
           { Name: "custom:tenant", Value: tenantId },
+          // WITHOUT THIS THE ACCOUNT SIGNS IN AND EVERY ROUTE REFUSES IT --
+          // measured: `/api/session` returned the right tenant while `/api/runs`
+          // answered "sign in to see your runs", because
+          // `authorize.authorizeSession` refuses a blank role. The role admits an
+          // account to the application; the TENANT is what decides what it can
+          // see, so this widens nothing beyond their own empty workspace.
+          { Name: "custom:role", Value: "reviewer" },
         ],
       }),
     );
