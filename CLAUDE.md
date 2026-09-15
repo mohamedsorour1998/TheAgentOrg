@@ -4521,11 +4521,54 @@ runs.list_runs("tenant-zero")  ->  indexed: true, 1 run
 **WHAT STILL DOES NOT WORK, and it is a different gap.** `verdict`,
 `scan_provenance` and `blocking` come back `null`, because those live in the run's
 **state document** and `gates.load` reads `STATE_BACKEND=local` — a JSONL artifact on
-the Actions runner. `theagentorg-runs` is also empty (Count 0) and the Amplify compute
-role has `implicitDeny` on it. `detail.py` degrades correctly, logging a warning and
-showing the indexed row. Closing it means putting the pipeline on
-`STATE_BACKEND=dynamodb`, which `run-pipeline.yml`'s own header records as measured to
-break every stage after `plan`.
+the Actions runner. `detail.py` degrades correctly, logging a warning and showing the
+indexed row.
+
+### THE ARTIFACT HANDOFF AND `STATE_BACKEND=dynamodb` ARE MUTUALLY EXCLUSIVE
+
+**Attempted and reverted the same evening, and the measurement that justified it
+proved the wrong thing.** `gates.save`/`gates.load` were probed against the live table
+— save, load, and `FileNotFoundError` for an absent run, all correct. That is a real
+measurement of the *backend*, and the backend was never the blocker. The **next
+dispatched run failed at the plan job**:
+
+```
+##[error]No files were found with the provided path: runs/. No artifacts will be uploaded.
+```
+
+**`log.py` dispatches on the SAME `config.STATE_BACKEND` as `gates.py`**, so on
+`dynamodb` neither the state document nor the decision log is written under `runs/` —
+the directory the upload step points at is simply empty. `if-no-files-found: error` is
+deliberate and correct (the default `warn` publishes an **empty artifact as a
+successful step**, and the next job then downloads nothing).
+
+So moving the chain means **removing the handoff**, not setting a variable: 20
+upload/download references across seven jobs, plus the blast-radius suite that encodes
+the chain as the design. `run_id` already flows as a job **output**
+(`needs.plan.outputs.run_id`), so nothing else blocks it — it is a real change
+deserving its own pass.
+
+Kept from the attempt, because both are correct and cost nothing: the Amplify compute
+role's **read-only** grant on `theagentorg-runs` (`read-run-state`; `PutItem` is
+`implicitDeny`), and the AST test pinning that `detail.py` establishes **ownership
+before** it loads the state document. That ordering became load-bearing the moment the
+grant existed: `theagentorg-runs` is keyed on `run_id` with no tenant in the partition
+key, so `LeadingKeys` cannot constrain it, and reversing the two calls reads as correct
+code while every response-level test keeps passing.
+
+**The general form, and it is the sharper half:** *a measurement can be sound and still
+be about the wrong thing.* Probing the backend answered "does DynamoDB round-trip a
+RunState", when the question was "does every job still find the state the previous one
+left". Name the claim the measurement is standing in for before trusting it.
+
+### `gh run list --json databaseId --template` RENDERS SCIENTIFIC NOTATION
+
+Measured 2026-09-15: a run id comes back as `3.5009260743e+10`, because Go's template
+engine formats a large JSON number as a float. Feeding that to `gh run view` produces
+**no output and no error**, so a polling loop prints blank lines until it times out and
+reads exactly like a job that never started. Use `--jq '.[].databaseId'`, or take the
+id from the URL `gh workflow run` prints. Same class as `aws --output text` appending a
+literal `None`: a formatting artifact producing a silently wrong value.
 
 ---
 
