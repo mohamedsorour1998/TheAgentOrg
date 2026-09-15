@@ -132,11 +132,110 @@ module "state" {
 # `dynamodb:LeadingKeys` does not constrain.
 ################################################################################
 
+# THE AMPLIFY SSR COMPUTE ROLE -- the missing half of steps 6 and 8.
+#
+# MEASURED 2026-09-15, and it is why the deployed read path could never have
+# worked. The Amplify app carries ONE role, `AmplifySSRLoggingRole`, and its whole
+# policy is three actions:
+#
+#   logs:CreateLogStream   logs:PutLogEvents   logs:CreateLogGroup/DescribeLogGroups
+#
+# No DynamoDB, no STS. So `web/lib/reader/*.py` was repointed at DynamoDB in
+# `da7c1dd` (step 8, correctly) onto a runtime with no credential able to read it.
+# That is this repository's signature shape one more time: code that is right and
+# cannot run, with every gate green -- `next build` compiles the readers, and no
+# test in either suite can see an IAM policy.
+#
+# THIS ROLE HOLDS NO DATA ACCESS OF ITS OWN, deliberately. Its only permission is
+# to assume the tenant-scoped role WITH a session tag, so the chain the design
+# argues for stays intact end to end:
+#
+#   Cognito custom:tenant (immutable) -> session tag -> LeadingKeys -> DynamoDB
+#
+# Granting it `dynamodb:GetItem` directly would be one line shorter and would
+# delete the entire guarantee: the SSR runtime would read every tenant's rows and
+# be trusted not to by application code, which is what §4 of the plan refuses.
+resource "aws_iam_role" "amplify_compute" {
+  name                 = "${local.name}-amplify-compute"
+  max_session_duration = 3600
+  tags                 = local.tags
+
+  assume_role_policy = data.aws_iam_policy_document.assume_amplify_compute.json
+}
+
+data "aws_iam_policy_document" "assume_amplify_compute" {
+  statement {
+    sid     = "AmplifyHostingMayRunAsThisRole"
+    effect  = "Allow"
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["amplify.amazonaws.com"]
+    }
+
+    # THE CONFUSED-DEPUTY GUARD. `amplify.amazonaws.com` is every Amplify app in
+    # every account, so without this any of them could ask STS for this role.
+    # Scoped to this app id, which is the value `infra/amplify/provision.py`
+    # already treats as the app's identity.
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:amplify:${local.region}:${local.account_id}:apps/*"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "amplify_compute_may_assume_tenant" {
+  statement {
+    sid    = "AssumeTheTenantScopedRoleWithATag"
+    effect = "Allow"
+
+    # `TagSession` ALONGSIDE `AssumeRole`, for the reason the trust policy in
+    # modules/tenancy/iam.tf spells out: without it STS answers AccessDenied, and
+    # the tempting fix is to drop the tag -- which mints a session whose
+    # `aws:PrincipalTag/tenant` is empty, so LeadingKeys compares against
+    # `TENANT#`, matches nothing, and reads as "the database is broken".
+    actions = ["sts:AssumeRole", "sts:TagSession"]
+
+    # CONSTRUCTED, NOT REFERENCED, AND THAT IS NOT LAZINESS. Referencing
+    # `module.tenancy` here would be a cycle: the tenant role's trust policy names
+    # this role, so this role's policy cannot name that one. The name is
+    # deterministic (`${var.name}-tenancy-scoped` in the module), so the string is
+    # exact rather than a wildcard -- and if the module ever renames it, the
+    # AssumeRole fails closed at run time rather than widening access.
+    resources = ["arn:aws:iam::${local.account_id}:role/${local.name}-tenancy-scoped"]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_assume_tenant" {
+  name   = "assume-tenancy-scoped"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_assume_tenant.json
+}
+
 module "tenancy" {
   source = "../../modules/tenancy"
 
   name = local.name
   tags = local.tags
+
+  # WIRED 2026-09-15. Both lists were empty, so `aws_iam_role.tenant_scoped` was
+  # counted off and had never been created -- `aws iam get-role` answered
+  # NoSuchEntity. The module was complete and reached by nothing, which is the
+  # same pattern `dispatch_target_enabled` exists to report for a rule with no
+  # target.
+  tenant_assumer_arns = [aws_iam_role.amplify_compute.arn]
+
+  # CROSS-TENANT, AND THE COMMENT ON THE VARIABLE IS THE WARNING TO READ. The
+  # pipeline claims whichever job is next and only then learns whose tenant it
+  # belongs to, so LeadingKeys cannot constrain it. Until step 7 lands, every ARN
+  # here is a principal that CAN read every tenant's rows and is trusted not to by
+  # application code alone. Kept to the two that genuinely span partitions.
+  service_role_arns = [
+    module.platform.worker_task_role_arn,
+    module.agentcore.runtime_role_arn,
+  ]
 }
 
 ################################################################################
