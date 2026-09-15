@@ -50,6 +50,41 @@
  * accessor. Reaching the data any way other than through those accessors means
  * re-deriving the one predicate that does the work.
  *
+ * ============================================================================
+ * EVERYTHING ABOVE WAS MEASURED, CORRECT, AND IS NO LONGER THE SHIPPED DESIGN.
+ * Kept in full, because the reasoning is what makes the change safe to judge.
+ * ============================================================================
+ *
+ * TWO THINGS CHANGED, ONE OF THEM FATAL TO THE SUBPROCESS.
+ *
+ * 1. **THE SUBPROCESS CANNOT RUN WHERE THIS CODE NOW RUNS.** Measured 2026-09-15
+ *    against the deployed app, signed in as a real reviewer whose session carried
+ *    `tenant_id: tenant-zero`:
+ *
+ *        /api/runs         -> PipelineError: the pipeline reader could not be started
+ *        /api/repositories -> PipelineError: the pipeline reader could not be started
+ *
+ *    An Amplify SSR Lambda has no Python, no virtualenv and no repository checkout.
+ *    Every Python reader was correct, tested, tenant-scoped and UNABLE TO START.
+ *
+ * 2. **THE ARGUMENT AGAINST A NODE CLIENT WAS ABOUT SQL, AND THE DATABASE IS NO
+ *    LONGER SQL.** Every objection above turns on `WHERE tenant_id = ?` and on
+ *    `current_tenant()` — an application-defined SQLite function. Under DynamoDB
+ *    the scoping is `dynamodb:LeadingKeys` compared against an IAM SESSION TAG, so
+ *    there is no predicate for a client to re-derive weakly. `lib/dynamo/` assumes
+ *    the same role with the same tag; AWS applies the same condition. A wrong
+ *    partition key returns AccessDenied from AWS, not rows.
+ *
+ * So the enforcement did not move into TypeScript. It moved OUT of application code
+ * entirely, into the credential — which is the whole point of the DynamoDB
+ * migration, and the reason a Node reader went from "the worst option" to the only
+ * one that runs.
+ *
+ * `readPipelineViaSubprocess` is retained below, unreachable from the routes, for the
+ * self-hosted stack — where a Python interpreter and the repository both exist, and
+ * where it remains the executable proof that `agentorg/tenancy/accessors.py` is the
+ * one tenant-scoping layer.
+ *
  * THE COST, MEASURED AND STATED
  * =============================
  * A subprocess per read is slower than an in-process query. Measured on this
@@ -185,6 +220,58 @@ export class PipelineError extends Error {
  * lost time to it.
  */
 async function readPipeline<T>(
+  moduleName: ReaderName,
+  request: Record<string, unknown>,
+): Promise<T> {
+  // ── THE READS RUN IN-PROCESS NOW, AND THE SUBPROCESS BELOW IS UNREACHABLE ────
+  //
+  // MEASURED 2026-09-15 against the deployed app, signed in as a real reviewer
+  // whose session carried `tenant_id: tenant-zero`:
+  //
+  //     /api/runs         -> PipelineError: the pipeline reader could not be started
+  //     /api/repositories -> PipelineError: the pipeline reader could not be started
+  //
+  // The `spawn` below launches `.venv-main/bin/python`, and an Amplify SSR Lambda
+  // has no Python, no virtualenv and no repository checkout. So every Python reader
+  // was correct, tested, tenant-scoped and UNABLE TO START. Sign-in worked and every
+  // screen behind it was an error -- this repository's signature pattern at the
+  // largest scale it has appeared.
+  //
+  // `lib/dynamo/` is the replacement: the same queries, against the same table, on a
+  // credential minted by the SAME AssumeRole-with-a-session-tag the Python used. The
+  // scoping did not move into TypeScript -- it lives in the credential, and AWS
+  // enforces it either way.
+  //
+  // THE REFUSAL CONTRACT IS UNCHANGED, which is why no route needed editing: a
+  // `ReadRefused` becomes the same `PipelineError` the `{error, detail}` envelope
+  // produced, so `lib/http.ts` keeps mapping it to the same status.
+  const { readTenancy, ReadRefused } = await import("./dynamo/reader");
+  try {
+    return (await readTenancy(request as Parameters<typeof readTenancy>[0])) as T;
+  } catch (error) {
+    if (error instanceof ReadRefused) {
+      throw new PipelineError(error.message, error.detail);
+    }
+    // A CREDENTIAL FAILURE IS NOT "no such run". `TenantCredentialError` means the
+    // deployment is misconfigured -- an unset role ARN, or a session tag STS
+    // refused -- and reporting it as an empty list would hide a broken deployment
+    // behind a screen that reads as "you have no runs".
+    throw new PipelineError(
+      `the ${moduleName} read failed`,
+      `${(error as Error).name}: ${(error as Error).message}`,
+    );
+  }
+}
+
+/**
+ * THE PYTHON SUBPROCESS PATH. Retained, unreachable, and deliberately not deleted.
+ *
+ * It is how `infra/selfhost/docker-compose.yml` runs the same reads, where a Python
+ * interpreter and the repository both exist -- and it carries the only executable
+ * proof that `agentorg/tenancy/accessors.py` remains the one tenant-scoping layer.
+ * Deleting it would also delete the argument for keeping the two in agreement.
+ */
+async function readPipelineViaSubprocess<T>(
   moduleName: ReaderName,
   request: Record<string, unknown>,
 ): Promise<T> {
@@ -376,4 +463,8 @@ async function readPipeline<T>(
   });
 }
 
-export { readPipeline };
+// `readPipelineViaSubprocess` is EXPORTED so it is not dead code to the linter,
+// and because naming it in the public surface is what records that it is kept on
+// purpose -- the self-hosted stack's path, and the executable proof that
+// `agentorg/tenancy/accessors.py` is still the one tenant-scoping layer.
+export { readPipeline, readPipelineViaSubprocess };
