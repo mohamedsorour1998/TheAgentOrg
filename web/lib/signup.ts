@@ -69,6 +69,20 @@ export class SignUpRefused extends Error {
 type SignupClient = { clientId: string; clientSecret: string };
 
 /**
+ * The WIRE keys, which are the WRITER's and not this file's.
+ *
+ * `infra/cognito/provision._store_signup_secret` writes snake_case, because it is
+ * Python. A camelCase read here found neither and answered "sign-up is not
+ * configured" -- measured against the deployed app on the first live sign-up
+ * attempt. The message was right and the cause was a name, so the two spellings are
+ * now stated once, here, and `__tests__/signup-secret.test.ts` reads the Python and
+ * asserts they still match. Second cross-language drift of the same night; the first
+ * was the key layout.
+ */
+const WIRE_CLIENT_ID = "client_id";
+const WIRE_CLIENT_SECRET = "client_secret";
+
+/**
  * Cached for the life of the container. The secret does not rotate per request, and
  * a Secrets Manager call on every sign-up is a cost and a throttle for no benefit.
  * NOT cached across a rotation -- a redeploy replaces the container, which is the
@@ -95,14 +109,16 @@ async function signupClient(): Promise<SignupClient> {
   }
   if (!raw) throw new SignUpRefused("sign-up is not configured", `${SECRET_NAME} is empty`);
 
-  const parsed = JSON.parse(raw) as Partial<SignupClient>;
-  if (!parsed.clientId || !parsed.clientSecret) {
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  const clientId = parsed[WIRE_CLIENT_ID];
+  const clientSecret = parsed[WIRE_CLIENT_SECRET];
+  if (typeof clientId !== "string" || typeof clientSecret !== "string" || !clientId || !clientSecret) {
     throw new SignUpRefused(
       "sign-up is not configured",
-      `${SECRET_NAME} has no clientId/clientSecret`,
+      `${SECRET_NAME} has no ${WIRE_CLIENT_ID}/${WIRE_CLIENT_SECRET}`,
     );
   }
-  cached = { clientId: parsed.clientId, clientSecret: parsed.clientSecret };
+  cached = { clientId, clientSecret };
   return cached;
 }
 
