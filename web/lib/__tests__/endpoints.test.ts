@@ -126,13 +126,31 @@ describe("what the table claims about each route", () => {
     }
   });
 
-  it("authenticates everything except the four that structurally cannot", () => {
-    // The three `/api/auth/*` routes ARE the sign-in — a route that required a
-    // session to establish one could never establish the first — and
-    // `/api/session`'s whole answer may be "nobody is signed in". Every other
-    // route requires a session, and this asserts the exemption list has not
-    // grown: the `promote` job was exempted by name from a test once, with a
-    // stale reason in a comment, and merged nothing while reporting success.
+  it("authenticates everything except the six that structurally cannot", () => {
+    // The `/api/auth/*` routes ARE the sign-in — a route that required a session
+    // to establish one could never establish the first — and `/api/session`'s
+    // whole answer may be "nobody is signed in". Every other route requires a
+    // session, and this asserts the exemption list has not grown: the `promote`
+    // job was exempted by name from a test once, with a stale reason in a
+    // comment, and merged nothing while reporting success.
+    //
+    // **`signup` AND `confirm` JOINED THE LIST ON 2026-09-15, AND THEY ARE THE
+    // FIRST TWO THAT MUTATE.** Nobody signing up has a session yet, so requiring
+    // one is the same impossibility as for `signin`. What makes the exemption
+    // safe is bounded elsewhere and is worth naming here, because this list is
+    // where somebody will come looking:
+    //
+    //   * NEITHER ISSUES A SESSION. `signup` creates an UNCONFIRMED account;
+    //     `confirm` flips it to CONFIRMED. No cookie, no token, either way — so
+    //     an unauthenticated mutating route cannot become a way to obtain a
+    //     session that never saw a password check.
+    //   * NEITHER LETS THE REQUEST CHOOSE A TENANT. `custom:tenant` decides whose
+    //     runs an account reads, is `Mutable: False`, and is therefore settable
+    //     only at creation. `lib/signup.startSignUp` mints it server-side and the
+    //     body is never consulted — the same rule that keeps `by` out of
+    //     `ApprovalRequest`.
+    //
+    // If a future route is added here, those two properties are the test.
     //
     // THE LIST IS A LITERAL AND NOT DERIVED FROM `ENDPOINTS`, which is the whole
     // reason it can catch anything. A version computing the expectation from the
@@ -147,6 +165,8 @@ describe("what the table claims about each route", () => {
       "GET /api/auth/logout",
       "GET /api/auth/signin",
       "GET /api/session",
+      "POST /api/auth/confirm",
+      "POST /api/auth/signup",
     ]);
   });
 

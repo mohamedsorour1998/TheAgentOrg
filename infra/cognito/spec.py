@@ -130,6 +130,74 @@ CLAIMS: tuple[str, ...] = tuple(f"custom:{a['Name']}" for a in CUSTOM_ATTRIBUTES
 # Nothing in `web/` writes it. **Neither claim may ever appear here.**
 WRITABLE_ATTRIBUTES: tuple[str, ...] = ("email",)
 
+# ── THE SIGN-UP CLIENT, AND WHY A SECOND ONE EXISTS AT ALL ────────────────────
+#
+# **THE PROBLEM THIS SOLVES WAS A DEAD END, MEASURED AND RECORDED.** `custom:tenant`
+# is `Mutable: False`, and an immutable attribute cannot be set after creation EVEN
+# WHEN IT WAS NEVER GIVEN A VALUE -- probed against the live pool on 2026-09-09:
+# `InvalidParameterException: user.custom:tenant: Attribute cannot be updated.` So a
+# self-registered account could sign up, sign in, and be permanently unable to see
+# anything, with `/api/session` answering `tenant_id: null` forever. Fail-closed, and
+# still a dead end. CLAUDE.md carried it as open item 11.
+#
+# The only remaining moment to set the claim is CREATION -- and the browser client
+# deliberately cannot, because `custom:tenant` is excluded from its
+# `WriteAttributes` precisely so a self-registration cannot name its own tenant.
+#
+# **SO THE SERVER SIGNS THE USER UP, NOT THE BROWSER.** This client may write the
+# claim; the browser's may not. What stops a browser simply using THIS client id is
+# that it is CONFIDENTIAL: `GenerateSecret: True` means every `SignUp` and
+# `ConfirmSignUp` must carry a `SECRET_HASH` computed from a secret that lives in
+# Secrets Manager and is readable only by the Amplify compute role. A client id is
+# public by nature; the secret is the part that is not.
+#
+# THE GUARD IS THEREFORE UNCHANGED IN SUBSTANCE: a self-registering user still
+# cannot choose the claim that authorises them. The server chooses it, from the
+# sign-up route, and the user never sees the value travel.
+#
+# **IT GETS ITS OWN TENANT, NOT TENANT ZERO.** Handing a new signup
+# `DEFAULT_TENANT_VALUE` would show them the original deployment's runs -- the exact
+# thing `pool_spec`'s comment above refuses, and CLAUDE.md's "would work in a demo".
+# A fresh tenant means an empty run list with `indexed: true`, which is the honest
+# answer and the one that demonstrates the isolation rather than bypassing it.
+#
+# NO OAUTH FLOWS AND NO AUTH FLOWS. This client exists to call two unauthenticated
+# Cognito APIs from our server. It cannot be used to sign in, so a leaked secret
+# does not become a session.
+SIGNUP_CLIENT_NAME = "theagentorg-signup"
+
+# Where the secret lives. NOT an Amplify environment variable: `amplify.yml` records
+# that those are visible in the console, in build logs, and inside a downloadable
+# build artifact -- three places at once, which is the shape of the `github_pat_`
+# this repository already leaked into a Terraform plan artifact.
+SIGNUP_SECRET_NAME = "theagentorg-shared-cognito-signup-client"
+
+SIGNUP_CLIENT_SPEC: dict = {
+    "ClientName": SIGNUP_CLIENT_NAME,
+    "GenerateSecret": True,
+    # Absent deliberately: no `AllowedOAuthFlows`, no `AllowedOAuthFlowsUserPoolClient`,
+    # no `SupportedIdentityProviders`, no `ExplicitAuthFlows`. This client cannot
+    # start a session by any route; it can only create an unconfirmed user and
+    # confirm one.
+    "ReadAttributes": [*CLAIMS],
+    # THE ONE DIFFERENCE FROM THE BROWSER CLIENT, and the reason this file needed a
+    # second spec rather than a flag. `email` so the address can be supplied, and
+    # `TENANT_CLAIM` so the server can set it at the only moment it can ever be set.
+    # `ROLE_CLAIM` is NOT here: a self-registration does not become a reviewer.
+    "WriteAttributes": [*WRITABLE_ATTRIBUTES, TENANT_CLAIM],
+}
+
+# ── EMAIL VERIFICATION ────────────────────────────────────────────────────────
+#
+# **WITHOUT THIS, `SignUp` SENDS NOTHING AND THE USER IS STUCK UNCONFIRMED.**
+# Measured on the live pool before it was set: `AutoVerifiedAttributes: None`, so
+# Cognito created the user and emailed no code -- a sign-up form that appears to
+# work and produces an account nobody can confirm.
+#
+# `email` alone. `phone_number` would make Cognito attempt SMS, which needs an SNS
+# role this pool does not have and fails at sign-up time.
+AUTO_VERIFIED_ATTRIBUTES: tuple[str, ...] = ("email",)
+
 
 def pool_spec() -> dict:
     """`CreateUserPool` arguments."""
@@ -161,6 +229,9 @@ def pool_spec() -> dict:
         # returning tenant zero when the lookup finds nothing, would work in a
         # demo and hand every new signup the original deployment's runs".
         "AdminCreateUserConfig": {"AllowAdminCreateUserOnly": False},
+        # See `AUTO_VERIFIED_ATTRIBUTES`. Without it `SignUp` emails no code and
+        # the account can never be confirmed.
+        "AutoVerifiedAttributes": [*AUTO_VERIFIED_ATTRIBUTES],
         "Schema": [dict(a) for a in CUSTOM_ATTRIBUTES],
         "UserPoolTags": {"Project": "TheAgentOrg", "Environment": "shared"},
     }

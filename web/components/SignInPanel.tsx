@@ -43,6 +43,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { getJson } from "@/components/fetching";
 import { EmptyState, ErrorState, Skeleton } from "@/components/primitives";
+import { SignUpForm } from "@/components/SignUpForm";
 import type { SessionView } from "@/lib/endpoints";
 
 /** `ErrorState`'s three props, kept together so one slot holds any failure. */
@@ -166,9 +167,11 @@ export function SignInPanel() {
               className="prose"
               style={{ margin: `0 0 var(--gap-4)`, fontSize: "var(--step-small)" }}
             >
-              This account is not assigned to an organisation yet, so there are
-              no runs it may read. That is not an empty list — it is a permission
-              nobody has granted. An administrator assigns it.
+              This account is not assigned to an organisation, so there are no
+              runs it may read. That is not an empty list — it is a permission
+              nobody has granted. Accounts created through sign-up receive their
+              own organisation automatically; this one predates that and needs an
+              administrator.
             </p>
           )}
           {session.tenant_id ? (
@@ -189,12 +192,14 @@ export function SignInPanel() {
             className="prose"
             style={{ margin: `var(--gap-4) 0 0`, fontSize: "var(--step-small)" }}
           >
-            Sign in or create an account through the hosted sign-in page. A new
-            account can see nothing until somebody assigns it to an organisation
-            — you will be told so plainly rather than shown an empty list.
+            Signing in happens on the hosted sign-in page, so this application never
+            receives your password. New here? Create an account below — it gets its
+            own organisation, so it starts empty rather than unauthorised.
           </p>
         </EmptyState>
       )}
+
+      {signedIn ? null : <SignUpForm />}
     </div>
   );
 }

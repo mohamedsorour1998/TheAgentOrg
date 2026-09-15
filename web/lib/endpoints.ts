@@ -252,6 +252,32 @@ export const ENDPOINTS: readonly Endpoint[] = [
     mutates: false,
   },
   {
+    // SELF-SERVICE SIGN-UP. `mutates: true` because it creates a Cognito account
+    // and sends mail, which is why it is POST-only.
+    //
+    // `authenticated: false` by necessity -- nobody signing up has a session yet --
+    // and that is exactly why the TENANT IS CHOSEN SERVER-SIDE. `custom:tenant` is
+    // `Mutable: False`, settable only at creation, and a body naming its own tenant
+    // would permanently attach a stranger to somebody else's runs. The request
+    // carries an email and a password and nothing else that matters.
+    method: "POST",
+    path: "/api/auth/signup",
+    summary: "Create an unconfirmed account with a fresh tenant; Cognito emails a code",
+    authenticated: false,
+    mutates: true,
+  },
+  {
+    // Two actions: verify the emailed code, or `action: "resend"` for another.
+    // CONFIRMING DOES NOT ISSUE A SESSION -- it flips the account to CONFIRMED and
+    // nothing else, so this never becomes a second way to obtain a cookie that
+    // never saw a password check.
+    method: "POST",
+    path: "/api/auth/confirm",
+    summary: "Verify the emailed code, or resend it; issues no session either way",
+    authenticated: false,
+    mutates: true,
+  },
+  {
     method: "GET",
     path: "/api/session",
     summary: "Who is signed in, and which tenant the server resolved for them",

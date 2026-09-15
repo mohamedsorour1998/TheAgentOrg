@@ -268,6 +268,43 @@ resource "aws_iam_role_policy" "amplify_compute_may_read_run_state" {
   policy = data.aws_iam_policy_document.amplify_compute_may_read_run_state.json
 }
 
+################################################################################
+# THE SIGN-UP CLIENT'S SECRET, so a self-registration can be given a tenant.
+#
+# `custom:tenant` is `Mutable: False` and can therefore be set only at CREATION --
+# measured 2026-09-09, an immutable attribute cannot be written afterwards even when
+# it never had a value. The browser's app client deliberately cannot write it, so a
+# self-registered account could sign up, sign in, and be permanently unable to see
+# anything. That was CLAUDE.md open item 11.
+#
+# `infra/cognito/spec.SIGNUP_CLIENT_SPEC` resolves it with a SECOND, CONFIDENTIAL
+# app client that may write the claim. The SSR runtime signs the user up with it,
+# choosing the tenant server-side, so the guard is unchanged in substance: a
+# self-registering user still cannot name the claim that authorises them.
+#
+# **THE SECRET IS READ AT REQUEST TIME AND IS NOT AN ENVIRONMENT VARIABLE.**
+# `amplify.yml`'s header is explicit that those are visible in the console, in build
+# logs, and inside a build artifact anyone who can call `get-job` may download --
+# three places at once, and the shape of the `github_pat_` this repository already
+# leaked into a Terraform plan artifact.
+#
+# ONE SECRET, NAMED. Not a `theagentorg-shared-*` prefix: the webhook secret and the
+# GitHub dispatch token both match that, and neither belongs to the web runtime.
+data "aws_iam_policy_document" "amplify_compute_may_read_signup_secret" {
+  statement {
+    sid       = "ReadTheSignupClientSecretAndNothingElse"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:theagentorg-shared-cognito-signup-client-*"]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_read_signup_secret" {
+  name   = "read-signup-client-secret"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_read_signup_secret.json
+}
+
 module "tenancy" {
   source = "../../modules/tenancy"
 

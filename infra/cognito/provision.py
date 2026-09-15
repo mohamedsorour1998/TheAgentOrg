@@ -23,6 +23,7 @@ credentials, no network and no pool.
 
 from __future__ import annotations
 
+import json
 import secrets
 
 import boto3
@@ -59,15 +60,23 @@ def _find_pool(client) -> str | None:
     return None
 
 
-def _find_client(client, pool_id: str) -> str | None:
-    """The app client's id, or None."""
+def _find_client(client, pool_id: str, name: str = "") -> str | None:
+    """The named app client's id, or None. Defaults to the browser client.
+
+    `name` was added when the SIGN-UP client arrived: two clients now live in this
+    pool and they differ in exactly one thing that matters -- whether they may write
+    `custom:tenant`. Matching on name rather than position is what keeps a converge
+    from updating one with the other's spec, which would either strip the browser
+    client's OAuth flows or grant it the claim the whole design withholds.
+    """
+    wanted = name or spec.CLIENT_NAME
     for existing in _paginate(
         client.list_user_pool_clients,
         "UserPoolClients",
         UserPoolId=pool_id,
         MaxResults=60,
     ):
-        if existing.get("ClientName") == spec.CLIENT_NAME:
+        if existing.get("ClientName") == wanted:
             return str(existing["ClientId"])
     return None
 
@@ -121,6 +130,56 @@ def converge_attributes(client, pool_id: str) -> list[str]:
             UserPoolId=pool_id, CustomAttributes=[dict(a) for a in missing]
         )
     return [f"custom:{a['Name']}" for a in missing]
+
+
+def _store_signup_secret(client_id: str, client_secret: str, secrets_client=None) -> bool:
+    """Put the sign-up client's id and secret in Secrets Manager. True if written.
+
+    **THE SECRET NEVER BECOMES AN AMPLIFY ENVIRONMENT VARIABLE**, and `amplify.yml`
+    records why in its own header: those are visible in the console, in build logs,
+    and inside a build artifact anyone who can call `get-job` may download -- three
+    places at once, which is the shape of the `github_pat_` this repository already
+    leaked into a Terraform plan artifact. The SSR runtime reads this at request
+    time with the compute role instead.
+
+    **IT IS NEVER RETURNED, LOGGED OR PRINTED**, which is why this answers a bool.
+    `provision()` prints its whole result dictionary to stdout, and a CI log is one
+    more place a credential does not belong.
+
+    A BLANK SECRET IS A REFUSAL, not a write. Cognito returns `ClientSecret` only
+    for a confidential client; a blank one means `GenerateSecret` did not take, and
+    storing `""` would leave the sign-up route computing a SECRET_HASH from an empty
+    key -- which Cognito rejects with `NotAuthorizedException`, a message about the
+    client rather than about the secret.
+    """
+    if not client_secret:
+        raise RuntimeError(
+            f"the sign-up client {client_id} returned no ClientSecret. It must be "
+            "confidential -- `GenerateSecret: True` is create-only, so a client "
+            "created without it cannot be converged into one and must be deleted "
+            "and remade. Nothing was stored."
+        )
+
+    secrets_client = secrets_client or boto3.client(
+        "secretsmanager", region_name=spec.REGION
+    )
+    payload = json.dumps({"client_id": client_id, "client_secret": client_secret})
+    try:
+        secrets_client.create_secret(
+            Name=spec.SIGNUP_SECRET_NAME,
+            SecretString=payload,
+            Description="Cognito sign-up client for server-side SignUp/ConfirmSignUp",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ResourceExistsException":
+            raise
+        # CONVERGED, not skipped. A client that was deleted and remade has a new
+        # secret, and a stale stored one fails every sign-up with a message about
+        # the client id.
+        secrets_client.put_secret_value(
+            SecretId=spec.SIGNUP_SECRET_NAME, SecretString=payload
+        )
+    return True
 
 
 def assign_tenant(username: str, tenant_id: str, client=None, pool_id: str = "") -> None:
@@ -217,6 +276,66 @@ def provision(client=None, dashboard_urls: tuple[str, ...] = ()) -> dict:
             ClientId=client_id,
         )
 
+    # ── EMAIL VERIFICATION ON AN EXISTING POOL ────────────────────────────────
+    #
+    # **`UpdateUserPool` IS A FULL REPLACE TOO**, and more dangerous than the client
+    # one because its blast radius is the password policy. Measured on the live pool
+    # before this existed: `AutoVerifiedAttributes: None`, so `SignUp` created a user
+    # and emailed no code -- a sign-up form that appears to work and produces an
+    # account nobody can confirm.
+    #
+    # So the wanted value is merged over a FRESH READ, exactly as
+    # `infra/amplify/provision.converge_environment` does for the same reason.
+    # Sending `AutoVerifiedAttributes` alone would reset `Policies` to Cognito's
+    # default -- 8 characters, no symbol -- on a pool whose accounts approve
+    # security gates, and nothing would report it.
+    live = client.describe_user_pool(UserPoolId=pool_id)["UserPool"]
+    if sorted(live.get("AutoVerifiedAttributes") or []) != sorted(spec.AUTO_VERIFIED_ATTRIBUTES):
+        client.update_user_pool(
+            UserPoolId=pool_id,
+            AutoVerifiedAttributes=[*spec.AUTO_VERIFIED_ATTRIBUTES],
+            # Carried forward from the read, not retyped. `Schema` is absent
+            # because it is not an `UpdateUserPool` parameter at all -- attributes
+            # are added through `AddCustomAttributes`, which `converge_attributes`
+            # already does.
+            Policies=live["Policies"],
+            AdminCreateUserConfig={
+                k: v
+                for k, v in live.get("AdminCreateUserConfig", {}).items()
+                # Read-only on the way back out; sending it is a validation error.
+                if k != "UnusedAccountValidityDays"
+            },
+            UserPoolTags=live.get("UserPoolTags", {}),
+        )
+
+    # ── THE SIGN-UP CLIENT ────────────────────────────────────────────────────
+    #
+    # See `spec.SIGNUP_CLIENT_SPEC`. It exists because `custom:tenant` is
+    # `Mutable: False` and therefore settable only at CREATION, while the browser
+    # client deliberately cannot write it -- so the server signs the user up.
+    #
+    # ITS SECRET IS READ BACK AND STORED, NEVER PRINTED. `create_user_pool_client`
+    # is the only moment the secret is returned in full; after that it is
+    # retrievable through `describe_user_pool_client`, so this converges rather than
+    # depending on having caught it once.
+    signup_id = _find_client(client, pool_id, name=spec.SIGNUP_CLIENT_NAME)
+    signup_wanted = {**spec.SIGNUP_CLIENT_SPEC, "UserPoolId": pool_id}
+    if signup_id is None:
+        made = client.create_user_pool_client(**signup_wanted)["UserPoolClient"]
+        signup_id = str(made["ClientId"])
+        signup_secret = str(made.get("ClientSecret", ""))
+    else:
+        client.update_user_pool_client(
+            **{k: v for k, v in signup_wanted.items() if k != "GenerateSecret"},
+            ClientId=signup_id,
+        )
+        described = client.describe_user_pool_client(
+            UserPoolId=pool_id, ClientId=signup_id
+        )["UserPoolClient"]
+        signup_secret = str(described.get("ClientSecret", ""))
+
+    stored = _store_signup_secret(signup_id, signup_secret)
+
     # The prefix hosted-UI domain. One call, and it saves building a sign-in form
     # -- which is the option worth naming as rejected: a hand-built page would
     # post the reviewer's password to a route handler in the same process that
@@ -271,6 +390,11 @@ def provision(client=None, dashboard_urls: tuple[str, ...] = ()) -> dict:
         # means the schema already matched; a non-empty one means this run added
         # a claim that was missing, which is worth seeing rather than inferring.
         "attributes_added": added,
+        # The sign-up client's ID is not a secret and is reported; its SECRET is
+        # written to Secrets Manager and never returned, logged or printed. The
+        # boolean is what a converge can honestly say about it.
+        "signup_client_id": signup_id,
+        "signup_secret_stored": stored,
     }
 
 
