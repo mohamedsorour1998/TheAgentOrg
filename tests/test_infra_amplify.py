@@ -43,15 +43,27 @@ from infra.amplify import spec
 # it would pass while both moved together — the second-declaration argument this
 # repository applies to `COMMENT_HEADER` and to `REAL_SCANNER_LINES`.
 #
-# The three Lane P names that are deliberately NOT here are as important as the four
+# The three Lane P names that are deliberately NOT here are as important as the five
 # that are: COGNITO_CLIENT_SECRET (the client is provisioned public, so there is no
 # secret), and DATABASE_URL / TENANT_DB (a DSN carries a password and does not belong in
 # a committed file). `amplify.yml` records both exclusions in prose.
+#
+# THE LINE BETWEEN THE TWO GROUPS IS "IS IT A CREDENTIAL", not "is it sensitive".
+# `TENANT_SCOPED_ROLE_ARN` joined the list on 2026-09-15: an ARN names a role and
+# authorises nothing by itself, so publishing it in a build artifact costs
+# nothing, where a DSN or a client secret would be a credential in three places
+# at once.
 EXPECTED_RUNTIME_VARIABLES = frozenset({
     "COGNITO_ISSUER",
     "COGNITO_CLIENT_ID",
     "COGNITO_DOMAIN",
     "AUTH_URL",
+    # Added 2026-09-15, step 6 of the DynamoDB migration. The role the readers
+    # assume per request so the CREDENTIAL is tenant-scoped rather than the
+    # `tenant_id` argument being the only thing that scopes a read. An ARN is not
+    # a secret -- it names a role and authorises nothing on its own -- so unlike
+    # the three exclusions above it belongs on this list.
+    "TENANT_SCOPED_ROLE_ARN",
 })
 
 
@@ -193,6 +205,7 @@ def test_merging_preserves_keys_this_module_does_not_own():
         existing,
         COGNITO_ISSUER="fresh", COGNITO_CLIENT_ID="c",
         COGNITO_DOMAIN="d", AUTH_URL="https://example.invalid",
+        TENANT_SCOPED_ROLE_ARN="arn:aws:iam::339712964409:role/fake-scoped",
     )
 
     assert merged["AMPLIFY_DIFF_DEPLOY"] == "false", (

@@ -30,11 +30,39 @@ if str(REPO_ROOT) not in sys.path:
 
 from infra.amplify import provision, spec
 
+ROLE_ARN = "arn:aws:iam::339712964409:role/theagentorg-shared-amplify-compute"
+
 LIVE_VALUES = {
     "COGNITO_ISSUER": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_Pyt161csn",
     "COGNITO_CLIENT_ID": "2uc5d3stt4912418sh5m4btt0s",
     "COGNITO_DOMAIN": "https://theagentorg-shared-reviewers.auth.us-east-1.amazoncognito.com",
+    # The tenancy module's `tenant_scoped_role_arn` output. Step 6 of the
+    # DynamoDB migration -- the readers assume it per request so the CREDENTIAL
+    # carries the tenant, not just the argument.
+    "TENANT_SCOPED_ROLE_ARN": "arn:aws:iam::339712964409:role/theagentorg-shared-tenancy-scoped",
 }
+
+
+class FakeIAM:
+    """`get_role` and nothing else.
+
+    A REAL boto3 client here would make the hermetic suite call AWS -- which is
+    exactly what happened when `resolve_compute_role` was first wired: the
+    provision tests went from 0.10s to 3.10s and passed only because the laptop
+    running them had credentials. `tests/conftest.py`'s six guards cover the
+    model, GitHub, git, the terminal, the scanner cache and the repo clone; IAM
+    is not among them, so nothing would have failed in CI except the whole file.
+    """
+
+    def __init__(self, arn: str | None = ROLE_ARN):
+        self._arn = arn
+        self.calls: list[str] = []
+
+    def get_role(self, RoleName: str):
+        self.calls.append(RoleName)
+        if self._arn is None:
+            raise RuntimeError(f"NoSuchEntity: {RoleName}")
+        return {"Role": {"Arn": self._arn}}
 
 
 class FakeAmplify:
@@ -46,7 +74,12 @@ class FakeAmplify:
     provisioner that ignores `nextToken` sees exactly one of them.
     """
 
-    def __init__(self, apps=(), branches=(), environment=None, domains=()):
+    def __init__(self, apps=(), branches=(), environment=None, domains=(),
+                 compute_role=""):
+        # MODELLED, NOT STUBBED. Without persisting this, `get_app` always
+        # answers "" and a converge that skips an unchanged value is
+        # indistinguishable from one that resends it every time.
+        self.compute_role = compute_role
         self.apps = [dict(a) for a in apps]
         self.branches = list(branches)
         self.environment = dict(environment or {})
@@ -90,11 +123,19 @@ class FakeAmplify:
         self.calls.append(("update_app", kwargs))
         if "environmentVariables" in kwargs:
             self.environment = dict(kwargs["environmentVariables"])
+        if "computeRoleArn" in kwargs:
+            self.compute_role = kwargs["computeRoleArn"]
         return {"app": {}}
 
     def get_app(self, appId):
         self.calls.append(("get_app", appId))
-        return {"app": {"appId": appId, "environmentVariables": dict(self.environment)}}
+        return {
+            "app": {
+                "appId": appId,
+                "environmentVariables": dict(self.environment),
+                "computeRoleArn": self.compute_role,
+            }
+        }
 
     def list_branches(self, appId, maxResults=None, nextToken=None):
         self.calls.append(("list_branches", appId))
@@ -204,7 +245,7 @@ def test_auth_url_is_derived_from_the_app_and_not_from_the_caller():
     """
     client = FakeAmplify()
 
-    result = provision.provision(client, **LIVE_VALUES)
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
 
     assert result["AUTH_URL"] == f"https://{spec.BRANCH}.dnew123.amplifyapp.com", (
         result["AUTH_URL"]
@@ -232,7 +273,7 @@ def test_a_missing_repository_connection_is_REPORTED_and_not_inferred():
     """
     client = FakeAmplify()
 
-    result = provision.provision(client, **LIVE_VALUES)
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
 
     assert result["repository_connected"] is False, (
         "no repository was passed, so a build can never run; reporting this as "
@@ -253,7 +294,7 @@ def test_the_platform_is_resent_on_every_converge():
          "platform": "WEB", "repository": "https://github.com/x/y"},
     ])
 
-    provision.provision(client, **LIVE_VALUES)
+    provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
 
     resent = [k for name, k in client.calls
               if name == "update_app" and k.get("platform")]
@@ -291,7 +332,7 @@ def test_a_custom_domain_wins_over_the_amplify_default():
         "subDomains": [{"subDomainSetting": {"prefix": "theagentorg", "branchName": "main"}}],
     }])
 
-    result = provision.provision(client, **LIVE_VALUES)
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
 
     assert result["AUTH_URL"] == "https://theagentorg.rosettacloud.app", result["AUTH_URL"]
     assert result["origin_source"] == "custom-domain", result["origin_source"]
@@ -311,7 +352,7 @@ def test_a_FAILED_association_is_skipped_rather_than_trusted():
         "subDomains": [{"subDomainSetting": {"prefix": "theagentorg", "branchName": "main"}}],
     }])
 
-    result = provision.provision(client, **LIVE_VALUES)
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
 
     assert result["AUTH_URL"] == "https://main.d9.amplifyapp.com", (
         "a FAILED association was used as the origin; that host does not resolve"
@@ -342,3 +383,91 @@ def test_a_domain_bound_to_a_DIFFERENT_branch_is_not_this_branchs_origin():
     }])
 
     assert provision.custom_origin(client, "d-ours") == ""
+
+
+# ── the SSR runtime's own credential ─────────────────────────────────────────
+
+def test_provision_gives_the_ssr_runtime_a_compute_role():
+    """Without it the app runs with NO data credential and every read fails.
+
+    MEASURED 2026-09-15 on the live app: `computeRoleArn` was null on both the
+    app and the branch, and the only role it carried was `iamServiceRoleArn` ->
+    `AmplifySSRLoggingRole-*`, four CloudWatch actions. Step 8 had already
+    repointed the readers at DynamoDB, so they were correct code on a runtime
+    that could not reach the table.
+    """
+    client = FakeAmplify(apps=[
+        {"appId": "d-ours", "name": spec.APP_NAME, "defaultDomain": "b.amplifyapp.com",
+         "repository": "https://github.com/x/y"},
+    ], branches=["main"])
+
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
+
+    assert result["compute_role_arn"] == ROLE_ARN
+    assert result["compute_role_changed"] is True
+    sent = [kw for name, kw in client.calls if name == "update_app" and "computeRoleArn" in kw]
+    assert sent, "no update_app call carried computeRoleArn"
+    assert sent[-1]["computeRoleArn"] == ROLE_ARN
+
+
+def test_a_compute_role_that_is_already_correct_is_not_resent():
+    """Read first, then write. `update_app` is not free of consequence here.
+
+    A neighbouring service measured a converge naming one field and leaving
+    several others absent afterwards, so the fewer no-op updates this makes the
+    better.
+    """
+    client = FakeAmplify(
+        apps=[{"appId": "d-ours", "name": spec.APP_NAME, "defaultDomain": "b.amplifyapp.com",
+               "repository": "https://github.com/x/y"}],
+        branches=["main"],
+        compute_role=ROLE_ARN,
+    )
+
+    result = provision.provision(client, iam=FakeIAM(), **LIVE_VALUES)
+
+    assert result["compute_role_changed"] is False
+    sent = [kw for name, kw in client.calls if name == "update_app" and "computeRoleArn" in kw]
+    assert not sent, f"an unchanged compute role was resent: {sent}"
+
+
+def test_an_absent_compute_role_RAISES_rather_than_configuring_nothing():
+    """The role is Terraform's. A missing one must not read as a broken database.
+
+    The alternative -- skip the converge when IAM has no such role -- leaves a
+    green provisioning run and an app whose every tenant-scoped read fails at
+    AWS, which is the failure this project keeps paying for.
+    """
+    client = FakeAmplify(apps=[
+        {"appId": "d-ours", "name": spec.APP_NAME, "defaultDomain": "b.amplifyapp.com"},
+    ], branches=["main"])
+
+    with pytest.raises(RuntimeError) as exc:
+        provision.provision(client, iam=FakeIAM(arn=None), **LIVE_VALUES)
+
+    message = str(exc.value)
+    assert spec.COMPUTE_ROLE_NAME in message
+    assert "apply that first" in message, (
+        "the refusal must name the fix; a bare NoSuchEntity sends the next "
+        "person looking at Amplify rather than at Terraform."
+    )
+
+
+def test_the_compute_role_name_matches_the_role_terraform_creates():
+    """TWO FILES, ONE NAME, and a mismatch is a silent NoSuchEntity at converge.
+
+    Read off the Terraform source rather than from IAM: this is the hermetic
+    suite, and the deployed answer is `resolve_compute_role`'s read-back.
+    """
+    main_tf = (REPO_ROOT / "infra" / "Terraform" / "environments" / "shared" / "main.tf").read_text()
+
+    assert 'name                 = "${local.name}-amplify-compute"' in main_tf, (
+        "main.tf no longer names the compute role this way; this test would pin "
+        "nothing. The provisioner looks it up by the exact literal in "
+        "spec.COMPUTE_ROLE_NAME."
+    )
+    assert spec.COMPUTE_ROLE_NAME == "theagentorg-shared-amplify-compute", (
+        f"spec.COMPUTE_ROLE_NAME is {spec.COMPUTE_ROLE_NAME!r}, but main.tf "
+        f"creates `${{local.name}}-amplify-compute` where local.name is "
+        f"`theagentorg-shared`."
+    )

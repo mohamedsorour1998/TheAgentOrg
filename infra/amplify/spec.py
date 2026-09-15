@@ -27,6 +27,26 @@ BRANCH = "main"
 # BEFORE reading a green build as a working app.
 PLATFORM = "WEB_COMPUTE"
 
+# THE SSR RUNTIME'S OWN CREDENTIAL, and until 2026-09-15 the app had none.
+#
+# MEASURED that day: `computeRoleArn` was null on both the app and the branch,
+# and the only role the app carried was `iamServiceRoleArn` ->
+# `AmplifySSRLoggingRole-*`, whose entire policy is four CloudWatch actions. So the
+# SSR runtime could write logs and reach nothing else -- and step 8 had already
+# repointed `web/lib/reader/*.py` at DynamoDB, onto a runtime with no credential
+# able to read it. Correct code that cannot run, with every gate green: `next
+# build` compiles the readers and no test in either suite can see an IAM policy.
+#
+# THE TWO FIELDS ARE NOT INTERCHANGEABLE. `iamServiceRoleArn` is what Amplify
+# assumes on the app's behalf for logging; `computeRoleArn` is what the SSR
+# Lambda runs AS. Setting the first and expecting data access is the mistake this
+# constant exists to prevent.
+#
+# The role holds NO data access of its own -- only `sts:AssumeRole` +
+# `sts:TagSession` on the tenant-scoped role -- so the chain stays intact:
+#   Cognito custom:tenant (immutable) -> session tag -> LeadingKeys -> DynamoDB
+COMPUTE_ROLE_NAME = "theagentorg-shared-amplify-compute"
+
 # The subdirectory holding the Next.js app. Amplify needs this in two places that
 # must agree -- `amplify.yml`'s `appRoot` and the `AMPLIFY_MONOREPO_APP_ROOT`
 # variable -- and AWS's own documentation says the variable "must exist, and have

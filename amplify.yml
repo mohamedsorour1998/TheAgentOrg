@@ -158,6 +158,21 @@ applications:
             - echo "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" >> .env.production
             - echo "COGNITO_DOMAIN=${COGNITO_DOMAIN}" >> .env.production
             - echo "AUTH_URL=${AUTH_URL}" >> .env.production
+            # STEP 6 OF THE DYNAMODB MIGRATION. The role `web/lib/reader/*.py`
+            # assumes per request, tagged with the verified `custom:tenant`, so
+            # the credential itself cannot read another tenant's partition.
+            #
+            # AN ARN IS NOT A SECRET -- it names a role and authorises nothing;
+            # assuming it requires `sts:AssumeRole` AND `sts:TagSession`, which
+            # only the Amplify compute role holds. So it belongs on this list,
+            # unlike the three exclusions above.
+            #
+            # BLANK IS A REFUSAL, NOT A FALLBACK. `db/tenant_credentials` raises
+            # when this is empty rather than using the ambient credential, which
+            # is the compute role and can read every tenant. A green build with
+            # this unset therefore produces an app whose run list errors -- loudly
+            # -- instead of one quietly serving cross-tenant reads.
+            - echo "TENANT_SCOPED_ROLE_ARN=${TENANT_SCOPED_ROLE_ARN}" >> .env.production
             - npm run typecheck
             - npm run lint
             - npm run test

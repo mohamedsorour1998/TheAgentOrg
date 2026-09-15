@@ -157,6 +157,51 @@ def converge_environment(client, app_id: str, **values: str) -> set[str]:
     return carried
 
 
+def resolve_compute_role(iam=None) -> str:
+    """The compute role's ARN, READ BACK FROM IAM rather than assembled.
+
+    The name is deterministic, so `f"arn:aws:iam::{account}:role/{name}"` would
+    work and would also succeed for a role that does not exist -- producing an
+    `update_app` that fails at AWS with a message about an invalid role, or worse
+    an app configured to run as something nobody created. Reading it back is the
+    same arbiter `infra/cognito/provision.assign_tenant` uses, and for the same
+    reason: the read is what turned an assumed-good write into a measured one.
+    """
+    if iam is None:
+        import boto3
+
+        iam = boto3.client("iam")
+    try:
+        return str(iam.get_role(RoleName=spec.COMPUTE_ROLE_NAME)["Role"]["Arn"])
+    except Exception as exc:
+        raise RuntimeError(
+            f"IAM has no role named {spec.COMPUTE_ROLE_NAME}. It is created by "
+            f"`infra/Terraform/environments/shared/main.tf`; apply that first. "
+            f"Without it the SSR runtime runs with NO credential and every "
+            f"tenant-scoped read fails -- which reads as a broken database "
+            f"rather than as missing infrastructure.\n{exc}"
+        ) from exc
+
+
+def converge_compute_role(client, app_id: str, role_arn: str) -> bool:
+    """Set `computeRoleArn` on the app. True if it changed.
+
+    ON THE APP, NOT THE BRANCH. A branch value overrides the app's, so setting
+    only the branch leaves any future branch running with no credential -- and
+    setting only the app is inherited by every branch that does not override.
+
+    Read first and skip an unchanged value, because `update_app` is not free of
+    consequence: this project has already measured a converge that named one
+    field and silently dropped several others on a neighbouring service
+    (`UpdateUserPoolClient`).
+    """
+    live = client.get_app(appId=app_id)["app"].get("computeRoleArn") or ""
+    if live == role_arn:
+        return False
+    client.update_app(appId=app_id, computeRoleArn=role_arn)
+    return True
+
+
 def converge_branch(client, app_id: str, branch: str = spec.BRANCH) -> bool:
     """Create the branch if absent, otherwise resend its settings. True if made.
 
@@ -181,7 +226,8 @@ def converge_branch(client, app_id: str, branch: str = spec.BRANCH) -> bool:
     return True
 
 
-def provision(client=None, repository: str = "", access_token: str = "", **values: str) -> dict:
+def provision(client=None, repository: str = "", access_token: str = "",
+              iam=None, **values: str) -> dict:
     """Create or converge the app, its branch and its environment.
 
     `repository` and `access_token` are OPTIONAL and their absence is a stated
@@ -235,6 +281,13 @@ def provision(client=None, repository: str = "", access_token: str = "", **value
     carried = converge_environment(client, app_id, AUTH_URL=origin, **values)
     made = converge_branch(client, app_id)
 
+    # THE CREDENTIAL THE READERS NEED TO EXIST AT ALL. Converged after the
+    # environment on purpose: the variables are what the app reads and this is
+    # what lets it act on them, so an interrupted run leaves the app configured
+    # and unable to read rather than reading with the wrong identity.
+    compute_role = resolve_compute_role(iam)
+    role_changed = converge_compute_role(client, app_id, compute_role)
+
     return {
         "app_id": app_id,
         "AUTH_URL": origin,
@@ -244,6 +297,11 @@ def provision(client=None, repository: str = "", access_token: str = "", **value
         # different facts that a reader would otherwise have to spot by eye.
         "origin_source": "custom-domain" if custom else "amplify-default",
         "branch_created": made,
+        # REPORTED, not inferred. An app with no compute role answers `get-app`
+        # perfectly and serves every page until one touches DynamoDB, which is
+        # the `repository_connected` lesson on a second field.
+        "compute_role_arn": compute_role,
+        "compute_role_changed": role_changed,
         "carried_keys": sorted(carried),
         # Named rather than inferred. See `provision`'s docstring.
         "repository_connected": bool(app.get("repository")),
@@ -259,6 +317,12 @@ if __name__ == "__main__":
         COGNITO_ISSUER=os.getenv("COGNITO_ISSUER", ""),
         COGNITO_CLIENT_ID=os.getenv("COGNITO_CLIENT_ID", ""),
         COGNITO_DOMAIN=os.getenv("COGNITO_DOMAIN", ""),
+        # From the tenancy module's `tenant_scoped_role_arn` output. Blank
+        # makes `spec.environment_variables` RAISE rather than deploying an
+        # app that reads it as configured-and-empty -- and the readers refuse
+        # rather than falling back to the compute role, which can read every
+        # tenant.
+        TENANT_SCOPED_ROLE_ARN=os.getenv("TENANT_SCOPED_ROLE_ARN", ""),
     )
     for key, value in result.items():
         print(f"{key}: {value}")
