@@ -75,7 +75,7 @@ def set_scope(tenant_id: str, full_names: list[str], by: str) -> dict:
     if not path:
         return {"repositories": [], "indexed": False}
 
-    client = _client.table()
+    client = _client.table(tenant_id)
     existing = {row["full_name"] for row in dynamo.list_repositories(client, tenant_id)}
 
     for full_name in full_names:

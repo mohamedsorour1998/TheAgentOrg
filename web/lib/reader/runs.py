@@ -152,7 +152,7 @@ def list_runs(tenant_id: str) -> dict:
     if not path:
         return {"runs": [], "indexed": False}
 
-    rows = dynamo.list_runs(_client.table(), tenant_id)
+    rows = dynamo.list_runs(_client.table(tenant_id), tenant_id)
 
     paused = _awaiting_by_run()
     runs = []
@@ -196,7 +196,7 @@ def run_facts(tenant_id: str, run_id: str) -> dict:
         # caller learns only what they already tried.
         raise accessors.NotFound("no run index is configured")
 
-    client = _client.table()
+    client = _client.table(tenant_id)
     row = dynamo.get_run(client, tenant_id, run_id)
     repositories = dynamo.list_repositories(client, tenant_id)
 
@@ -246,7 +246,7 @@ def list_repositories(tenant_id: str) -> dict:
     if not path:
         return {"repositories": [], "indexed": False}
 
-    rows = dynamo.list_repositories(_client.table(), tenant_id)
+    rows = dynamo.list_repositories(_client.table(tenant_id), tenant_id)
     return {
         "repositories": [{"full_name": row["full_name"]} for row in rows],
         "indexed": True,

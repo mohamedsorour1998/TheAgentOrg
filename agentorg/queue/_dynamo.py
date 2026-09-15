@@ -246,7 +246,7 @@ def dynamo_queue() -> DynamoQueue:
     spans partitions -- it claims whichever job is next and only then learns whose tenant
     it is -- so it uses the ambient service credential that `modules/tenancy`'s
     `service_role_arns` grants. A caller that wants ONE tenant's rows under the
-    `LeadingKeys` condition uses `db/tenant_credentials.scoped_table` instead, and the
+    `LeadingKeys` condition uses `db/tenant_credentials.table` instead, and the
     difference between those two is the whole of §4 of the migration plan.
     """
     import boto3

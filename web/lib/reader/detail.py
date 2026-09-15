@@ -76,7 +76,7 @@ def _load(tenant_id: str, run_id: str):
         raise accessors.NotFound("no run index is configured")
 
     # OWNERSHIP FIRST. See the module docstring.
-    row = dynamo.get_run(_client.table(), tenant_id, run_id)
+    row = dynamo.get_run(_client.table(tenant_id), tenant_id, run_id)
 
     try:
         state = gates.load(run_id)
