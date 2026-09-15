@@ -207,12 +207,69 @@ Ordered so that nothing is deleted before its replacement is proven.
 | 2 | `agentorg/db/_dynamo.py` — key construction, pure functions | unit tests; no AWS call | **DONE** — 18 tests, RED both directions on the cross-language prefix check |
 | 3 | `tenancy/accessors.py` gains a DynamoDB backend | the 52 leak tests pass against it | **PARTIAL** — `_dynamo_store.py` + 9 tests done (item ops, GSI1 breach, pagination). The ~20 accessors are NOT ported |
 | 4 | The two NEW leak tests (§6) | both fail before the IAM policy exists, pass after | **DONE** — GSI1 breach is hermetic; the tag breach is `preflight.py` check 8, measured below |
-| 5 | Queue backend | `test_queue_*.py` 92 tests pass |
-| 6 | STS session-tag path for the web app | wrong-tag breach refused, measured |
-| 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured |
-| 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app |
-| 9 | Backfill marker + one-time copy from Postgres | row counts agree both ways |
-| 10 | Retire the Postgres path | only after 1–9; `_memory.py` stays forever |
+| 5 | Queue backend | `test_queue_*.py` 92 tests pass | **DONE** — `_dynamo.py`, 7 tests |
+| 6 | STS session-tag path for the web app | wrong-tag breach refused, measured | OPEN |
+| 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured | OPEN |
+| 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app | **DONE** — all four readers on boto3 |
+| 9 | Backfill marker + one-time copy from Postgres | row counts agree both ways | **MOOT** — see below |
+| 10 | Retire the Postgres path | only after 1–9; `_memory.py` stays forever | OPEN |
+
+### THE OPERATOR'S DECISION, 2026-09-15: **DynamoDB only**
+
+Asked directly, and it settles the one question this document left open. There is no
+Postgres anywhere — not in the deployed path, not in the self-hosted stack, not as a
+switchable alternative. `_memory.py` still stays forever, because it is what keeps the
+suite hermetic; it is not a second *durable* backend.
+
+**That makes step 9 MOOT rather than done, and the distinction matters.** A backfill
+copies production rows. There are none: the deployed app has never had a working
+Postgres — CLAUDE.md records `/api/session` answering `tenant_id: null` because the
+tenant lookup was circular under RLS, which is one of the two reasons this migration
+was proposed. The only Postgres data that ever existed was in a local podman volume
+and on a Homebrew service, both of them development fixtures. **Do not write a
+backfill script for rows nobody has**; if a future deployment needs one, this row is
+where to say so.
+
+### STEP 5 AND 8 WERE DONE BEFORE THIS TABLE SAID SO
+
+Recorded because the table above was stale for five days and read as authoritative.
+Commits `2a62254` (step 5) and `da7c1dd` (step 8) landed while the row still said
+nothing, and `ecf18ab` ported the twenty accessors the step-3 row calls NOT PORTED.
+Verified by running them rather than by reading the commits:
+
+```
+tests/test_dynamo_store.py    9 passed
+tests/test_queue_dynamo.py    7 passed
+tests/test_tenancy_leak.py   52 passed
+web/lib/reader/{_client,runs,detail,repositories}.py   all import boto3
+```
+
+**A plan document is not a record of what happened.** This one is edited by hand and
+the code is not, so when they disagree the code is right — the same rule this
+repository applies to a comment and a test. Re-measure before quoting a row.
+
+### A DEFECT THIS MIGRATION INTRODUCED, FOUND 2026-09-15
+
+Moving the self-hosted stack onto DynamoDB means mounting an AWS credential into it,
+and that **removed a guard along with the thing it guarded**. `llm.available()` falls
+through to boto3 whenever `LLM_DISABLED` and `LLM_BASE_URL` are both empty; the
+`api` service set neither, and had never needed to, because
+`test_no_aws_credential_or_region_reaches_any_service` made the branch unreachable.
+Measured on the parsed compose file:
+
+```
+service  LLM_DISABLED  LLM_BASE_URL           -> reaches
+worker   (unset)       http://model:11434/v1     gateway
+api      (unset)       (unset)                   YES - BEDROCK
+web      true          (unset)                   no
+```
+
+A stack whose entire claim is that it is self-hosted was one typo from a live billable
+model call, with everything green. Fixed in `ae73d75`, and the replacement test asserts
+the property the old one was accidentally providing: **every credentialed service must
+pin its model path.** The general form is worth carrying into steps 6 and 7 — *when a
+capability is added, check which existing test was silently providing a guarantee it no
+longer provides.*
 
 ### What check 8 measured, 2026-09-10
 
