@@ -1913,6 +1913,20 @@ Every one forces the offline path, then puts a loud raiser on the seam underneat
    is where every measured defect was. A test marked `real_snapshot` opts out (those
    stub `subprocess.run` in their own bodies, so they never reach the network either).
 
+**THERE IS NO GUARD ON IAM OR STS, AND A LIVE CALL GOT IN THIS WAY — 2026-09-15.**
+The six guards cover the model, GitHub, the git workspace, the terminal, the scanner
+cache and the repo clone. `infra/amplify/provision.resolve_compute_role` defaults its
+client to a real `boto3.client("iam")`, and the five existing provision tests did not
+inject one — so they made a live `GetRole` call per test and **passed**, purely because
+this laptop has credentials. CI has none for IAM and the whole file would have failed
+there.
+
+**The tell was the clock, and nothing else: `0.10s → 3.10s`.** No assertion changed, no
+output differed. Any new `infra/` provisioner has this shape, because those modules are
+*about* AWS and their doubles are hand-written per test file rather than autouse. Until
+a seventh guard exists, the check is to watch a test file's wall time after wiring a new
+client, and to give every such function an injectable client parameter.
+
 **Why `pytest.fail` and not a plain exception.** `Failed` derives from
 **BaseException**, not Exception. `llm.text()` catches `Exception` and
 `github_ops.post_comment` catches `Exception`, so an ordinary raiser would be
@@ -3538,6 +3552,51 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
   API.
 - **A runtime reports READY before its endpoint serves the new version.** Retry the
   invoke rather than polling a status field.
+- **`iam:AttachRolePolicy` IS AUTHORISED AGAINST THE ROLE, NOT THE POLICY**, and the
+  CI role's grant for it names the wrong resource — so it is dead text that reads as a
+  working permission. Found 2026-09-15 when the tenancy apply failed:
+
+  ```
+  iam:AttachRolePolicy  role/theagentorg-shared-tenancy-scoped     implicitDeny
+  iam:AttachRolePolicy  policy/theagentorg-shared-tenancy-scoped   implicitDeny
+  iam:PutRolePolicy     role/theagentorg-shared-tenancy-scoped     allowed
+  ```
+
+  `theagentorg-ingress-policy` grants `AttachRolePolicy` on
+  `Resource: policy/theagentorg-shared-*`; the policy being attached travels as the
+  **`iam:PolicyARN` condition key**, never as the resource, so the statement can match
+  nothing. **The fix was to stop attaching** — both tenancy policies are now inline
+  `aws_iam_role_policy`, which `PutRolePolicy` already permits — rather than to widen
+  CI, on the precedent set by `iam:CreateServiceLinkedRole` below.
+
+  **THE FAILURE MODE IS THE PART TO REMEMBER: a role that exists and carries nothing.**
+  `get-role` answers, `list-role-policies` and `list-attached-role-policies` are both
+  empty, the role can be assumed, and it grants zero. That is fail-closed and it reads
+  as a broken database.
+
+- **`iam get-policy` ANSWERS FOR A POLICY ATTACHED TO NOBODY**, so a check built on it
+  cannot see the state above. `preflight_tenancy.py` read the tenancy policy that way
+  and reported **check 8 PASSED** — all four rows correct — against a principal subject
+  to none of it. It now reads through `iam get-role-policy`, where the document
+  returned *is* the role's or the call raises. Measured before and after with nothing
+  in AWS changing between the two runs: `PASSED` → `FAILED`.
+
+  Its own docstring had named the gap it stopped one step short of — it reads from the
+  account rather than from Terraform because *"a policy that exists in a `.tf` file and
+  was never applied is precisely the failure this check exists to catch"*. **"Applied,
+  and attached to nothing" is the next step along that same line.**
+
+- **AMPLIFY HAS TWO ROLE FIELDS AND THEY ARE NOT INTERCHANGEABLE.** `iamServiceRoleArn`
+  is what Amplify assumes on the app's behalf (logging); **`computeRoleArn` is what the
+  SSR Lambda RUNS AS**. Measured 2026-09-15 on `d15q7tk62qnlxt`: `computeRoleArn` was
+  **null** on both the app and the branch while `iamServiceRoleArn` pointed at
+  `AmplifySSRLoggingRole-*`, whose whole policy is four CloudWatch actions. So the
+  deployed SSR runtime had **no data credential at all**, and `web/lib/reader/*.py` had
+  already been repointed at DynamoDB — correct code on a runtime that could not reach
+  the table, with every gate green, because no test in either suite can see an IAM
+  policy. Having one of the two fields populated is exactly why nothing looked
+  unconfigured.
+
 - **`iam:CreateServiceLinkedRole` is `implicitDeny` for the CI role**, and
   EventBridge needs an SLR to create an API-destination connection. Created by hand
   once, rather than granting CI standing power to mint roles for any AWS service.
@@ -4368,7 +4427,49 @@ noise.**
 
 ---
 
-## WHAT IS STILL OPEN, as of 2026-09-09
+## WHAT IS STILL OPEN, as of 2026-09-15
+
+### THE DATABASE IS DYNAMODB, BY THE OPERATOR'S DECISION — 2026-09-15
+
+**Read this before anything below that mentions Postgres, RLS or a DSN.** Asked
+directly, the answer was *"i use aws dynmodb only"*: no Postgres in the deployed path,
+none in the self-hosted stack, and not as a switchable alternative.
+`docs/design/dynamodb-migration.md` is the plan and carries the measurements.
+
+Where that leaves the migration's ten steps: **1, 2, 4, 5, 6 and 8 are DONE**, 3 is
+partial-but-ported, **9 is MOOT** (a backfill needs production rows and there have never
+been any — the deployed app's Postgres never worked, which is one of the two reasons for
+the migration), and **7 and 10 are OPEN**.
+
+- **Step 7, per-tenant AssumeRole in the worker, is open AND has nothing deployed to
+  fix.** `runtime_enabled` is false, so no worker service exists; the pipeline runs on
+  GitHub Actions. The asymmetry §4 admits is therefore real but currently unreachable.
+- **Step 10, retiring the Postgres path, is open DELIBERATELY.** It is ~2,150 lines
+  across six modules, and the SQL layer is what the **52 hermetic leak tests** actually
+  execute — against sqlite, not Postgres. Deleting it trades working coverage for
+  tidiness. Do it as its own task with the DynamoDB store's equivalents landed first,
+  not as cleanup.
+
+**The chain the design argues for is now measured end to end**, which it was not on
+2026-09-09:
+
+```
+Cognito custom:tenant   Mutable: False, absent from WriteAttributes, unsettable
+                        even when never set (probed 2026-09-09)
+amplify compute role    sts:AssumeRole allowed · sts:TagSession allowed
+                        dynamodb:GetItem/Query/Scan  ALL implicitDeny   <- the key row:
+                        it cannot bypass the scoping, it can only delegate into it
+LeadingKeys             tag=t1 -> TENANT#t1 allowed · -> TENANT#t2 implicitDeny
+                        no tag -> implicitDeny · Query gsi1 explicitDeny
+```
+
+**The self-hosted stack is OUT OF SCOPE for that guarantee and always was.** It mounts
+`${HOME}/.aws`, and that session is `arn:aws:iam::339712964409:root`, which reads every
+partition regardless of policy — the Postgres-superuser finding again. `TENANT_SCOPED_ROLE_ARN`
+is therefore blank in the compose file, which makes the readers **raise** rather than
+silently read cross-tenant.
+
+---
 
 All five phases and **nineteen lanes** are merged; the app runs locally, on Cognito, with
 the database behind a non-owning role. **Nine of the eleven items below are closed** —
