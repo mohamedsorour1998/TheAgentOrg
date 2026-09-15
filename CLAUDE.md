@@ -4469,6 +4469,64 @@ partition regardless of policy — the Postgres-superuser finding again. `TENANT
 is therefore blank in the compose file, which makes the readers **raise** rather than
 silently read cross-tenant.
 
+### ONE POSTGRES-SHAPED FLAG KEPT THE WHOLE TENANCY UI DARK — 2026-09-15
+
+Found by being asked "is it all working?" rather than by any gate, and it is the
+clearest instance yet of this file's second named pattern: **steps 6 and 8 were both
+correct and the thing they feed was never connected.**
+
+`run_index.record_run` writes the run row; `runs.py`, `detail.py` and
+`repositories.py` read it. **All four declared their own gate, all four read
+`TENANT_DB` — a POSTGRES DSN — and all four agreed.** The DynamoDB-only decision
+guarantees that variable is never set, so the writer no-opped and every reader took
+its honest `indexed: false` branch. Measured on the live table:
+
+```
+aws dynamodb scan --table-name theagentorg-tenancy   ->  "count": 0
+```
+
+Zero rows after every run this project had ever done. **Agreement is not
+correctness** — the same failure as a property test whose oracle moves with the code,
+which this file already records twice.
+
+Worse, the design that made it survivable made it silent: `record_run` returns False
+for "not configured" and **never raises**, deliberately, because an index is not the
+run's record and must not fail a run that has already done its work. Right decision;
+it also means the only symptom was an empty screen.
+
+**Fixed at the mechanism.** The gate is `TENANCY_TABLE`, read with **no default** —
+`config.TENANCY_TABLE` carries one, and consulting it here would make indexing
+unconditional, so every hermetic test driving `graph.run_pipeline` would reach
+DynamoDB. Two tests now hold the two halves apart:
+`test_reader_scoping` asserts the four gates **name** the same variable *and pins the
+literal*; `test_run_index_is_reachable` asserts something **sets** it, in
+`run-pipeline.yml` and in `amplify.yml`.
+
+**The deployed app was missing both data variables**, and both fail silently:
+
+| | unset behaviour |
+|---|---|
+| `TENANCY_TABLE` | every reader reports `indexed: false` — reads as "you have no runs" |
+| `QUEUE_BACKEND` | defaults to `memory`, an in-process dict in a Lambda that exits: an approval returns **200** and opens no gate |
+
+Verified end to end afterwards — a real dispatched run (`35005926426`) indexed the
+first row this table has ever held, and the writer path is the deployed one:
+
+```
+TENANT#tenant-zero  RUN#95685400-…  ticket 57  status running     <- the pipeline
+TENANT#tenant-zero  REPO#a10ba7dd-…                               <- the web writer
+runs.list_runs("tenant-zero")  ->  indexed: true, 1 run
+```
+
+**WHAT STILL DOES NOT WORK, and it is a different gap.** `verdict`,
+`scan_provenance` and `blocking` come back `null`, because those live in the run's
+**state document** and `gates.load` reads `STATE_BACKEND=local` — a JSONL artifact on
+the Actions runner. `theagentorg-runs` is also empty (Count 0) and the Amplify compute
+role has `implicitDeny` on it. `detail.py` degrades correctly, logging a warning and
+showing the indexed row. Closing it means putting the pipeline on
+`STATE_BACKEND=dynamodb`, which `run-pipeline.yml`'s own header records as measured to
+break every stage after `plan`.
+
 ---
 
 All five phases and **nineteen lanes** are merged; the app runs locally, on Cognito, with
