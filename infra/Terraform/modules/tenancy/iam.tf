@@ -90,13 +90,6 @@ data "aws_iam_policy_document" "tenant_scoped" {
   }
 }
 
-resource "aws_iam_policy" "tenant_scoped" {
-  name        = "${var.name}-tenancy-scoped"
-  description = "Own-tenant partition only, via the dynamodb:LeadingKeys condition"
-  policy      = data.aws_iam_policy_document.tenant_scoped.json
-  tags        = var.tags
-}
-
 # The role the web app assumes PER REQUEST, tagged with the tenant from the
 # verified Cognito claim. `max_session_duration` is the AWS floor of one hour:
 # these credentials are minted per request and cached for the request, so a long
@@ -155,11 +148,56 @@ data "aws_iam_policy_document" "assume_tenant_scoped" {
   }
 }
 
-resource "aws_iam_role_policy_attachment" "tenant_scoped" {
+################################################################################
+# INLINE, NOT A MANAGED POLICY PLUS AN ATTACHMENT, AND THAT IS A MEASUREMENT
+# RATHER THAN A STYLE CHOICE.
+#
+# Both halves of this module were `aws_iam_policy` + `aws_iam_role_policy_attachment`
+# until 2026-09-15, and the apply for `e2e4423` FAILED on all three attachments:
+#
+#   AccessDenied ... iam:AttachRolePolicy on resource:
+#     role/theagentorg-shared-tenancy-scoped
+#     role/theagentorg-shared-agentcore-runtime-role
+#     role/theagentorg-shared-worker-task-role
+#
+# The CI role's policy DOES name `iam:AttachRolePolicy` -- and grants it on
+# `Resource: arn:aws:iam::339712964409:policy/theagentorg-shared-*`. That action
+# is authorised against the ROLE being written to, not against the policy being
+# attached (the policy travels as the `iam:PolicyARN` condition key), so the
+# statement can never match and the grant is dead text. Measured with
+# `simulate-principal-policy`, which is this repository's instrument for exactly
+# this question:
+#
+#   iam:AttachRolePolicy  role/theagentorg-shared-tenancy-scoped     implicitDeny
+#   iam:AttachRolePolicy  policy/theagentorg-shared-tenancy-scoped   implicitDeny
+#   iam:PutRolePolicy     role/theagentorg-shared-tenancy-scoped     allowed
+#   iam:PutRolePolicy     role/theagentorg-shared-worker-task-role   allowed
+#   iam:PutRolePolicy     role/theagentorg-shared-agentcore-runtime-role  allowed
+#
+# So inline is what CI can already write. The alternative -- widening
+# `github-actions-role` to attach any managed policy to any `theagentorg-shared-*`
+# role -- is refused on the precedent this project already set for
+# `iam:CreateServiceLinkedRole`: that one was performed by hand once rather than
+# granting CI standing power to mint roles for any AWS service.
+#
+# **IT IS ALSO THE STRONGER FORM HERE, AND THAT IS NOT A CONSOLATION.** The failed
+# apply left the account in a state worth remembering: the role existed, the
+# managed policy existed, and the two were not connected -- so the role granted
+# NOTHING while `aws iam get-policy` answered perfectly. `preflight_tenancy.py`
+# read the document through `get-policy` and reported check 8 PASSED, all four
+# rows correct, against a principal subject to none of it. An inline policy cannot
+# reach that state: the document IS the role's, or `get-role-policy` raises.
+#
+# THE COST, STATED: an inline policy takes no tags, so `var.tags` does not reach
+# these two documents. They are named `${var.name}-*` and live on roles that carry
+# the tags, which is how they stay findable.
+################################################################################
+resource "aws_iam_role_policy" "tenant_scoped" {
   count = length(aws_iam_role.tenant_scoped)
 
-  role       = aws_iam_role.tenant_scoped[0].name
-  policy_arn = aws_iam_policy.tenant_scoped.arn
+  name   = "${var.name}-tenancy-scoped"
+  role   = aws_iam_role.tenant_scoped[0].id
+  policy = data.aws_iam_policy_document.tenant_scoped.json
 }
 
 ################################################################################
@@ -215,16 +253,21 @@ data "aws_iam_policy_document" "service" {
   }
 }
 
-resource "aws_iam_policy" "service" {
-  name        = "${var.name}-tenancy-service"
-  description = "Cross-tenant access for the pipeline; no Scan, no LeadingKeys"
-  policy      = data.aws_iam_policy_document.service.json
-  tags        = var.tags
-}
-
-resource "aws_iam_role_policy_attachment" "service" {
+# INLINE for the reason spelled out above the tenant-scoped policy: CI holds
+# `iam:PutRolePolicy` on `role/theagentorg-shared-*` and does not hold
+# `iam:AttachRolePolicy` on anything at all.
+#
+# ONE DOCUMENT, WRITTEN ONCE PER ROLE. With a managed policy the same ARN was
+# attached to every principal here; inline means one copy per role, all rendered
+# from `data.aws_iam_policy_document.service` so there is still exactly one
+# declaration of what the pipeline may do. The `element(split(...))` is unchanged:
+# `aws_iam_role_policy.role` takes a name, and `service_role_arns` carries ARNs
+# because a module output is the only ARN this root can hand over without
+# assembling one from account id and name.
+resource "aws_iam_role_policy" "service" {
   for_each = toset(var.service_role_arns)
 
-  role       = element(split("/", each.value), length(split("/", each.value)) - 1)
-  policy_arn = aws_iam_policy.service.arn
+  name   = "${var.name}-tenancy-service"
+  role   = element(split("/", each.value), length(split("/", each.value)) - 1)
+  policy = data.aws_iam_policy_document.service.json
 }
