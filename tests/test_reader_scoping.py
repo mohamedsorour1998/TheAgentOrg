@@ -247,3 +247,70 @@ def test_the_per_tenant_handle_cache_is_keyed_by_tenant():
         f"cached handle hands the second tenant of a process a client built from "
         f"the FIRST tenant's credential."
     )
+
+
+# ── the gate: one env var across a writer and three readers ──────────────────
+
+def test_the_writer_and_every_reader_name_THE_SAME_env_var():
+    """FOUR DECLARATIONS OF ONE FACT, and they were wrong together until 2026-09-15.
+
+    `run_index` writes the run row; `runs.py`, `detail.py` and `repositories.py` read
+    it. Each decides "is the tenancy index configured?" from an environment variable,
+    and each declared that variable separately. They agreed on `TENANT_DB` -- a
+    POSTGRES DSN -- while step 8 had already repointed the readers at DynamoDB and the
+    DynamoDB-only decision guaranteed the DSN would never be set.
+
+    So all four agreed, all four were consistent, and the deployed run list was empty
+    for a reason no log line named. `aws dynamodb scan` read `"count": 0` after every
+    run this project has ever done.
+
+    **AGREEMENT IS NOT CORRECTNESS**, which is why this test also pins the LITERAL.
+    Asserting only that the four match would have passed throughout the outage --
+    exactly the "property checked against an oracle that moves with it" failure this
+    repository has measured twice, in `SEVERITY_ORDER` and in `VERDICT_ARGUMENTS`.
+    """
+    sources = [
+        "agentorg/tenancy/run_index.py",
+        "web/lib/reader/runs.py",
+        "web/lib/reader/detail.py",
+        "web/lib/reader/repositories.py",
+    ]
+
+    for rel in sources:
+        tree = ast.parse((REPO_ROOT / rel).read_text())
+        names = {
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "environ"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        }
+        # The writer holds the name in a module constant rather than inline, so the
+        # call-site scan above cannot see it. Both shapes are read, because a test
+        # that only understood one would silently stop covering the other.
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "_TABLE_ENV"
+                    and isinstance(node.value, ast.Constant)):
+                names.add(node.value.value)
+
+        assert names, (
+            f"{rel} reads no environment variable at all; this test would pin nothing. "
+            f"If the gate moved, move this assertion with it."
+        )
+        assert "TENANCY_TABLE" in names, (
+            f"{rel} gates the tenancy index on {sorted(names)} and not on "
+            f"`TENANCY_TABLE`. If it names a DSN, the writer and the readers are "
+            f"pointed at two different databases and the run list is silently empty."
+        )
+        assert "TENANT_DB" not in names, (
+            f"{rel} still reads `TENANT_DB`, a POSTGRES DSN. The operator's decision "
+            f"is DynamoDB only, so that variable is never set and this gate is always "
+            f"closed -- which reads as 'this tenant has no runs'."
+        )

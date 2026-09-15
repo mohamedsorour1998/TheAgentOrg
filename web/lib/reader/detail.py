@@ -54,9 +54,13 @@ def _fail(message: str, detail: str = "") -> int:
     return 0
 
 
-def _database_path() -> str:
-    """The tenancy database, or "". Same env var the writer reads -- `TENANT_DB`."""
-    return os.environ.get("TENANT_DB", "").strip()
+def _index_table_name() -> str:
+    """The tenancy table, or "". Same env var the writer reads -- `TENANCY_TABLE`.
+
+    It was `TENANT_DB`, a Postgres DSN, until 2026-09-15 -- see `runs.py` for what
+    that cost. One spelling across the writer and all three readers.
+    """
+    return os.environ.get("TENANCY_TABLE", "").strip()
 
 
 def _load(tenant_id: str, run_id: str):
@@ -71,7 +75,7 @@ def _load(tenant_id: str, run_id: str):
     read, and hiding it would be the same conflation `approve_server._awaiting`
     avoids by returning its unreadable count.
     """
-    path = _database_path()
+    path = _index_table_name()
     if not path:
         raise accessors.NotFound("no run index is configured")
 

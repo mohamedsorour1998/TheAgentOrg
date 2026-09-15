@@ -146,9 +146,9 @@ def list_runs(tenant_id: str) -> dict:
     """Every run this tenant owns, newest first, and whether anything indexes them.
 
     `indexed: false` with an empty list is NOT the same fact as `indexed: true` with
-    an empty list. See `_database_path`.
+    an empty list. See `_index_table_name`.
     """
-    path = _database_path()
+    path = _index_table_name()
     if not path:
         return {"runs": [], "indexed": False}
 
@@ -188,7 +188,7 @@ def run_facts(tenant_id: str, run_id: str) -> dict:
     could read. Fail-closed, and the same direction `_summary` takes with a null
     verdict.
     """
-    path = _database_path()
+    path = _index_table_name()
     if not path:
         # No index means no ownership record, so ownership cannot be established --
         # and an approval must not proceed on a run whose tenant is unknown. Reported
@@ -242,7 +242,7 @@ def list_repositories(tenant_id: str) -> dict:
     and `authz.decide` refuses against an empty list, so a tenant that has connected
     nothing cannot approve anything.
     """
-    path = _database_path()
+    path = _index_table_name()
     if not path:
         return {"repositories": [], "indexed": False}
 
@@ -253,37 +253,48 @@ def list_repositories(tenant_id: str) -> dict:
     }
 
 
-def _database_path() -> str:
-    """The tenancy database, or "" when there is none.
+def _index_table_name() -> str:
+    """The tenancy table, or "" when there is none.
 
-    THE SAME ENV VAR THE WRITER READS -- `TENANT_DB`, matching
-    `agentorg/tenancy/run_index.py:70`. One name, so a deployment that indexes runs
-    and a reader that lists them cannot be pointed at different files. Read at CALL
-    time, never bound at import, for the reason every knob in `config.py` gives.
+    THE SAME ENV VAR THE WRITER READS -- `TENANCY_TABLE`, matching
+    `agentorg/tenancy/run_index._index_table_name`. Named rather than line-numbered:
+    six cross-referenced line numbers in this repository are already stale. One name,
+    so a deployment that indexes runs and a reader that lists them cannot be pointed
+    at different stores. Read at CALL time, never bound at import, for the reason
+    every knob in `config.py` gives.
+
+    **IT WAS `TENANT_DB` -- A POSTGRES DSN -- UNTIL 2026-09-15, AND THAT IS WHY THE
+    DEPLOYED RUN LIST WAS ALWAYS EMPTY.** Step 8 repointed these readers at DynamoDB
+    and left the gate naming the DSN, which the DynamoDB-only decision guarantees is
+    never set. So every screen took the `indexed: false` branch below and said so
+    honestly, about a configuration nobody had chosen. The writer had the same gate
+    and no-opped for the same reason: `aws dynamodb scan` read `"count": 0`.
 
     NOT in `config.py`, for the reason the writer states there: that module has 36
-    importers and this is one optional path's location.
+    importers and this is one optional path's location. `config.TENANCY_TABLE` exists
+    and is deliberately NOT consulted -- it carries a default, and a default here
+    would make "not configured" unreachable, collapsing the three states below into
+    two.
 
-    A BLANK IS A LEGITIMATE STATE, NOT AN ERROR, and this is the correction the
-    integrator flagged. `run_index.record_run` is a **no-op** when `TENANT_DB` is
-    unset, so the single-tenant deployment writes no rows at all -- and a reader that
-    raised there would turn the normal single-tenant configuration into a 500 on
-    every screen.
+    A BLANK IS A LEGITIMATE STATE, NOT AN ERROR. `run_index.record_run` is a **no-op**
+    when `TENANCY_TABLE` is unset, so the single-tenant deployment writes no rows at
+    all -- and a reader that raised there would turn the normal single-tenant
+    configuration into a 500 on every screen.
 
     So the reader distinguishes three states rather than two, because they want
     different fixes and a reader that conflated them would be the "did not run versus
     passed" defect:
 
-        TENANT_DB unset        -> `indexed: false`, an EMPTY list. Nothing indexes
-                                  runs here; a UI says so rather than showing zero.
-        TENANT_DB set, no rows -> `indexed: true`, an empty list. This tenant has
-                                  genuinely had no runs.
-        TENANT_DB set, rows    -> `indexed: true`, the rows.
+        TENANCY_TABLE unset        -> `indexed: false`, an EMPTY list. Nothing indexes
+                                      runs here; a UI says so rather than showing zero.
+        TENANCY_TABLE set, no rows -> `indexed: true`, an empty list. This tenant has
+                                      genuinely had no runs.
+        TENANCY_TABLE set, rows    -> `indexed: true`, the rows.
 
     An empty list ALONE cannot tell the first two apart, which is why `indexed`
     travels beside it.
     """
-    return os.environ.get("TENANT_DB", "").strip()
+    return os.environ.get("TENANCY_TABLE", "").strip()
 
 
 def main() -> int:

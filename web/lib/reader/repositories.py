@@ -51,9 +51,13 @@ def _fail(message: str, detail: str = "") -> int:
     return 0
 
 
-def _database_path() -> str:
-    """The tenancy database, or "". Same env var the writer and reader share."""
-    return os.environ.get("TENANT_DB", "").strip()
+def _index_table_name() -> str:
+    """The tenancy table, or "". Same env var the writer reads -- `TENANCY_TABLE`.
+
+    It was `TENANT_DB`, a Postgres DSN, until 2026-09-15 -- see `runs.py` for what
+    that cost. One spelling across the writer and all three readers.
+    """
+    return os.environ.get("TENANCY_TABLE", "").strip()
 
 
 def set_scope(tenant_id: str, full_names: list[str], by: str) -> dict:
@@ -71,7 +75,7 @@ def set_scope(tenant_id: str, full_names: list[str], by: str) -> dict:
     write were refused by a trigger, the response would show it missing instead of
     reassuring the caller that it landed.
     """
-    path = _database_path()
+    path = _index_table_name()
     if not path:
         return {"repositories": [], "indexed": False}
 
