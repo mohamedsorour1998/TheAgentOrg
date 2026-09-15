@@ -32,7 +32,24 @@ import json
 
 from scripts.preflight import CheckFailed, _aws
 
-# The policy whose whole purpose is this refusal.
+# The policy whose whole purpose is this refusal, and the role that CARRIES it.
+#
+# BOTH NAMES, BECAUSE THE PAIR IS THE FACT UNDER TEST. Until 2026-09-15 this read
+# a managed policy by ARN through `iam get-policy`, and that call succeeds for a
+# policy attached to NOTHING -- which is exactly the state the failed apply for
+# `e2e4423` left behind. Measured that day, against a role whose
+# `list-attached-role-policies` and `list-role-policies` were both empty:
+#
+#   tag=t1 -> TENANT#t1   allowed        tag=t1 -> Query gsi1  explicitDeny
+#   tag=t1 -> TENANT#t2   implicitDeny   -> check 8 PASSED
+#   no tag -> TENANT#t1   implicitDeny
+#
+# Four correct rows about a document no principal was subject to. The docstring
+# above argues this check reads from the ACCOUNT because "a policy that exists in
+# a `.tf` file and was never applied is precisely the failure this check exists to
+# catch" -- and it stopped one step short of "applied, and attached to nothing".
+# `get-role-policy` cannot: the document it returns IS the role's, or it raises.
+ROLE_NAME = "theagentorg-shared-tenancy-scoped"
 POLICY_NAME = "theagentorg-shared-tenancy-scoped"
 TABLE_NAME = "theagentorg-tenancy"
 
@@ -44,36 +61,41 @@ _TENANT = "t1"
 _OTHER = "t2"
 
 
-def _policy_document(account: str) -> str:
-    """The DEPLOYED policy, read back from IAM as a compact JSON string.
+def _policy_document() -> str:
+    """The policy AS THE ROLE CARRIES IT, read back from IAM as compact JSON.
 
     Read from the ACCOUNT rather than rendered from the Terraform source, which
     is the entire point: a policy that exists in a `.tf` file and was never
     applied is precisely the failure this check exists to catch.
+
+    Read off the ROLE rather than by policy ARN, which is the half that was
+    missing until 2026-09-15 -- see the note beside `ROLE_NAME`. `get-policy`
+    answers for a document attached to nobody; `get-role-policy` answers only for
+    one this principal is actually subject to. One call instead of two, because an
+    inline policy has no version list.
 
     Through `_aws`, not boto3, following that helper's own stated reason -- the
     command is the thing a reader re-runs by hand from this script's output, so
     the script runs the same command rather than a boto3 equivalent that happens
     to agree.
     """
-    arn = f"arn:aws:iam::{account}:policy/{POLICY_NAME}"
     try:
-        version = _aws(
-            "iam", "get-policy", "--policy-arn", arn,
-            "--query", "Policy.DefaultVersionId", "--output", "text",
+        raw = _aws(
+            "iam", "get-role-policy",
+            "--role-name", ROLE_NAME,
+            "--policy-name", POLICY_NAME,
+            "--query", "PolicyDocument", "--output", "json",
         )
     except CheckFailed as exc:
         raise CheckFailed(
-            f"{POLICY_NAME} was not found in {account}. The tenancy module has "
-            f"not been applied, so NOTHING is constraining the web path to its "
-            f"own tenant.\n{exc}"
+            f"role {ROLE_NAME} does not carry an inline policy named "
+            f"{POLICY_NAME}. Either the tenancy module has not been applied, or "
+            f"it applied and the policy did not land on the role -- which is the "
+            f"state the failed apply for e2e4423 left, and in which the role can "
+            f"be assumed and grants NOTHING. Either way, nothing is constraining "
+            f"the web path to its own tenant.\n{exc}"
         ) from exc
 
-    raw = _aws(
-        "iam", "get-policy-version", "--policy-arn", arn,
-        "--version-id", version, "--query", "PolicyVersion.Document",
-        "--output", "json",
-    )
     # The CLI decodes the url-encoded document into JSON; `simulate-custom-policy`
     # wants it back as a single string, so it is re-serialised compactly here.
     return json.dumps(json.loads(raw))
@@ -128,7 +150,7 @@ def check_leading_keys_refuses_another_tenant(account: str, region: str = "us-ea
     the request is refused only because nothing allows it, which stops being true
     the moment somebody widens a resource list while fixing a permissions error.
     """
-    policy = _policy_document(account)
+    policy = _policy_document()
     table_arn = f"arn:aws:dynamodb:{region}:{account}:table/{TABLE_NAME}"
     lines: list[str] = []
     problems: list[str] = []
