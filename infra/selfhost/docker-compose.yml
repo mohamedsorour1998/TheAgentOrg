@@ -44,44 +44,21 @@ services:
   # could be enqueued and not recorded, or recorded and not enqueued, with no
   # transaction spanning the pair -- and the queue's whole correctness argument
   # (a pause is a durable ROW) rests on the row and the run agreeing.
-  postgres:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_DB: agentorg
-      POSTGRES_USER: agentorg
-      # A DEVELOPMENT PASSWORD, IN A FILE THAT IS COMMITTED. It is safe only
-      # because nothing here is published: `ports` is bound to 127.0.0.1 below,
-      # so the database is unreachable from outside this host. Publishing it to
-      # 0.0.0.0 with this password would expose the audit trail to the network.
-      POSTGRES_PASSWORD: selfhost-dev-only
-    ports:
-      # 127.0.0.1 IS LOAD-BEARING, not cosmetic. `- "5432:5432"` binds 0.0.0.0
-      # and Docker's rules bypass most host firewalls, so the shorter form would
-      # put this database on every interface the host has.
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      # `pg_isready` rather than a TCP probe: Postgres accepts connections
-      # several seconds before it will answer a query, so a port check reports
-      # healthy while the worker's first statement still fails.
-      test: ["CMD-SHELL", "pg_isready -U agentorg -d agentorg"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
+  # ─────────────────────────────────────────────────────────────────────────
+  # THE POSTGRES SERVICE IS GONE, 2026-09-10. See
+  # `docs/design/dynamodb-migration.md`.
+  #
+  # Tenancy, the queue and the run index live in DynamoDB now. There is no port
+  # to publish, no DSN, no password and no volume -- which is the whole reason
+  # the migration happened: Amplify's SSR compute cannot join a VPC, so a
+  # Postgres the deployed app could reach had to be a Postgres on the public
+  # internet.
+  #
+  # CREDENTIALS COME FROM THE OPERATOR'S OWN AWS SESSION, mounted read-only into
+  # the containers below. There is no static key in this file and there must
+  # never be one.
+  # ─────────────────────────────────────────────────────────────────────────
 
-  # ── THE LOCAL MODEL ────────────────────────────────────────────────────────
-  #
-  # Serves an OpenAI-compatible API, which is the seam `config.LLM_BASE_URL`
-  # already routes to. Nothing in `agentorg/` knows this is ollama.
-  #
-  # NO GPU RESERVATION. On Apple silicon the Docker VM has no access to the
-  # Metal GPU, so a containerised model runs on CPU and is SLOWER than the same
-  # model served natively -- which is why the measurement in the runbook was
-  # taken against a host-native ollama. On a Linux host with nvidia-container-
-  # toolkit, add a `deploy.resources.reservations.devices` block; it is omitted
-  # rather than included-and-ignored, because a reservation that silently does
-  # nothing is a performance claim nobody can check.
   model:
     image: ollama/ollama:latest
     ports:
@@ -134,15 +111,25 @@ services:
       # served traffic: `/ping` answered 200 and every `/invocations` raised
       # FileNotFoundError.
       dockerfile: infra/worker/Dockerfile
+    # `postgres` used to be the other entry here and was removed with the service.
+    # `model-pull` stays: the worker must not start before the model is present.
     depends_on:
-      postgres:
-        condition: service_healthy
       model-pull:
         condition: service_completed_successfully
     environment:
+      # ── DynamoDB replaces the DSN ────────────────────────────────────────
+      # No host, no port, no password. boto3 resolves credentials from the
+      # mounted session below, and the SSR compute role does it ambiently when
+      # deployed. `TENANCY_TABLE` carries the same literal as
+      # `infra/Terraform/modules/tenancy`'s default -- two places, one value,
+      # deliberately, so changing one obliges changing the other.
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+      AWS_CONFIG_FILE: /aws/config
+      TENANCY_TABLE: theagentorg-tenancy
       # THE QUEUE AND THE APP SHARE ONE DATABASE. See the postgres service.
-      QUEUE_BACKEND: postgres
-      QUEUE_DSN: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
+      QUEUE_BACKEND: dynamodb
 
       # THE MODEL. `LLM_API_KEY` MUST NOT BE `not-needed`: both
       # `llm.available()` and `common/model.create_model()` refuse that literal,
@@ -175,6 +162,11 @@ services:
       SCANNERS_REQUIRED: "true"
       SECURITY_BLOCK_THRESHOLD: high
       AGENT_ROLE: security
+    volumes:
+      # READ-ONLY, and the operator's real session rather than a key pasted into
+      # this file. CLAUDE.md's rule is zero static AWS keys anywhere; a compose
+      # file is exactly the place one would otherwise land and be committed.
+      - ${HOME}/.aws:/aws:ro
     # The image's default command serves the HTTP agent; this service runs the
     # worker loop instead. `--forever` claims jobs until stopped.
     command: ["python", "scripts/worker.py", "--forever"]
@@ -222,20 +214,49 @@ services:
       # framework here would become a dependency of all five arm64 agent containers.
       # That decision is what lets this service need no image of its own.
       dockerfile: infra/worker/Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      QUEUE_BACKEND: postgres
-      QUEUE_DSN: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
-      TENANT_DB: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
+      # ── DynamoDB replaces the DSN ────────────────────────────────────────
+      # No host, no port, no password. boto3 resolves credentials from the
+      # mounted session below, and the SSR compute role does it ambiently when
+      # deployed. `TENANCY_TABLE` carries the same literal as
+      # `infra/Terraform/modules/tenancy`'s default -- two places, one value,
+      # deliberately, so changing one obliges changing the other.
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+      AWS_CONFIG_FILE: /aws/config
+      TENANCY_TABLE: theagentorg-tenancy
+      QUEUE_BACKEND: dynamodb
       OFFLINE: "true"
+      # LLM_DISABLED IS LOAD-BEARING HERE, AND IT WAS MISSING UNTIL 2026-09-15.
+      #
+      # `OFFLINE` closes the GitHub seam and does NOT disable the model -- CLAUDE.md
+      # records that trap twice. `llm.available()` falls through to boto3 whenever
+      # `LLM_BASE_URL` is empty, and this service now MOUNTS a credential for
+      # DynamoDB, so it found one: measured, `api` could make a live billable
+      # Bedrock call inside a stack whose entire claim is that it is self-hosted.
+      #
+      # Before the DynamoDB migration this was impossible -- there were no
+      # credentials anywhere in this file, and the test forbidding them is what
+      # made `LLM_BASE_URL` unnecessary to think about. Adding credentials removed
+      # that guard along with the thing it guarded.
+      #
+      # The control plane never calls a model: submit, watch and cancel are
+      # `queue.enqueue` / `jobs_for_run` / `complete`, and `grep` for `llm.` in
+      # `agentorg/api/` matches one COMMENT and nothing else. So disabling it
+      # states a fact rather than imposing a restriction.
+      LLM_DISABLED: "true"
       # 0.0.0.0 INSIDE THE NAMESPACE, 127.0.0.1 ON THE HOST. The container has to bind
       # every interface of its own namespace or the port publish below reaches nothing —
       # and the publish is what keeps it off the network. `main()` defaults to loopback
       # precisely so this has to be said out loud; see api/server.py.
       API_HOST: 0.0.0.0
       API_PORT: "8100"
+    volumes:
+      # READ-ONLY, and the operator's real session rather than a key pasted into
+      # this file. CLAUDE.md's rule is zero static AWS keys anywhere; a compose
+      # file is exactly the place one would otherwise land and be committed.
+      - ${HOME}/.aws:/aws:ro
     command: ["python", "-m", "agentorg.api.server"]
     ports:
       # 127.0.0.1 ONLY. Every authenticated route refuses without a provisioned M2M key
@@ -248,11 +269,18 @@ services:
     build:
       context: ../../web
       dockerfile: Dockerfile
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
+      # ── DynamoDB replaces the DSN ────────────────────────────────────────
+      # No host, no port, no password. boto3 resolves credentials from the
+      # mounted session below, and the SSR compute role does it ambiently when
+      # deployed. `TENANCY_TABLE` carries the same literal as
+      # `infra/Terraform/modules/tenancy`'s default -- two places, one value,
+      # deliberately, so changing one obliges changing the other.
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
+      AWS_CONFIG_FILE: /aws/config
+      TENANCY_TABLE: theagentorg-tenancy
       # FAKE, LOCAL-ONLY VALUES. `next build` refuses without all four — Lane I's
       # fail-closed design firing at build time — and GitHub OAuth cannot complete
       # against them, which is correct for a self-hosted stack nobody registered an app
@@ -301,10 +329,13 @@ services:
       # first is what produced `PipelineError: the pipeline read failed` with
       # `/api/session` still answering 200 — the session path never touches a reader, so
       # the missing variable was invisible on the first route anybody checks.
-      TENANT_DB: postgresql://agentorg_app:selfhost-dev-only-app@postgres:5432/agentorg
       OFFLINE: "true"
       LLM_DISABLED: "true"
     volumes:
+      # READ-ONLY, and the operator's real session rather than a key pasted into
+      # this file. CLAUDE.md's rule is zero static AWS keys anywhere; a compose
+      # file is exactly the place one would otherwise land and be committed.
+      - ${HOME}/.aws:/aws:ro
       # `agentorg/` MOUNTED AT /app/agentorg, NOT AT /repo, and the path is the whole
       # point. `pipeline.ts:220-224` spawns the reader with `cwd: REPO_ROOT` and
       # `PYTHONPATH: REPO_ROOT`, both computed from `import.meta.url` — which inside this
@@ -355,5 +386,4 @@ services:
   # POST endpoints resume a paused pipeline past the security gate.
 
 volumes:
-  pgdata:
   ollama:
