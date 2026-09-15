@@ -208,9 +208,9 @@ Ordered so that nothing is deleted before its replacement is proven.
 | 3 | `tenancy/accessors.py` gains a DynamoDB backend | the 52 leak tests pass against it | **PARTIAL** — `_dynamo_store.py` + 9 tests done (item ops, GSI1 breach, pagination). The ~20 accessors are NOT ported |
 | 4 | The two NEW leak tests (§6) | both fail before the IAM policy exists, pass after | **DONE** — GSI1 breach is hermetic; the tag breach is `preflight.py` check 8, measured below |
 | 5 | Queue backend | `test_queue_*.py` 92 tests pass | **DONE** — `_dynamo.py`, 7 tests |
-| 6 | STS session-tag path for the web app | wrong-tag breach refused, measured | OPEN |
-| 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured | OPEN |
-| 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app | **DONE** — all four readers on boto3 |
+| 6 | STS session-tag path for the web app | wrong-tag breach refused, measured | **DONE 2026-09-15** — `db/tenant_credentials.py` + the readers + the Amplify compute role. Check 8 measured against the deployed policy; see below |
+| 7 | **Per-tenant AssumeRole in the worker** (§4) | a stage cannot read another tenant, measured | OPEN — and `runtime_enabled` is false, so no worker is deployed to fix. The pipeline runs on GitHub Actions |
+| 8 | `web/lib/reader/*.py` repointed | `/runs` returns real rows on the deployed app | **DONE** — all four readers on boto3, and since step 6 on a SCOPED credential rather than the ambient one |
 | 9 | Backfill marker + one-time copy from Postgres | row counts agree both ways | **MOOT** — see below |
 | 10 | Retire the Postgres path | only after 1–9; `_memory.py` stays forever | OPEN |
 
@@ -290,6 +290,95 @@ index Deny REMOVED -> Query gsi1 = implicitDeny
 **So §4's claim that the web path gets a STRONGER guarantee is now measured
 rather than argued.** The pipeline half is still the open regression, and step 7
 is still mandatory.
+
+### THAT CHECK PASSED AGAINST A ROLE THAT GRANTED NOTHING — 2026-09-15
+
+**Read the section above again knowing this.** Every row of it was correct, and
+for five days it described a document no principal in the account was subject to.
+
+Three defects in one chain, each hiding the next, exactly as the three Bedrock
+IAM defects did in August:
+
+1. **CI could not attach the policy.** The apply for `e2e4423` failed with
+   `AccessDenied` on `iam:AttachRolePolicy` for all three roles. The CI role
+   *does* name that action — scoped to
+   `Resource: policy/theagentorg-shared-*`. It is authorised against the **role**
+   being written to, not the policy being attached (the policy travels as the
+   `iam:PolicyARN` condition key), so the statement can never match:
+
+   ```
+   iam:AttachRolePolicy  role/theagentorg-shared-tenancy-scoped     implicitDeny
+   iam:AttachRolePolicy  policy/theagentorg-shared-tenancy-scoped   implicitDeny
+   iam:PutRolePolicy     role/theagentorg-shared-tenancy-scoped     allowed
+   ```
+
+2. **So the role existed and carried nothing.** `get-role` answered, `list-role-policies`
+   and `list-attached-role-policies` were both empty. The role could be assumed
+   and granted zero.
+
+3. **And check 8 reported PASSED.** It read the policy through
+   `iam get-policy` + `get-policy-version`, which answer perfectly for a managed
+   policy attached to nobody. Four correct rows about an unenforced document.
+
+The check's own docstring named the gap it stopped one step short of: it reads
+from the account rather than from Terraform because *"a policy that exists in a
+`.tf` file and was never applied is precisely the failure this check exists to
+catch"* — and **"applied, and attached to nothing" is the next step along that
+same line**, with the same symptom. A check present, enumerable, and enforcing
+nothing.
+
+Both halves are fixed at the mechanism. The policies are now **inline**
+(`aws_iam_role_policy`), which is what CI can write and which cannot reach the
+detached state at all; and `preflight_tenancy` reads them with
+`iam get-role-policy`, so the document it evaluates **is** the role's or the call
+raises. Measured before and after with nothing in AWS changing between the runs:
+
+```
+before   ... four correct rows ...   -> check 8 PASSED
+after    -> FAILED: role theagentorg-shared-tenancy-scoped does not carry an
+            inline policy named theagentorg-shared-tenancy-scoped
+after the apply landed               -> check 8 PASSED, and now it means it
+```
+
+**Widening CI's IAM grant was the alternative and was refused**, on the
+precedent already set for `iam:CreateServiceLinkedRole`: performed by hand once
+rather than granting CI standing power over IAM.
+
+### AND THE SSR RUNTIME HAD NO CREDENTIAL AT ALL — 2026-09-15
+
+Step 6's other half, and it would have made the whole chain unreachable even
+with the policy correctly attached. Measured on the live app `d15q7tk62qnlxt`:
+
+```
+computeRoleArn      null    (app)
+computeRoleArn      null    (branch main)
+iamServiceRoleArn   AmplifySSRLoggingRole-6b5aca0f...   -> 4 CloudWatch actions
+```
+
+**The two role fields are not interchangeable**, and having one is why nothing
+looked unconfigured: `iamServiceRoleArn` is what Amplify assumes on the app's
+behalf for logging, `computeRoleArn` is what the SSR Lambda **runs as**. So step
+8's readers were repointed at DynamoDB onto a runtime that could write logs and
+reach nothing else.
+
+`infra/amplify/spec.py` + `provision.py` now set it, reading the role back from
+IAM rather than assembling its ARN — an assembled ARN also succeeds for a role
+nobody created. Applied and verified:
+
+```
+computeRoleArn  arn:aws:iam::339712964409:role/theagentorg-shared-amplify-compute
+environment     TENANT_SCOPED_ROLE_ARN=arn:aws:iam::...:role/theagentorg-shared-tenancy-scoped
+carried_keys    ['AMPLIFY_DIFF_DEPLOY', '_LIVE_UPDATES']
+```
+
+**THE SELF-HOSTED STACK IS OUT OF SCOPE FOR THIS GUARANTEE, AND ALWAYS WAS.**
+`TENANT_SCOPED_ROLE_ARN` is blank in `infra/selfhost/docker-compose.yml` because
+the role's trust policy names one principal — the Amplify compute role — while a
+laptop session is `arn:aws:iam::339712964409:root`, which can read every
+partition regardless of any policy. That is the Postgres superuser finding again:
+as the table OWNER every RLS policy was decoration while `pg_policies` listed all
+six. Granting a development machine the ability to act as any tenant is an
+operator's decision, not a compose-file one.
 
 ### One design assumption that did not survive contact
 
