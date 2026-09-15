@@ -51,7 +51,7 @@
 # server component doesn't have access to those environment variables by default.
 # This behavior is intentional to protect any secrets stored in environment
 # variables". `next build` reads `.env.production`, and Next loads it again at
-# request time, so these four lines are the bridge. Without them every read is
+# request time, so these six lines are the bridge. Without them every read is
 # `undefined` after a green deploy.
 #
 # **AND THE BUILD CAN NO LONGER CATCH A MISSING ONE.** Before Lane P,
@@ -71,7 +71,7 @@
 #
 # ── WHAT IS DELIBERATELY ABSENT, AND WHY EACH ONE ─────────────────────────────
 #
-# **NONE OF THE FOUR VALUES BELOW IS A SECRET, AND THAT IS A REQUIREMENT.**
+# **NONE OF THE SIX VALUES BELOW IS A SECRET, AND THAT IS A REQUIREMENT.**
 # Amplify environment variables are visible in the console, in build logs, and --
 # because these lines write them into `.env.production` -- inside a build
 # artifact anyone who can call `get-job` may download. A credential here would be
@@ -173,6 +173,30 @@ applications:
             # this unset therefore produces an app whose run list errors -- loudly
             # -- instead of one quietly serving cross-tenant reads.
             - echo "TENANT_SCOPED_ROLE_ARN=${TENANT_SCOPED_ROLE_ARN}" >> .env.production
+            # THE TENANCY TABLE, AND THE GATE THAT DECIDES WHETHER THE UI HAS
+            # ANYTHING TO SHOW.
+            #
+            # `web/lib/reader/*.py` and `agentorg/tenancy/run_index.py` both read
+            # this name to answer "is the tenancy index configured?". Until
+            # 2026-09-15 they read `TENANT_DB` -- a Postgres DSN the DynamoDB-only
+            # decision guarantees is never set -- so the writer no-opped, every
+            # reader took its `indexed: false` branch, and `aws dynamodb scan`
+            # returned "count": 0 after every run this project had ever done.
+            #
+            # UNSET IS A LEGITIMATE STATE, not an error: it means "nothing indexes
+            # runs in this deployment", and a reader says so rather than showing an
+            # empty list that reads as "you have no runs". That is exactly why it
+            # must be set HERE -- the honest empty screen and the configured one are
+            # indistinguishable to a judge.
+            - echo "TENANCY_TABLE=${TENANCY_TABLE}" >> .env.production
+            # THE QUEUE THE APPROVAL WRITE GOES TO.
+            #
+            # `POST /api/approvals` spawns `web/lib/reader/approve.py`, which calls
+            # `queue.resume`. `config.QUEUE_BACKEND` defaults to `memory` -- an
+            # in-process dict -- so without this line a reviewer's approval is
+            # written into a Lambda that then exits, and the gate never opens. The
+            # response is a 200 either way, which is this project's signature defect.
+            - echo "QUEUE_BACKEND=${QUEUE_BACKEND}" >> .env.production
             - npm run typecheck
             - npm run lint
             - npm run test

@@ -43,7 +43,7 @@ from infra.amplify import spec
 # it would pass while both moved together — the second-declaration argument this
 # repository applies to `COMMENT_HEADER` and to `REAL_SCANNER_LINES`.
 #
-# The three Lane P names that are deliberately NOT here are as important as the five
+# The three Lane P names that are deliberately NOT here are as important as the seven
 # that are: COGNITO_CLIENT_SECRET (the client is provisioned public, so there is no
 # secret), and DATABASE_URL / TENANT_DB (a DSN carries a password and does not belong in
 # a committed file). `amplify.yml` records both exclusions in prose.
@@ -64,6 +64,13 @@ EXPECTED_RUNTIME_VARIABLES = frozenset({
     # a secret -- it names a role and authorises nothing on its own -- so unlike
     # the three exclusions above it belongs on this list.
     "TENANT_SCOPED_ROLE_ARN",
+    # Added 2026-09-15. The tenancy index gate and the queue the approval write
+    # lands in. Both were ABSENT from the deployed app, and both fail silently:
+    # an unset TENANCY_TABLE makes every reader report `indexed: false`, and an
+    # unset QUEUE_BACKEND defaults to an in-process queue inside a Lambda that
+    # exits -- a 200 for an approval that opened no gate.
+    "TENANCY_TABLE",
+    "QUEUE_BACKEND",
 })
 
 
@@ -206,6 +213,7 @@ def test_merging_preserves_keys_this_module_does_not_own():
         COGNITO_ISSUER="fresh", COGNITO_CLIENT_ID="c",
         COGNITO_DOMAIN="d", AUTH_URL="https://example.invalid",
         TENANT_SCOPED_ROLE_ARN="arn:aws:iam::339712964409:role/fake-scoped",
+        TENANCY_TABLE="t", QUEUE_BACKEND="dynamodb",
     )
 
     assert merged["AMPLIFY_DIFF_DEPLOY"] == "false", (

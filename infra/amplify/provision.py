@@ -323,6 +323,13 @@ if __name__ == "__main__":
         # rather than falling back to the compute role, which can read every
         # tenant.
         TENANT_SCOPED_ROLE_ARN=os.getenv("TENANT_SCOPED_ROLE_ARN", ""),
+        # Defaulted rather than required from the environment: unlike the ARN
+        # and the Cognito values, both have one correct answer for this
+        # deployment. `theagentorg-tenancy` is the same literal the Terraform
+        # module and `config.TENANCY_TABLE` carry; `dynamodb` is the only queue
+        # backend this deployment has.
+        TENANCY_TABLE=os.getenv("TENANCY_TABLE", "theagentorg-tenancy"),
+        QUEUE_BACKEND=os.getenv("QUEUE_BACKEND", "dynamodb"),
     )
     for key, value in result.items():
         print(f"{key}: {value}")

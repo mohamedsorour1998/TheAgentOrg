@@ -158,6 +158,24 @@ env:
   STATE_ARTIFACT: run-state-${{ github.run_id }}
   # THE KNOB THAT MAKES THIS THE CLOUD PIPELINE. See the header.
   REMOTE_AGENTS: "true"
+  # THE TENANCY INDEX, AND WITHOUT IT THE WEB APP HAS NOTHING TO LIST.
+  #
+  # `agentorg/tenancy/run_index.py` writes one row per run here, and
+  # `web/lib/reader/runs.py` reads it. Both gate on this name: unset means "this
+  # deployment does not index runs", which `record_run` honours by returning False
+  # and NEVER RAISING -- an index is not the run's record, so it may not fail a run
+  # that has already done its work.
+  #
+  # That design is right and it is why the gap survived. Until 2026-09-15 both
+  # halves read `TENANT_DB`, a Postgres DSN the DynamoDB-only decision guarantees is
+  # never set, so every run indexed nothing with every job green. Measured on the
+  # live table: `aws dynamodb scan --table-name theagentorg-tenancy` -> "count": 0,
+  # after every run this project has ever done.
+  #
+  # Workflow-level rather than per-job because FOUR jobs run stages that index or
+  # revise a run (plan, develop, sre, promote) and a per-job list is four chances to
+  # omit one -- and the omission is silent by construction.
+  TENANCY_TABLE: theagentorg-tenancy
 
 jobs:
   # ── PLAN ────────────────────────────────────────────────────────────────────

@@ -40,6 +40,8 @@ LIVE_VALUES = {
     # DynamoDB migration -- the readers assume it per request so the CREDENTIAL
     # carries the tenant, not just the argument.
     "TENANT_SCOPED_ROLE_ARN": "arn:aws:iam::339712964409:role/theagentorg-shared-tenancy-scoped",
+    "TENANCY_TABLE": "theagentorg-tenancy",
+    "QUEUE_BACKEND": "dynamodb",
 }
 
 
