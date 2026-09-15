@@ -171,14 +171,6 @@ function refuseBadInput(email: string, password: string): void {
  */
 function describeFailure(error: unknown): SignUpRefused {
   const name = (error as { name?: string }).name ?? "";
-  if (name === "UsernameExistsException") {
-    // THE ORACLE, CLOSED. Same words as the success path's instruction, so a
-    // caller watching responses cannot tell the two apart.
-    return new SignUpRefused(
-      "check your email for a verification code",
-      "if an account already exists, no new code was sent",
-    );
-  }
   if (name === "InvalidPasswordException") {
     return new SignUpRefused("that password does not meet the policy");
   }
@@ -213,6 +205,20 @@ export async function startSignUp(email: string, password: string): Promise<{ te
       }),
     );
   } catch (error) {
+    // **THE EXISTENCE ORACLE IS CLOSED BY RETURNING, NOT BY REWORDING.** A first
+    // attempt matched the message and still answered a different STATUS -- 202 for
+    // a new address, 400 for one already registered -- which is the same oracle
+    // one layer down. Measured against the deployed app before this line existed:
+    //
+    //   new      -> http 202 {"ok":true,"next":"confirm"}
+    //   existing -> http 400 {"error":"check your email for a verification code"}
+    //
+    // So this path now succeeds exactly as a real sign-up does. The caller is told
+    // to check their email, which is true: an account exists and they can ask for
+    // a code with `action: "resend"`. Nothing new was created and no code was sent.
+    if ((error as { name?: string }).name === "UsernameExistsException") {
+      return { tenantId: "" };
+    }
     throw describeFailure(error);
   }
   return { tenantId };
