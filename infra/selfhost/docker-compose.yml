@@ -281,6 +281,34 @@ services:
       AWS_SHARED_CREDENTIALS_FILE: /aws/credentials
       AWS_CONFIG_FILE: /aws/config
       TENANCY_TABLE: theagentorg-tenancy
+
+      # ── THE TENANT-SCOPED ROLE, AND WHY IT IS EMPTY HERE ──────────────────
+      #
+      # Step 6 of the DynamoDB migration put `web/lib/reader/*.py` on a
+      # credential minted by `db/tenant_credentials`, so a read is constrained by
+      # `dynamodb:LeadingKeys` and not only by the `tenant_id` argument. Empty
+      # means the readers RAISE rather than falling back to the ambient
+      # credential -- which is the whole point, and it is why this line is here
+      # blank rather than absent: an absent variable reads as an oversight.
+      #
+      # **IT IS EMPTY BECAUSE NOTHING ON A LAPTOP CAN ASSUME THAT ROLE, AND
+      # SETTING IT WOULD BE A TRUST-POLICY DECISION, NOT A COMPOSE ONE.**
+      # Measured 2026-09-15: the role's trust policy names exactly one principal,
+      # `theagentorg-shared-amplify-compute`, and the local session is
+      # `arn:aws:iam::339712964409:root`. So a value here fails at STS. Making it
+      # work means adding a local principal to `tenant_assumer_arns` in
+      # `infra/Terraform/environments/shared/main.tf` -- i.e. granting something
+      # on a developer's machine the ability to act as ANY tenant. That is an
+      # operator's call and is deliberately not made here.
+      #
+      # **SO THE SELF-HOSTED STACK DOES NOT DEMONSTRATE TENANT ISOLATION, AND
+      # DID NOT BEFORE THIS EITHER.** It mounts `${HOME}/.aws`, and that session
+      # is the account root -- which can read every partition regardless of any
+      # policy, exactly as a Postgres superuser skipped every RLS policy while
+      # `pg_policies` still listed all six. The deployed app is where the chain
+      # is real; `scripts/preflight_tenancy.py` is what proves it.
+      TENANT_SCOPED_ROLE_ARN: ""
+
       # FAKE, LOCAL-ONLY VALUES. `next build` refuses without all four — Lane I's
       # fail-closed design firing at build time — and GitHub OAuth cannot complete
       # against them, which is correct for a self-hosted stack nobody registered an app
