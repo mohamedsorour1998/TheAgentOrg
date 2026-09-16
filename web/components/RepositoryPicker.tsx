@@ -23,11 +23,10 @@
 
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { getJson, sendJson } from "@/components/fetching";
-import { EmptyState, ErrorState, Skeleton } from "@/components/primitives";
+import { ErrorState, Skeleton } from "@/components/primitives";
 import type { RepositoryListResponse, RepositoryView } from "@/lib/endpoints";
 
 type Failure = { error: string; fix: string; detail?: string };
@@ -52,6 +51,20 @@ export function RepositoryPicker() {
   const [failure, setFailure] = useState<Failure | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  /**
+   * The `owner/name` being typed. THE LIST USED TO BE UNADDABLE, and that was a
+   * real gap rather than a strict design: the checkboxes are built from what the
+   * server already holds, so an account could UNTICK a repository and never add
+   * one. It read as a picker and behaved as a remover.
+   *
+   * The original design assumed a CANDIDATE list -- every repository the linked
+   * GitHub grant could see, ticked where in scope. That list no longer exists:
+   * `github_linked` is permanently false because nothing writes an `accounts` row
+   * any more, so `server` is just the in-scope set and the intersection of "what
+   * you may add" with "what you already have" is everything you already have.
+   */
+  const [typed, setTyped] = useState("");
+  const [typoed, setTypoed] = useState("");
 
   /** Seed BOTH from one answer, so the baseline and the boxes cannot drift. */
   const adopt = useCallback((repositories: RepositoryView[]) => {
@@ -108,26 +121,40 @@ export function RepositoryPicker() {
     setSaved(true);
   }
 
+  /**
+   * Stage a repository locally; `Save scope` is still the one write.
+   *
+   * VALIDATED HERE ONLY TO SAY SO IMMEDIATELY. `PUT /api/repositories` revalidates
+   * every entry server-side and is the check that matters -- this one exists so a
+   * person learns about a typo while they are looking at the field, rather than
+   * after a round trip.
+   */
+  function addTyped() {
+    const name = typed.trim();
+    if (name.split("/").length !== 2 || name.split("/").some((part) => !part)) {
+      setTypoed("Use the form owner/name, as GitHub writes it.");
+      return;
+    }
+    if (server?.some((r) => r.full_name === name)) {
+      // TICK IT RATHER THAN REFUSING. Somebody typing a name that is already
+      // listed-but-unticked means to put it back in scope, and an error would
+      // make them hunt for a row they cannot see the state of.
+      setTicked((was) => new Set(was).add(name));
+      setTyped("");
+      setTypoed("");
+      return;
+    }
+    setServer((was) => [...(was ?? []), { full_name: name, in_scope: false }]);
+    setTicked((was) => new Set(was).add(name));
+    setTyped("");
+    setTypoed("");
+  }
+
   if (failure && server === null) {
     return <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />;
   }
   if (server === null) return <Skeleton label="Loading repositories" rows={5} />;
 
-  if (server.length === 0) {
-    return (
-      <EmptyState
-        headline="No repositories are visible to this account"
-        action={
-          "This usually means no GitHub grant is linked rather than that the " +
-          "account owns nothing. Check the link, then reload this page."
-        }
-      >
-        <Link href="/account" className="btn" style={{ display: "inline-block" }}>
-          Go to the GitHub link
-        </Link>
-      </EmptyState>
-    );
-  }
 
   const unsaved = !sameScope(ticked, scopeOf(server));
 
@@ -137,10 +164,63 @@ export function RepositoryPicker() {
         <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />
       ) : null}
 
+      {/* ADD A REPOSITORY. A form so Enter submits, which is how anyone types
+          one name after another. `noValidate` is absent deliberately -- there is
+          no `pattern` here, because the message this component writes is better
+          than the browser's, and the server revalidates regardless. */}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          addTyped();
+        }}
+        style={{ display: "grid", gap: "var(--gap-2)" }}
+      >
+        <label htmlFor="add-repository" className="eyebrow" style={{ margin: 0 }}>
+          Add a repository
+        </label>
+        <div style={{ display: "flex", gap: "var(--gap-3)", flexWrap: "wrap" }}>
+          <input
+            id="add-repository"
+            value={typed}
+            onChange={(event) => {
+              setTyped(event.target.value);
+              setTypoed("");
+            }}
+            placeholder="owner/name"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            style={{ padding: "var(--gap-2)", font: "inherit", minWidth: "22ch", flex: "1 1 22ch" }}
+          />
+          <button type="submit" className="btn" disabled={!typed.trim()}>
+            Add
+          </button>
+        </div>
+        <p role="status" style={{ margin: 0, fontSize: "var(--step-small)" }}>
+          {typoed ? (
+            <span style={{ color: "var(--rose)" }}>{typoed}</span>
+          ) : (
+            <span style={{ opacity: 0.8 }}>
+              Adding puts it in the list below, ticked. Nothing reaches the server
+              until you save.
+            </span>
+          )}
+        </p>
+      </form>
+
       <fieldset style={{ border: "1px solid var(--border)", borderRadius: "4px", padding: "var(--gap-4)", margin: 0 }}>
         <legend className="eyebrow" style={{ margin: 0, padding: "0 var(--gap-2)" }}>
           In scope
         </legend>
+        {server.length === 0 ? (
+          // NOT AN ERROR, AND NOT A DEAD END. A tenant that has added nothing yet
+          // is the normal state of every account the moment it signs up -- and the
+          // screen must say so while still offering the field above.
+          <p className="prose" style={{ margin: 0, fontSize: "var(--step-small)" }}>
+            Nothing is in scope yet, so no run can be started. Add a repository
+            above.
+          </p>
+        ) : null}
         <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "var(--gap-1)" }}>
           {server.map((repository) => {
             const id = `scope-${repository.full_name}`;

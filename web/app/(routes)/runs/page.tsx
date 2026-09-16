@@ -20,6 +20,7 @@
  */
 
 import { RunList } from "@/components/RunList";
+import { StartRun } from "@/components/StartRun";
 
 export const metadata = {
   title: "Runs · The Agent Org",
@@ -45,6 +46,10 @@ export default function RunsPage() {
         verdict means security has not run yet, which is not the same as a run
         that was cleared.
       </p>
+
+      <div style={{ marginBottom: "var(--gap-8)" }}>
+        <StartRun />
+      </div>
 
       <RunList />
     </div>

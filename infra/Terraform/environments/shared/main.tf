@@ -305,6 +305,48 @@ resource "aws_iam_role_policy" "amplify_compute_may_read_signup_secret" {
   policy = data.aws_iam_policy_document.amplify_compute_may_read_signup_secret.json
 }
 
+################################################################################
+# THE DISPATCH TOKEN, so a run can be started from the UI.
+#
+# Until now the only ways to start a run were opening an issue on the target
+# repository (EventBridge dispatches it) or typing `gh workflow run`. Neither is
+# available to somebody looking at the application, so the product had a run LIST
+# and no way to produce a run -- which reads as a demo that only works if you
+# already know the CLI.
+#
+# **THIS IS THE SAME TOKEN AND THE SAME WORKFLOW EVENTBRIDGE ALREADY DISPATCHES.**
+# `modules/ingress` reads this secret at PLAN time for its API-destination
+# connection and POSTs to `run-pipeline.yml/dispatches`; this grant lets the SSR
+# runtime make the identical call. No new credential, no new path into the
+# pipeline, and the token's scope is unchanged -- `actions: write` on this
+# repository plus contents/issues/pull-requests on the target.
+#
+# **A NAME WITH A WILDCARD TAIL, NOT A PREFIX.** Secrets Manager appends six random
+# characters to every ARN, so an exact ARN cannot be written in advance and a bare
+# `theagentorg-shared-*` would also match the WEBHOOK secret -- the HMAC key that is
+# the only access control on the public Function URL. The tail wildcard is what
+# keeps this to one secret.
+#
+# WHAT LIMITS THE BLAST RADIUS IS THE ROUTE, NOT THIS POLICY, and that is worth
+# being explicit about: holding this token means being able to start any workflow
+# run on this repository. `POST /api/runs` requires a session, requires the tenant
+# to have the target repository IN SCOPE, and sends a fixed workflow name with
+# validated inputs. The policy grants a capability; the route is what refuses.
+data "aws_iam_policy_document" "amplify_compute_may_read_dispatch_token" {
+  statement {
+    sid       = "ReadTheDispatchTokenAndNothingElse"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:theagentorg-shared-github-dispatch-token-*"]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_read_dispatch_token" {
+  name   = "read-dispatch-token"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_read_dispatch_token.json
+}
+
 module "tenancy" {
   source = "../../modules/tenancy"
 

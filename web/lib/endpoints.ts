@@ -306,6 +306,20 @@ export const ENDPOINTS: readonly Endpoint[] = [
     mutates: true,
   },
   {
+    // START A RUN. `mutates: true` and POST-only: a run invokes five Bedrock
+    // runtimes and opens a pull request, so a GET would be reachable by a prefetch.
+    //
+    // AUTHENTICATED, and the session is not the only gate -- the route refuses
+    // unless the tenant has a repository in scope, read through the tenant-scoped
+    // credential. The dispatch token can start any workflow on this repository;
+    // what bounds this route is that check.
+    method: "POST",
+    path: "/api/runs",
+    summary: "Dispatch run-pipeline.yml for this tenant, with trigger=ui",
+    authenticated: true,
+    mutates: true,
+  },
+  {
     method: "GET",
     path: "/api/runs",
     summary: "This tenant's runs, newest first",
