@@ -232,8 +232,7 @@ textarea {
 }
 
 .shell-head-inner,
-.shell-main,
-.shell-foot-inner {
+.shell-main {
   max-width: 78rem;
   margin: 0 auto;
   padding: var(--gap-4) var(--gap-6);
@@ -244,12 +243,6 @@ textarea {
   flex: 1;
   padding-top: var(--gap-8);
   padding-bottom: var(--gap-12);
-}
-
-.shell-foot {
-  border-top: 1px solid var(--border);
-  color: var(--text-muted);
-  font-size: var(--step-caption);
 }
 
 .nav {
@@ -425,8 +418,7 @@ table.data tr[data-blocking="true"] td:first-child {
 
 @media (max-width: 40rem) {
   .shell-head-inner,
-  .shell-main,
-  .shell-foot-inner {
+  .shell-main {
     padding-left: var(--gap-4);
     padding-right: var(--gap-4);
   }

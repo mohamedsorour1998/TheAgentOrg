@@ -50,9 +50,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     } catch {
       return refuse("the request could not be parsed", 400);
     }
-    const { ticket_id, ticket_text, poisoned } = (body ?? {}) as Record<string, unknown>;
-    if (typeof ticket_id !== "string" || typeof ticket_text !== "string") {
-      return refuse("a ticket number and a ticket description are required", 400);
+    const { title, body: detail, poisoned } = (body ?? {}) as Record<string, unknown>;
+    if (typeof title !== "string") {
+      return refuse("say what the change should do", 400);
     }
 
     // SCOPE FIRST, before the token is even read. A caller with nothing in scope
@@ -69,14 +69,18 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     try {
-      await startRun({
-        ticketId: ticket_id.trim(),
-        ticketText: ticket_text,
+      const started = await startRun({
+        title,
+        body: typeof detail === "string" ? detail : "",
         // COERCED HERE, not trusted. A body may send anything; `poisoned` decides
-        // whether the developer agent seeds a real credential into the diff, so it
+        // whether the developer agent puts a fake credential in the diff, so it
         // must be exactly true and never a truthy string.
         poisoned: poisoned === true,
       });
+      // THE ISSUE NUMBER IS RETURNED because this route CREATED it -- it is a real
+      // thing the caller can open, unlike the run id, which does not exist until
+      // the plan job mints it.
+      return NextResponse.json({ ok: true, issue: started.issue, next: "poll" }, { status: 202 });
     } catch (error) {
       if (error instanceof DispatchRefused) {
         return NextResponse.json(
@@ -87,7 +91,8 @@ export async function POST(request: Request): Promise<NextResponse> {
       throw error;
     }
 
-    // 202: accepted, not created. Nothing exists to point at yet -- see `startRun`.
+    // Unreachable: the try block above returns on success. Kept so the function
+    // has one exit type rather than relying on TypeScript's inference of a throw.
     return NextResponse.json({ ok: true, next: "poll" }, { status: 202 });
   } catch (error) {
     return unhandled(error);

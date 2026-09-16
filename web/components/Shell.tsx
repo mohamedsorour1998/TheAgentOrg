@@ -64,13 +64,6 @@ export function Shell({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      <footer className="shell-foot">
-        <div className="shell-foot-inner">
-          A security verdict here is computed by five lines of Python with no
-          model in it. Findings report the index of an added line, not a position
-          in the file.
-        </div>
-      </footer>
     </div>
   );
 }
