@@ -4688,6 +4688,61 @@ neither. **That is the isolation, demonstrated rather than argued.**
   the hosted UI kept serving `redirect_mismatch` for about two minutes: **Cognito
   propagation, not configuration.** Re-check before diagnosing.
 
+### THE PRODUCT HAD A RUN LIST AND NO WAY TO PRODUCE A RUN — 2026-09-16
+
+Three gaps the operator found by *using* the deployed app, none of which any gate
+could see. Recorded together because they share a cause: each component was correct
+and the product between them was not.
+
+| Reported | Cause |
+|---|---|
+| detail page showed `NOT STARTED` for a stage that had **succeeded** | the run's record is an Actions artifact the SSR runtime cannot read |
+| no way to **add** a repository | the checkboxes are built from what is already in scope |
+| no way to **start a run** | the only entry points were an issue webhook and `gh workflow run` |
+
+**THE DETAIL PAGE WAS THE SERIOUS ONE.** It rendered `plan NOT STARTED`,
+`STARTED BY unknown`, `AGENTS ANSWERED FROM not recorded` and `No model calls` for a
+run whose `plan` job had completed successfully. **Saying a stage did not run when it
+did is this repository's signature conflation, rendered on a screen.** The tenancy
+row holds eight scalar fields; everything else lives in the document `gates.save`
+writes to a runner-local JSONL, handed forward as `run-state-<id>`.
+
+Fixed by denormalising a **copy** of the document onto the index row —
+`run_index` already writes that row at `plan` and refreshes it from `_emit` at every
+stage, so it needed no workflow change. `gates.save` remains the single writer of the
+run's record. Bounded at 350 KB against DynamoDB's 400 KB item limit, because
+`record_run` swallows every failure and an oversized item would make indexing stop
+*silently* — and it writes `state_too_large` rather than omitting the field, since an
+absent document and an oversized one want different fixes.
+
+**NOTHING IS INVENTED, and that is what the tests guard.** `StageView` carries
+`attempt`, `exit_code` and `enqueued_at` — **queue** facts, and an Actions run never
+enters the queue. They are reported as one attempt, no exit code, no timestamps. A
+fabricated `exit_code: 0` would be the single field on that screen capable of
+contradicting the run it describes. A stage not reached is **omitted**, which renders
+as not started, which is true. A gate is `paused` only while the run is **live**: on a
+run that already ended, "your decision" invites a click that cannot exist.
+
+Verified on the deployed app — `STARTED BY ui`, `AGENTS ANSWERED FROM model`,
+`plan DONE`, `gate1 WAITING FOR A PERSON`, `$0.0025 PRICED TOTAL`.
+
+**`trigger` IS NOW `ui`, AND THE VALUE HAD TO BE NEW.** `test_trigger_provenance`
+asserts the values DIFFER, because identical ones make a run recording the value
+indistinguishable from one whose trigger was never set. `issue` = the rule sent it,
+`manual` = somebody typed it, `ui` = somebody clicked it.
+
+**WHAT BOUNDS `POST /api/runs` IS THE ROUTE, NOT THE IAM GRANT.** The dispatch token
+can start any workflow on this repository, so the route reads the caller's own scope
+through the tenant-scoped credential **first** and refuses an empty one — before the
+token is fetched. It also refuses a non-numeric ticket, because CLAUDE.md already
+measured that such a run executes while every stage comment goes nowhere, silently,
+with every job green.
+
+**A CANCELLED RUN STAYS `running` IN THE INDEX, AND THAT IS A REAL GAP.** GitHub
+cancelling a job runs none of this project's code, so `_emit` never fires and the
+status is never revised. Small, and worth knowing before reading a stale row as a
+stuck pipeline.
+
 ### A MISSING FIELD IS A 200 AND A BLANK SCREEN — 2026-09-15
 
 Reported by the operator: clicking a run id gave **"This page couldn't load"**. Every
