@@ -26,6 +26,7 @@ import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 
 import { CostPanel } from "@/components/CostPanel";
+import { AgentOutput } from "@/components/AgentOutput";
 import { DecisionLog, GateControls } from "@/components/GateControls";
 import { ErrorState, Mark, Skeleton } from "@/components/primitives";
 import { SecurityPanel } from "@/components/SecurityPanel";
@@ -217,6 +218,15 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
           </h2>
           <StreamPanel stream={stream} ended={ended} now={now} />
         </section>
+      </div>
+
+      {/* WHAT THE AGENTS PRODUCED, above the security verdict and below the spine.
+          The spine says which stages ran; this says what they did. It sits before
+          the verdict because the verdict is the CONCLUSION drawn from the diff
+          immediately above it, and a reader who meets the conclusion first has
+          nothing to weigh it against. */}
+      <div style={{ margin: "var(--gap-12) 0" }}>
+        <AgentOutput plan={run.plan} dev={run.dev} review={run.review} sre={run.sre} />
       </div>
 
       <div style={{ margin: "var(--gap-12) 0" }}>

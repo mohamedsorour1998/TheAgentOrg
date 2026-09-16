@@ -198,7 +198,7 @@ export function RepositoryPicker() {
         </div>
         <p role="status" style={{ margin: 0, fontSize: "var(--step-small)" }}>
           {typoed ? (
-            <span style={{ color: "var(--rose)" }}>{typoed}</span>
+            <span style={{ color: "var(--refused)" }}>{typoed}</span>
           ) : (
             <span style={{ opacity: 0.8 }}>
               Adding puts it in the list below, ticked. Nothing reaches the server

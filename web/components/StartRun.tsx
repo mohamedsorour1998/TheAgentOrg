@@ -106,7 +106,7 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
 
       <form onSubmit={submit} style={{ display: "grid", gap: "var(--gap-3)", marginTop: "var(--gap-4)" }}>
         {problem ? (
-          <p role="alert" className="prose" style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--rose)" }}>
+          <p role="alert" className="prose" style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--refused)" }}>
             {problem.error}
             {problem.detail ? <span style={{ opacity: 0.85 }}> — {problem.detail}</span> : null}
           </p>

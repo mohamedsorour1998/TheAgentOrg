@@ -200,6 +200,47 @@ export interface DecisionView {
 }
 
 /** Everything one run's detail screen needs, in one response. */
+/**
+ * WHAT EACH AGENT PRODUCED, mirroring `agentorg/state.py`'s result models.
+ *
+ * These are VIEWS and every field is optional, which is the deliberate part: the
+ * Python side is the frozen contract and may ADD optional fields at any time, so a
+ * required field here would make this half refuse a run the other half considers
+ * valid. `SecurityView` and `DecisionView` above already take that shape.
+ *
+ * `pr_url` is on `DevView` because `github_ops` fills it, not the agent -- the same
+ * note `state.py` carries.
+ */
+export interface PlanView {
+  tasks?: string[];
+  acceptance_criteria?: string[];
+  target_files?: string[];
+  notes?: string;
+}
+
+export interface DevView {
+  branch?: string;
+  diff?: string;
+  summary?: string;
+  files_changed?: string[];
+  pr_url?: string;
+}
+
+export interface ReviewView {
+  verdict?: "approve" | "changes_requested";
+  comments?: { file?: string; line?: number; comment?: string }[];
+  must_fix?: string[];
+}
+
+export interface SREView {
+  verdict?: "go" | "no_go";
+  /** MEASURED on the runner, not the model's opinion -- see `agents/sre.py`. */
+  ci_status?: "passing" | "failing" | "unknown";
+  slo_checks?: { name?: string; status?: string; detail?: string }[];
+  estimated_cost_note?: string;
+  notes?: string;
+}
+
 export interface RunDetail extends RunSummary {
   ticket_text: string;
   /** `""` on a run written before the field existed -- render as unknown. */
@@ -213,4 +254,18 @@ export interface RunDetail extends RunSummary {
   security: SecurityView | null;
   /** Which gates are open for a decision RIGHT NOW. May be empty. */
   awaiting_gates: Gate[];
+
+  /**
+   * `null` MEANS THE STAGE HAS NOT RUN, and an empty object would mean it ran and
+   * produced nothing. Collapsing the two tells somebody the reviewer had no
+   * objections when the reviewer never ran -- the did-not-run-versus-passed
+   * conflation this repository exists to refuse.
+   */
+  plan: PlanView | null;
+  dev: DevView | null;
+  review: ReviewView | null;
+  sre: SREView | null;
+  /** Both are `null` on every run today: neither producer is wired into a stage. */
+  generated_tests: Record<string, unknown> | null;
+  retrieval: Record<string, unknown> | null;
 }

@@ -292,6 +292,32 @@ async function runDetail(tenantId: string, runId: string) {
     stages: state ? stagesFrom(state, row) : [],
     decisions: Array.isArray(state?.decisions) ? state.decisions : [],
     security,
+
+    // **WHAT THE AGENTS ACTUALLY SAID, which this screen did not show.** Reported
+    // from the deployed app: *"i dont understand how it is running and we have no
+    // info"*. The screen carried a status, a spine and a security verdict, so it
+    // could say a run had planned and developed while showing nothing either agent
+    // produced -- five agents' work rendered as five words.
+    //
+    // Every one of these was already on the row. `run_index` denormalises the whole
+    // state document, so this is a projection and not a new read: the plan's tasks
+    // and acceptance criteria, the diff the developer wrote, the reviewer's verdict
+    // and its `must_fix` list, and the SRE's measured CI plus its advisory checks.
+    //
+    // `null` IS KEPT DISTINCT FROM AN EMPTY OBJECT, the way `scan_provenance` keeps
+    // `""` distinct from `scanners`: `null` means the stage has not run, `{}` would
+    // mean it ran and produced nothing. A screen that renders those the same way
+    // tells somebody their reviewer had no objections when the reviewer never ran.
+    plan: (state?.plan ?? null) as Record<string, unknown> | null,
+    dev,
+    review: (state?.review ?? null) as Record<string, unknown> | null,
+    sre: (state?.sre ?? null) as Record<string, unknown> | null,
+    // Lane G's agent and Lane H's record. Both are `None` on every run today --
+    // neither is wired into a pipeline stage -- so these render as "not recorded"
+    // rather than as an absence of findings. Reading a missing producer as a clean
+    // result is this repository's signature defect.
+    generated_tests: (state?.generated_tests ?? null) as Record<string, unknown> | null,
+    retrieval: (state?.retrieval ?? null) as Record<string, unknown> | null,
     // **THE FIELD WHOSE ABSENCE BROKE THE WHOLE PAGE.** `runs/[runId]/page.tsx:192`
     // reads `run.awaiting_gates.length`, and an omitted key is `undefined`, so the
     // detail screen died in React with `Cannot read properties of undefined
@@ -299,11 +325,23 @@ async function runDetail(tenantId: string, runId: string) {
     // behind it all answered 200 with valid JSON, which is why nothing server-side
     // looked wrong.
     //
-    // `[]` IS THE TRUTHFUL VALUE HERE, not a placeholder. This lists the gates the
-    // QUEUE has paused, and a run on the GitHub Actions path never enters the queue
-    // -- so there is genuinely nothing awaiting a decision in it. A run paused at an
-    // Actions Environment is paused in GitHub, which this table cannot see.
-    awaiting_gates: [],
+    // **THIS WAS `[]`, AND THAT MADE THE APPROVE BUTTON UNREACHABLE.** The reasoning
+    // written here was that the field lists gates the QUEUE has paused, that an
+    // Actions run never enters the queue, and that a gate held by a GitHub
+    // Environment "is paused in GitHub, which this table cannot see". Every clause
+    // was true, and the conclusion was still wrong: `page.tsx:192` renders
+    // `GateControls` only `if (run.awaiting_gates.length > 0)`, so a hardcoded `[]`
+    // means **no run ever shows a gate control** -- and the approval route, the
+    // authorization, the dispatch to `pending_deployments` and the tests over all
+    // three were reachable by nothing. A correct answer nobody asks for.
+    //
+    // The premise is also obsolete. The table CAN see it now: `run_index` writes the
+    // state document onto the index row at every stage, and a gate is open exactly
+    // when the stage before it is done and no `HumanDecision` names it -- which is
+    // what `awaitingGates` reads, and what `run_facts` already decides approvals
+    // over. Deriving the screen from one source and the decision from another is how
+    // a button appears for a gate the server then refuses.
+    awaiting_gates: awaitingGates(state, String(state?.status ?? row.status ?? "")),
   };
 }
 

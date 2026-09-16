@@ -145,7 +145,7 @@ export function SignUpForm() {
           style={{
             margin: `0 0 var(--gap-4)`,
             fontSize: "var(--step-small)",
-            color: "var(--rose)",
+            color: "var(--refused)",
           }}
           role="alert"
         >

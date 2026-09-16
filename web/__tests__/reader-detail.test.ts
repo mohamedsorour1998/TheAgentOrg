@@ -170,6 +170,53 @@ describe("the detail screen reflects the run", () => {
     expect(cost.stages_priced).toBe(2);
     expect(cost.usd).toBe(0.0131);
   });
+
+  /**
+   * **THE SCREEN SHOWED A STATUS AND A SPINE AND NOTHING EITHER AGENT PRODUCED.**
+   * Reported from the deployed app: *"i dont understand how it is running and we
+   * have no info"*. Every field below was already on the index row, because
+   * `run_index` denormalises the whole state document — the screen was holding this
+   * data and not projecting it.
+   */
+  it("carries what each agent produced", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const answer = await detail();
+    expect((answer.plan as { tasks: string[] }).tasks).toEqual(["a"]);
+    expect((answer.dev as { branch: string }).branch).toBe("feat/x");
+    expect((answer.review as { verdict: string }).verdict).toBe("changes_requested");
+  });
+
+  it("a stage that has not run is null, never an empty result", async () => {
+    // `sre` is null on this run. `{}` would say the SRE ran and advised nothing —
+    // the did-not-run-versus-passed conflation, in the direction that reads as good
+    // news. `AgentOutput` renders null as "has not run" and cannot do that unless
+    // the reader keeps the two apart.
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const answer = await detail();
+    expect(answer.sre).toBeNull();
+  });
+
+  /**
+   * **THIS FIELD WAS HARDCODED `[]`, WHICH MADE THE APPROVE BUTTON UNREACHABLE.**
+   * `runs/[runId]/page.tsx:192` renders `GateControls` only when
+   * `awaiting_gates.length > 0`, so no run ever showed one — and the approval route,
+   * its authorization, its dispatch to `pending_deployments` and every test over the
+   * three were reached by nothing. The API was fixed while the UI still could not
+   * call it.
+   */
+  it("names the gate a live run is held at, so the control can be shown", async () => {
+    send.mockResolvedValue(
+      rowWith({ ...BLOCKED_STATE, status: "running", security: null, review: null, dev: null, decisions: [] }),
+    );
+    expect((await detail()).awaiting_gates).toEqual(["gate1"]);
+  });
+
+  it("a run that has ended offers no gate on the screen either", async () => {
+    // The screen and the decision must agree. Offering a control the server would
+    // then refuse is worse than offering none.
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    expect((await detail()).awaiting_gates).toEqual([]);
+  });
 });
 
 describe("run_facts — the contract an approval is decided over", () => {
