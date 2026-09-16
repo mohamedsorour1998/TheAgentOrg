@@ -208,6 +208,18 @@ async function runDetail(tenantId: string, runId: string) {
     // NULL RATHER THAN AN EMPTY OBJECT. An empty security panel and an unscanned run
     // must not render identically; `null` is what the UI reads as "not available".
     security: null,
+    // **THE FIELD WHOSE ABSENCE BROKE THE WHOLE PAGE.** `runs/[runId]/page.tsx:192`
+    // reads `run.awaiting_gates.length`, and an omitted key is `undefined`, so the
+    // detail screen died in React with `Cannot read properties of undefined
+    // (reading 'length')` -- rendered as "This page couldn't load". The three APIs
+    // behind it all answered 200 with valid JSON, which is why nothing server-side
+    // looked wrong.
+    //
+    // `[]` IS THE TRUTHFUL VALUE HERE, not a placeholder. This lists the gates the
+    // QUEUE has paused, and a run on the GitHub Actions path never enters the queue
+    // -- so there is genuinely nothing awaiting a decision in it. A run paused at an
+    // Actions Environment is paused in GitHub, which this table cannot see.
+    awaiting_gates: [],
   };
 }
 
@@ -256,10 +268,29 @@ export async function readTenancy(request: ReaderRequest): Promise<unknown> {
       // rather than as zero: `usd: null` means NOT PRICED and `0.0` means priced
       // and free, and collapsing them makes a missing table read as a free run.
       await requireRun(tenantId, needsRun());
-      return { run_id: request.run_id, stages: [], total_usd: null, stages_priced: 0 };
+      // EVERY FIELD `CostView` DECLARES. An earlier version returned a `total_usd`
+      // the contract does not have and omitted `findings`, which `CostPanel.tsx:166`
+      // reads as `findings.length` -- the same crash `awaiting_gates` caused, one
+      // screen over.
+      //
+      // `usd: null` means NOT PRICED and `0.0` would mean priced and free; Lane E
+      // measured that collapsing them makes a missing price table read as a free
+      // run. `cache_hit_rate: null` is the same distinction -- a zero denominator
+      // is not a zero rate.
+      return {
+        run_id: request.run_id,
+        usd: null,
+        stages_priced: 0,
+        stages: [],
+        cache_hit_rate: null,
+        findings: [],
+      };
     case "run_scoring":
       await requireRun(tenantId, needsRun());
-      return { run_id: request.run_id, rows: [], threshold: null };
+      // `scan_provenance: ""` is the fourth field `ScoringResponse` declares, and
+      // `""` is its documented "nobody recorded it" value -- rendered as unknown
+      // rather than as a measured mode.
+      return { run_id: request.run_id, threshold: null, rows: [], scan_provenance: "" };
     default:
       throw new ReadRefused(`unknown reader action ${JSON.stringify(request.action)}`);
   }
