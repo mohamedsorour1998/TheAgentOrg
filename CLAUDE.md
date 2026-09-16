@@ -4469,6 +4469,102 @@ partition regardless of policy — the Postgres-superuser finding again. `TENANT
 is therefore blank in the compose file, which makes the readers **raise** rather than
 silently read cross-tenant.
 
+### THE APPROVAL PATH WAS FIXED TWICE, AND THE SECOND FIX IS THE LESSON — 2026-09-16
+
+Every defect below was reported by USING the deployed product. None is visible to any
+of the eight gates, and two of them are the named patterns arriving in places this file
+had not recorded them before.
+
+**`run_facts` AND `run_detail` ARE DIFFERENT CONTRACTS, AND SERVING ONE FOR THE OTHER
+REFUSED EVERY APPROVAL.** `POST /api/approvals` answered `404 no such run` for a run
+plainly waiting at gate1. `authz.decide` reads five fields; `approvals.runFacts`
+compares `payload.tenant_id !== tenantId` as defence in depth; and the detail shape
+carries **no `tenant_id`** — so the comparison was `undefined !== "tenant-zero"` and
+refused everything. **It failed in the SAFE direction, which is exactly why nothing
+caught it**: a refusal reads as working authorization, and the only way to see it is to
+try to approve something.
+
+**THEN THE BUTTON TURNED OUT TO BE UNREACHABLE ANYWAY.** `runDetail` hardcoded
+`awaiting_gates: []`, and `runs/[runId]/page.tsx:192` renders `GateControls` only when
+that list is non-empty. So the route, its authorization, its dispatch to GitHub's
+`pending_deployments` and all the tests over them were reached by **nothing** — the
+second named pattern (*a feature complete, tested, and reached by nothing*), arriving in
+a **data field rather than a missing call**. The check this file prescribes for it —
+grep for the entry point — finds the call site and says it is wired, because it *is*
+wired; the value flowing through it is what makes the feature unreachable.
+
+The comment defending `[]` is worth reading because **every clause in it was true and
+the conclusion was wrong**: the field lists gates the QUEUE has paused, an Actions run
+never enters the queue, and a gate held by an Environment "is paused in GitHub, which
+this table cannot see". All correct when written, and obsolete the moment `run_index`
+began denormalising the state document onto the index row. **A comment that justifies a
+constant outlives the fact that justified it**, and it reads as a decision rather than
+as a stale premise. Both the screen and the decision now derive `awaiting_gates` from
+one function — deriving them separately is how a control appears for a gate the server
+then refuses.
+
+**A CSS CUSTOM PROPERTY THAT DOES NOT EXIST IS AN ERROR IN NO GATE.** Three components
+written the same day styled their refusal messages `color: var(--rose)`. There is no
+`--rose`; the token is `--refused`, and `#fb7185` is merely *commented* `/* rose */` in
+`globals.css` — so the colour's name was reached for instead of the token's. CSS falls
+through to inherited text with no warning anywhere: `eslint`, `tsc`, `vitest` and `next
+build` all passed, and **every error message on the sign-up, start-run and add-repository
+forms rendered as ordinary prose.**
+
+Now pinned by `web/components/__tests__/design-tokens.test.ts`, which cross-checks every
+`var(--token)` in `components/` and `app/` against the declarations in `globals.css`:
+
+```
+tokens declared in globals.css : 25
+distinct tokens used in tsx    : 22
+USED BUT NEVER DECLARED        : 0
+```
+
+**The zero has a positive control**, because a broken extraction regex reports it
+identically — the same check run against `HEAD~1` finds all three:
+
+```
+POSITIVE CONTROL -- the same check before the fix:
+  USED BUT NEVER DECLARED: 1
+   --rose  <- web/components/{RepositoryPicker,SignUpForm,StartRun}.tsx
+```
+
+RED, both halves: reintroducing `var(--rose)` fails the real assertion (`1 failed | 252
+passed`), and breaking the declaration regex fails the anti-vacuity test **first**
+(`2 failed | 251 passed`) rather than letting an empty match read as a clean tree.
+
+**AND THE TEST FILE'S OWN DOCSTRING BROKE THE BUILD ON ITS FIRST RUN**, which is worth
+more than the test: the prose quoted the CSS comment `/* rose */` verbatim inside a
+block comment, so `*/` closed the docstring early and the file failed to parse. Vitest
+reported **`Test Files 1 failed | 18 passed (19)` with `Tests 251 passed (251)`** — every
+test green, one whole file never executed. That is the failure shape this file already
+records twice; **read the FILE count**, and note that a repository which is 40–60%
+commentary will hit it whenever a comment quotes a comment.
+
+**THE LIVE PATH CANNOT BE PROBED FROM A LAPTOP, AND THAT IS THE SCOPING WORKING.** A
+probe driving the shipped reader against the shipped table failed with `AccessDenied`:
+the tenancy role's trust policy requires `sts:AssumeRole` **and** `sts:TagSession`, and
+only the Amplify compute role holds both. So the hermetic suite (which mocks
+`lib/dynamo/credentials`) and a laptop probe are *both* structurally unable to exercise
+the deployed read — the only instrument is a request against the running app, which is
+the `next start` + `curl -i` rule one layer further out.
+
+**AN INERT MUTATION, THE SIXTEENTH INSTANCE.** The RED step for `run_facts`'s most
+load-bearing field replaced `tenant_id: String(row.tenant_id ?? tenantId)` with
+`tenant_id: tenantId` and the suite stayed at **246 passed** — because the fixture row
+carried no `tenant_id`, so both spellings answered the argument. The guard for the field
+the cross-tenant check is decided over was **vacuous**, and it read exactly like a caught
+mutation. The failing case needs the two to DIFFER, which is precisely the case the
+check exists for: the fixture row now says `somebody-else`, and the mutation fails
+`1 failed | 246 passed`.
+
+**One measured fact worth keeping about the index row**: it carries
+`tenant_id` written from the **scope**, not from `RunState.tenant_id` — the live row for
+run `83f2906f…` reads `tenant_id: "tenant-zero"` while the state document inside it
+reads `tenant_id: ""`. That matters because `??` falls back on `null`/`undefined` and
+**not** on `""`: had the row carried the state's blank, every approval would have been
+refused again for a different reason.
+
 ### ONE POSTGRES-SHAPED FLAG KEPT THE WHOLE TENANCY UI DARK — 2026-09-15
 
 Found by being asked "is it all working?" rather than by any gate, and it is the
