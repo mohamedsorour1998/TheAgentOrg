@@ -226,7 +226,19 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
           immediately above it, and a reader who meets the conclusion first has
           nothing to weigh it against. */}
       <div style={{ margin: "var(--gap-12) 0" }}>
-        <AgentOutput plan={run.plan} dev={run.dev} review={run.review} sre={run.sre} />
+        {/* `?? null` IS NOT DEFENSIVE NOISE -- this page has already died once on
+            exactly this shape. `run.awaiting_gates.length` on an omitted key threw
+            `Cannot read properties of undefined` and the whole screen rendered as
+            "This page couldn't load", while all three APIs behind it answered 200
+            with valid JSON. An older cached response, or a reader that stops
+            projecting one of these, is `undefined` and not `null` -- and `undefined`
+            skips the "has not run" branch instead of taking it. */}
+        <AgentOutput
+          plan={run.plan ?? null}
+          dev={run.dev ?? null}
+          review={run.review ?? null}
+          sre={run.sre ?? null}
+        />
       </div>
 
       <div style={{ margin: "var(--gap-12) 0" }}>
