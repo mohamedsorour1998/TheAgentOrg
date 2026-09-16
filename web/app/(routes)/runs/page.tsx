@@ -21,6 +21,7 @@
 
 import { RunList } from "@/components/RunList";
 import { StartRun } from "@/components/StartRun";
+import { requireIdentity } from "@/lib/guard";
 
 export const metadata = {
   title: "Runs · The Agent Org",
@@ -29,7 +30,14 @@ export const metadata = {
     "blocked it, and whether real scanners produced that verdict.",
 };
 
-export default function RunsPage() {
+/**
+ * SIGNED OUT, SO NOTHING BELOW IS RENDERED. `requireIdentity` redirects rather
+ * than returning null -- see `lib/guard.ts` for why the no-token and the
+ * no-workspace cases get different destinations, and why neither can loop.
+ */
+export default async function RunsPage() {
+  await requireIdentity();
+
   return (
     <div>
       <p className="eyebrow">Run history</p>

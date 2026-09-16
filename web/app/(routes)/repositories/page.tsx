@@ -16,6 +16,7 @@
 import type { Metadata } from "next";
 
 import { RepositoryPicker } from "@/components/RepositoryPicker";
+import { requireIdentity } from "@/lib/guard";
 
 export const metadata: Metadata = {
   title: "Repositories · The Agent Org",
@@ -24,7 +25,14 @@ export const metadata: Metadata = {
     "scope may receive pull requests and comments from this pipeline.",
 };
 
-export default function RepositoriesPage() {
+/**
+ * SIGNED OUT, SO NOTHING BELOW IS RENDERED. `requireIdentity` redirects rather
+ * than returning null -- see `lib/guard.ts` for why the no-token and the
+ * no-workspace cases get different destinations, and why neither can loop.
+ */
+export default async function RepositoriesPage() {
+  await requireIdentity();
+
   return (
     <>
       <p className="eyebrow">Repositories</p>
