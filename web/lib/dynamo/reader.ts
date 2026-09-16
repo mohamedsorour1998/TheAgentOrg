@@ -405,3 +405,65 @@ export async function readTenancy(request: ReaderRequest): Promise<unknown> {
       throw new ReadRefused(`unknown reader action ${JSON.stringify(request.action)}`);
   }
 }
+
+export type ApproveRequest = {
+  run_id?: string;
+  gate?: string;
+  decision?: string;
+  by?: string;
+  reason?: string;
+  tenant_id?: string;
+};
+
+/**
+ * Record a gate decision, by releasing the GitHub Environment that holds the run.
+ *
+ * **OWNERSHIP FIRST, THROUGH THE TENANT-SCOPED CREDENTIAL**, exactly as the read path
+ * does — and it matters more here, because the next thing this does is let a change
+ * proceed toward `main`. A caller who does not own the run gets a refusal from a
+ * credential that physically cannot see another tenant's index row, so there is no
+ * branch in which a wrong-tenant approval reaches GitHub.
+ *
+ * `web/lib/authz.ts` has already refused ten other ways before this is called; this
+ * is the last one, and it is the only one AWS enforces rather than application code.
+ */
+export async function approveRun(request: ApproveRequest): Promise<unknown> {
+  const raw = request.tenant_id;
+  if (typeof raw !== "string" || !raw.trim()) {
+    throw new ReadRefused("the approval has no tenant, so it has no scope");
+  }
+  const tenantId = tenantForRunState(raw.trim());
+  const runId = request.run_id;
+  if (typeof runId !== "string" || !isSafeRunId(runId)) throw new ReadRefused("no such run");
+  if (!indexTableName()) throw new ReadRefused("no run index is configured");
+
+  const row = await requireRun(tenantId, runId);
+
+  const ciRunId = typeof row.ci_run_id === "string" ? row.ci_run_id : "";
+  if (!ciRunId) {
+    // HONEST, AND NOT A CRASH. A run indexed before `ci_run_id` was recorded, or one
+    // executed anywhere but GitHub Actions, genuinely cannot be approved from here
+    // -- and saying "no such gate" would send somebody looking for a gate that is
+    // waiting perfectly well.
+    throw new ReadRefused(
+      "this run cannot be approved from here",
+      "it carries no GitHub run id, so there is no Environment to release. Approve " +
+        "it in the Actions run itself.",
+    );
+  }
+
+  const { approveGate } = await import("../dispatch");
+  const decision = request.decision === "approved" ? "approved" : "rejected";
+  const result = await approveGate(
+    ciRunId,
+    String(request.gate ?? ""),
+    decision,
+    String(request.by ?? ""),
+    String(request.reason ?? ""),
+  );
+
+  // `status` is the RUN's status, which this call does not change -- GitHub releases
+  // the job and the pipeline decides what happens next. Reporting "approved" as a run
+  // status would claim an outcome nobody has reached yet.
+  return { status: String(row.status ?? "running"), by: result.approvedAs };
+}

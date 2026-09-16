@@ -299,31 +299,38 @@ function StreamPanel({
           color: stream.phase === "dropped" ? "var(--refused)" : "var(--accent)",
         }}
       >
-        {stream.phase === "connecting" ? "Connecting" : null}
+        {stream.phase === "connecting" ? "Watching for updates" : null}
         {stream.phase === "live"
           ? stream.lastHeard
-            ? `Live · heard ${ago(stream.lastHeard, now)}`
-            : "Live · nothing yet"
+            ? `Watching · last update ${ago(stream.lastHeard, now)}`
+            : "Watching · nothing yet"
           : null}
-        {stream.phase === "dropped" ? "Stream stopped" : null}
+        {stream.phase === "dropped" ? "Not receiving updates" : null}
       </p>
 
       {stream.phase === "dropped" ? (
-        <div style={{ marginBottom: "var(--gap-4)" }}>
-          <ErrorState
-            error="The live connection ended and did not come back."
-            fix="Reopen it to pick up where it left off. Nothing was lost — the run kept going without this page."
-            detail={stream.cursor ? `last cursor: ${stream.cursor}` : undefined}
-          />
+        <p
+          className="prose"
+          style={{ margin: `0 0 var(--gap-4)`, fontSize: "var(--step-small)" }}
+        >
+          Updates are not coming through. The run is unaffected — it carries on
+          without this page, and everything above is still what it has done.{" "}
           <button
             type="button"
-            className="btn"
             onClick={stream.reconnect}
-            style={{ marginTop: "var(--gap-3)" }}
+            style={{
+              background: "none",
+              border: 0,
+              padding: 0,
+              font: "inherit",
+              color: "var(--accent)",
+              textDecoration: "underline",
+              cursor: "pointer",
+            }}
           >
-            Reopen the stream
+            Try again
           </button>
-        </div>
+        </p>
       ) : null}
 
       {stream.events.length === 0 ? (

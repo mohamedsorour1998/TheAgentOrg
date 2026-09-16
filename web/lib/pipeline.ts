@@ -245,8 +245,17 @@ async function readPipeline<T>(
   // THE REFUSAL CONTRACT IS UNCHANGED, which is why no route needed editing: a
   // `ReadRefused` becomes the same `PipelineError` the `{error, detail}` envelope
   // produced, so `lib/http.ts` keeps mapping it to the same status.
-  const { readTenancy, ReadRefused } = await import("./dynamo/reader");
+  const { readTenancy, ReadRefused, approveRun } = await import("./dynamo/reader");
   try {
+    // THE APPROVAL IS A WRITE TO GITHUB, NOT A READ FROM DYNAMODB, and it is routed
+    // by MODULE NAME because that is what `recordDecision` already passes. The
+    // Python it replaced sent no `action` key at all, so dispatching on the request
+    // body would have sent it to the "unknown action" branch -- which is exactly
+    // what happened after the port: every approval answered an error for a gate the
+    // application could see was waiting.
+    if (moduleName === "approve") {
+      return (await approveRun(request as Parameters<typeof approveRun>[0])) as T;
+    }
     return (await readTenancy(request as Parameters<typeof readTenancy>[0])) as T;
   } catch (error) {
     if (error instanceof ReadRefused) {

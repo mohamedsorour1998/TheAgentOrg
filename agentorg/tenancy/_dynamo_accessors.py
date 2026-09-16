@@ -201,11 +201,20 @@ STATE_BYTES_LIMIT = 350_000
 
 
 def record_run(client, tenant_id: str, run_id: str, ticket_id: str,
-               status: str, state_ref: str, state_json: str = "") -> None:
+               status: str, state_ref: str, state_json: str = "",
+               ci_run_id: str = "") -> None:
     item = {
         "run_id": run_id, "tenant_id": tenant_id, "ticket_id": ticket_id,
         "status": status, "state_ref": state_ref, "created_at": _now(),
     }
+    # THE ACTIONS RUN ID, WHICH IS A DIFFERENT NUMBER FROM `run_id`. `run_id` is the
+    # pipeline's own uuid4; this is GitHub's, and it is the only handle that can
+    # release an Environment gate (`POST .../actions/runs/<id>/pending_deployments`).
+    # Kept on the INDEX ROW rather than on `RunState`, because `state.py` is the
+    # frozen contract and this is a fact about where a run happens to be EXECUTING,
+    # not about the run.
+    if ci_run_id:
+        item["ci_run_id"] = ci_run_id
     item.update(_state_attributes(state_json))
     store.put(client, tenant_id, _dynamo.sk(_dynamo.SK_RUN, run_id), item)
 
@@ -226,9 +235,14 @@ def _state_attributes(state_json: str) -> dict:
 
 
 def update_run_status(client, tenant_id: str, run_id: str, status: str,
-                      state_json: str = "") -> None:
+                      state_json: str = "", ci_run_id: str = "") -> None:
     row = get_run(client, tenant_id, run_id)
     row["status"] = status
+    # CARRIED FORWARD when absent rather than blanked: only the `plan` job knows it
+    # first, and a later stage writing "" would erase the one handle that can open
+    # a gate.
+    if ci_run_id:
+        row["ci_run_id"] = ci_run_id
     # REFRESHED AT EVERY STAGE, because `_emit` calls this from every stage and the
     # screen is meant to follow a run as it happens. A state written only at `plan`
     # would show the ticket and then never change.

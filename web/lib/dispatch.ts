@@ -293,3 +293,108 @@ export async function startRun(request: RunRequest): Promise<{ issue: string }> 
 export function resetDispatchTokenCache(): void {
   cachedToken = null;
 }
+
+/**
+ * Release a GitHub Environment gate, which is what a gate on this pipeline IS.
+ *
+ * **THE APPROVAL BUTTON WROTE TO THE WRONG PLACE.** `web/lib/reader/approve.py` calls
+ * `queue.resume`, which makes a paused QUEUE job claimable. The deployed pipeline does
+ * not use the queue: its gates are GitHub Environments with required reviewers, and a
+ * job waiting on one is released by
+ * `POST /repos/{repo}/actions/runs/{id}/pending_deployments` and by nothing else. So
+ * the button recorded a decision in a queue nobody was reading and the run stayed
+ * waiting.
+ *
+ * **THE ACTIONS RUN ID IS A DIFFERENT NUMBER FROM `run_id`**, which is why
+ * `run_index` now writes `ci_run_id` onto the index row. `run_id` is the pipeline's
+ * uuid4; this is GitHub's, and without it this application can SEE that a run waits
+ * for a person and cannot tell GitHub who decided.
+ *
+ * ── THE ATTRIBUTION GAP, STATED RATHER THAN HIDDEN ───────────────────────────
+ *
+ * **GITHUB WILL RECORD THE TOKEN'S OWNER AS THE APPROVER, NOT THE PERSON WHO
+ * CLICKED.** There is no way around that: the REST call authenticates as the token,
+ * and an Environment approval is attributed to the authenticated user. This
+ * repository already paid for the inverse mistake — a rejection recorder posted
+ * `REJECTED by mohamedsorour1998` naming a human who never saw the gate, and
+ * CLAUDE.md calls fabricating a decision against a person's name "the inverse of the
+ * defect this job exists to prevent".
+ *
+ * So the caller's identity is put in the approval COMMENT, where GitHub preserves it
+ * verbatim, and `recordDecision` returns what was actually recorded rather than
+ * echoing the session. Two names appear, and neither is invented: the reviewer who
+ * clicked, and the token that transmitted it.
+ */
+export async function approveGate(
+  ciRunId: string,
+  gate: string,
+  decision: "approved" | "rejected",
+  by: string,
+  reason: string,
+): Promise<{ environment: string; approvedAs: string }> {
+  const token = await dispatchToken();
+  const head = {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "user-agent": "theagentorg-web",
+  };
+
+  const pending = await fetch(
+    `https://api.github.com/repos/${PIPELINE_REPO}/actions/runs/${ciRunId}/pending_deployments`,
+    { headers: head },
+  );
+  if (!pending.ok) {
+    throw new DispatchRefused(
+      "that gate could not be reached",
+      `GitHub answered ${pending.status} for run ${ciRunId}`,
+    );
+  }
+  const waiting = (await pending.json()) as {
+    environment?: { id?: number; name?: string };
+    current_user_can_approve?: boolean;
+  }[];
+
+  const match = waiting.find((w) => w.environment?.name === gate);
+  if (!match?.environment?.id) {
+    // NAMES WHAT IS ACTUALLY WAITING. "no such gate" would be wrong when the real
+    // answer is that this run is waiting at a DIFFERENT gate, or at none.
+    const names = waiting.map((w) => w.environment?.name).filter(Boolean);
+    throw new DispatchRefused(
+      "that gate is not waiting for a decision",
+      names.length
+        ? `this run is waiting at ${names.join(", ")}`
+        : "this run is not paused at any gate",
+    );
+  }
+  if (match.current_user_can_approve === false) {
+    // THE TOKEN IS NOT A REQUIRED REVIEWER. An Environment only accepts approvals
+    // from the people it names, which is the property that makes a gate a gate.
+    throw new DispatchRefused(
+      "this deployment cannot approve that gate",
+      `the dispatch token's owner is not a required reviewer on ${gate}`,
+    );
+  }
+
+  const sent = await fetch(
+    `https://api.github.com/repos/${PIPELINE_REPO}/actions/runs/${ciRunId}/pending_deployments`,
+    {
+      method: "POST",
+      headers: { ...head, "content-type": "application/json" },
+      body: JSON.stringify({
+        environment_ids: [match.environment.id],
+        state: decision === "approved" ? "approved" : "rejected",
+        // THE CLICKER'S NAME TRAVELS HERE, because GitHub attributes the approval
+        // itself to the token. See the attribution note above.
+        comment: `${decision} by ${by} in The Agent Org${reason ? `: ${reason}` : ""}`.slice(0, 500),
+      }),
+    },
+  );
+  if (!sent.ok) {
+    const text = await sent.text().catch(() => "");
+    throw new DispatchRefused(
+      "the decision was not recorded",
+      `GitHub answered ${sent.status}: ${text.slice(0, 160)}`,
+    );
+  }
+  return { environment: gate, approvedAs: by };
+}

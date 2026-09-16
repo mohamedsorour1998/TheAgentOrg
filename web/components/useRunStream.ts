@@ -102,7 +102,30 @@ export function useRunStream(runId: string, enabled: boolean): Stream {
       setEvents((prior) => [...prior, frame]);
     };
 
+    // **THE CONNECTION DROPS ON ITS OWN HERE, AND THAT IS THE PLATFORM.** An Amplify
+    // SSR Lambda cannot hold a long-lived response open the way a server can, so a
+    // stream that is working perfectly still ends every so often. The first version
+    // surfaced each one as an error panel with a "Reopen the stream" button, and the
+    // operator reported exactly what that looks like in use: "stream closed and
+    // reopen stream and so on ... confusing".
+    //
+    // So a drop reconnects ONCE, silently, before it is ever reported. A person
+    // watching a run cares whether the RUN is moving, not whether an HTTP connection
+    // was recycled -- and a recycled connection loses nothing, because `cursor`
+    // resumes from where it stopped.
+    let recovered = false;
     source.onerror = () => {
+      if (!recovered && source.readyState === EventSource.CLOSED) {
+        recovered = true;
+        // One quiet retry on the next tick. A loop here would be the "second retry
+        // loop" the header already refuses; this is one attempt, and if it also
+        // fails the phase becomes `dropped` and the person is told.
+        setTimeout(() => {
+          setPhase("connecting");
+          setAttempt((n) => n + 1);
+        }, 1_000);
+        return;
+      }
       // `EventSource` retries internally while readyState is CONNECTING. Only a
       // CLOSED socket is genuinely dropped, and conflating them would report a
       // brief reconnect as a failure.

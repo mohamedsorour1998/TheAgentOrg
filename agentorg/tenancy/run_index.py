@@ -130,6 +130,21 @@ def _table(name: str):
     return boto3.resource("dynamodb", region_name=config.AWS_REGION).Table(name)
 
 
+def _ci_run_id() -> str:
+    """GitHub's own run id, from the Actions environment. "" anywhere else.
+
+    **IT IS A DIFFERENT NUMBER FROM `RunState.run_id`**, and the distinction is the
+    point: `run_id` is the pipeline's uuid4, and this is the handle GitHub needs to
+    release an Environment gate. Without it the web application can SEE that a run
+    is waiting for a person and has no way to tell GitHub who decided.
+
+    Read from the environment at CALL time. Empty off Actions -- the in-process
+    path, the worker, and every test -- which is correct: there is no Actions run to
+    approve, and an empty string is what `record_run` skips rather than writes.
+    """
+    return os.environ.get("GITHUB_RUN_ID", "").strip()
+
+
 def _state_json(state: RunState) -> str:
     """The run's state as JSON, for the web application to read.
 
@@ -187,6 +202,7 @@ def record_run(state: RunState) -> bool:
             # `state_json` below is a denormalised copy for one screen.
             state_ref=str(state.run_id),
             state_json=_state_json(state),
+            ci_run_id=_ci_run_id(),
         )
     except Exception:
         # BROAD ON PURPOSE, and the logger is fetched INLINE -- CLAUDE.md records that
@@ -228,6 +244,7 @@ def update_status(state: RunState) -> bool:
         _dynamo_accessors.update_run_status(
             _table(name), tenant_id, state.run_id, state.status,
             state_json=_state_json(state),
+            ci_run_id=_ci_run_id(),
         )
     except Exception:
         logging.getLogger(__name__).warning(
