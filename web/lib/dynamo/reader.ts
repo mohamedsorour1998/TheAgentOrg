@@ -345,6 +345,7 @@ export async function readTenancy(request: ReaderRequest): Promise<unknown> {
     case "set_scope":
       return setScope(tenantId, request.full_names ?? [], request.by ?? "");
     case "run_facts":
+      return runFacts(tenantId, needsRun());
     case "run_detail":
       return runDetail(tenantId, needsRun());
     case "run_cost":
@@ -404,6 +405,72 @@ export async function readTenancy(request: ReaderRequest): Promise<unknown> {
     default:
       throw new ReadRefused(`unknown reader action ${JSON.stringify(request.action)}`);
   }
+}
+
+/**
+ * The facts an approval is decided over. A DIFFERENT CONTRACT FROM `run_detail`,
+ * and conflating them is how the approval button answered "no such run".
+ *
+ * Measured against the deployed app: `POST /api/approvals` returned
+ * `404 {"error": "no such run. Nothing was recorded."}` for a run that was plainly
+ * waiting at gate1. `runFacts` compares `payload.tenant_id !== tenantId` as defence
+ * in depth, the detail shape carries no `tenant_id` at all, so the comparison was
+ * `undefined !== "tenant-zero"` — it refused every approval, and refused it with the
+ * message reserved for a cross-tenant attempt.
+ *
+ * **THAT IS THE RIGHT DIRECTION TO FAIL**, which is exactly why it was hard to see:
+ * a missing fact refused an approval rather than permitting one.
+ */
+async function runFacts(tenantId: string, runId: string) {
+  if (!indexTableName()) throw new ReadRefused("no such run");
+  const row = await requireRun(tenantId, runId);
+  const state = stateOf(row);
+  const repositories = await rowsOfType(tenantId, SK_REPO);
+
+  const status = String(state?.status ?? row.status ?? "");
+  const known = ["running", "blocked", "rejected", "failed", "promoted"];
+
+  return {
+    run_id: String(row.run_id ?? runId),
+    // FROM THE ROW, NOT THE ARGUMENT. `runFacts` re-checks this against the session's
+    // tenant, and a value echoed from the caller would make that check compare a
+    // string to itself.
+    tenant_id: String(row.tenant_id ?? tenantId),
+    // **THE TENANT'S SINGLE REPOSITORY, OR `""`.** `RunState` carries no repository
+    // field -- `state.py` is frozen -- so the honest answer is the connected
+    // repository when there is exactly one. `""` FAILS `authz.decide`'s scope check
+    // and refuses; a guess would permit an approval against a repository nobody
+    // named. The Python this replaces made the same choice and recorded it as a real
+    // limit rather than a workaround.
+    repository_full_name:
+      repositories.length === 1 ? String(repositories[0]?.full_name ?? "") : "",
+    status: known.includes(status) ? status : "failed",
+    // WHICH GATE IS OPEN RIGHT NOW. Derived from the same evidence the stage spine
+    // uses: the first gate the run has not yet decided, while the run is live. A
+    // gate absent from this list may not be decided, whatever the reason.
+    awaiting_gates: awaitingGates(state, status),
+  };
+}
+
+/** The gate a live run is currently held at, as a list of at most one. */
+function awaitingGates(state: RunStateDoc | null, status: string): string[] {
+  if (!state) return [];
+  if (["blocked", "rejected", "failed", "promoted"].includes(status)) return [];
+  const decisions = Array.isArray(state.decisions)
+    ? (state.decisions as Record<string, unknown>[])
+    : [];
+  const decided = new Set(decisions.map((d) => String(d.gate ?? "")));
+  // The stage that must have finished before each gate can hold.
+  const reached: [string, boolean][] = [
+    ["gate1", state.plan != null],
+    ["gate2", state.security != null],
+    ["gate3", state.sre != null],
+  ];
+  for (const [gate, ready] of reached) {
+    if (ready && !decided.has(gate)) return [gate];
+    if (!ready) return [];
+  }
+  return [];
 }
 
 export type ApproveRequest = {

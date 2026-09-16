@@ -171,3 +171,103 @@ describe("the detail screen reflects the run", () => {
     expect(cost.usd).toBe(0.0131);
   });
 });
+
+describe("run_facts — the contract an approval is decided over", () => {
+  /**
+   * **A DIFFERENT SHAPE FROM `run_detail`, AND CONFLATING THEM BROKE APPROVALS.**
+   * Measured against the deployed app: `POST /api/approvals` answered
+   * `404 {"error": "no such run. Nothing was recorded."}` for a run plainly waiting
+   * at gate1, because `runFacts` compares `payload.tenant_id !== tenantId` as
+   * defence in depth and the detail shape carries no `tenant_id` — so the check was
+   * `undefined !== "tenant-zero"` and refused every approval.
+   *
+   * It failed in the SAFE direction, which is exactly why it was invisible.
+   */
+  it("carries every field authz.decide reads", async () => {
+    send.mockResolvedValue(rowWith({ ...BLOCKED_STATE, status: "running", security: null, decisions: [] }));
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const facts = (await readTenancy({
+      action: "run_facts",
+      tenant_id: "tenant-zero",
+      run_id: "r1",
+    })) as Record<string, unknown>;
+
+    for (const field of ["run_id", "tenant_id", "repository_full_name", "status", "awaiting_gates"]) {
+      expect(Object.hasOwn(facts, field), `run_facts omits \`${field}\``).toBe(true);
+    }
+  });
+
+  it("reports the tenant from the ROW, not the argument", async () => {
+    /**
+     * **A FIRST VERSION OF THIS ASSERTION WAS INERT, AND IT IS RECORDED RATHER THAN
+     * QUIETLY FIXED.** It called `run_facts` with `tenant-zero` against a fixture row
+     * carrying no `tenant_id`, so `row.tenant_id ?? tenantId` answered the argument
+     * either way — replacing the whole expression with `tenantId` changed nothing and
+     * the suite stayed at 246 passed. An inert mutation reads exactly like a caught
+     * one.
+     *
+     * The failing case needs the two to DIFFER, which is precisely the case the
+     * defence-in-depth check in `approvals.runFacts` exists for: if the store ever
+     * returned a row belonging to somebody else, echoing the argument would hide it
+     * and the comparison would pass.
+     */
+    send.mockResolvedValue({
+      Item: {
+        run_id: "r1",
+        ticket_id: "43",
+        status: "running",
+        tenant_id: "somebody-else",
+        state: JSON.stringify({ ...BLOCKED_STATE, status: "running" }),
+      },
+    });
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const facts = (await readTenancy({
+      action: "run_facts", tenant_id: "tenant-zero", run_id: "r1",
+    })) as Record<string, unknown>;
+
+    expect(
+      facts.tenant_id,
+      "run_facts echoed the caller's tenant instead of the row's, so approvals.runFacts " +
+        "would compare a string to itself and the cross-tenant check would never fire",
+    ).toBe("somebody-else");
+  });
+
+  it("names the gate a live run is held at", async () => {
+    send.mockResolvedValue(rowWith({ ...BLOCKED_STATE, status: "running", security: null, decisions: [] }));
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const facts = (await readTenancy({
+      action: "run_facts", tenant_id: "t1", run_id: "r1",
+    })) as Record<string, unknown>;
+    // `plan` is done and gate1 undecided, so gate1 is open. A gate absent from this
+    // list may not be decided, whatever the reason.
+    expect(facts.awaiting_gates).toEqual(["gate1"]);
+  });
+
+  it("a run that has ENDED is awaiting nobody", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const facts = (await readTenancy({
+      action: "run_facts", tenant_id: "t1", run_id: "r1",
+    })) as Record<string, unknown>;
+    // A blocked run must not offer a gate: `authz.decide` refuses a terminal run,
+    // and offering one would invite a click that cannot exist.
+    expect(facts.awaiting_gates).toEqual([]);
+    expect(facts.status).toBe("blocked");
+  });
+
+  it("refuses the scope check when the tenant has no single repository", async () => {
+    // `""` FAILS `authz.decide`'s scope check, which is the point: a guess would
+    // permit an approval against a repository nobody named. RunState carries no
+    // repository field, so one connected repo is the only honest answer.
+    send.mockImplementation((cmd: unknown) => {
+      const input = (cmd as { input?: Record<string, unknown> }).input ?? {};
+      if ("Key" in input) return Promise.resolve(rowWith({ ...BLOCKED_STATE, status: "running" }));
+      return Promise.resolve({ Items: [] });        // no repositories in scope
+    });
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const facts = (await readTenancy({
+      action: "run_facts", tenant_id: "t1", run_id: "r1",
+    })) as Record<string, unknown>;
+    expect(facts.repository_full_name).toBe("");
+  });
+});
