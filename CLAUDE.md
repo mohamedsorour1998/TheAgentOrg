@@ -4688,6 +4688,45 @@ neither. **That is the isolation, demonstrated rather than argued.**
   the hosted UI kept serving `redirect_mismatch` for about two minutes: **Cognito
   propagation, not configuration.** Re-check before diagnosing.
 
+### A MISSING FIELD IS A 200 AND A BLANK SCREEN — 2026-09-15
+
+Reported by the operator: clicking a run id gave **"This page couldn't load"**. Every
+API behind it was healthy.
+
+```
+/api/runs/<id>          200, valid JSON
+/api/runs/<id>/cost     200, valid JSON
+/api/runs/<id>/scoring  200, valid JSON
+/runs/<id>              "This page couldn't load"
+console: Uncaught TypeError: Cannot read properties of undefined (reading 'length')
+```
+
+`runs/[runId]/page.tsx:192` reads `run.awaiting_gates.length`, and the new DynamoDB
+reader never returned that field. **An omitted key is `undefined`, `JSON.stringify`
+drops it silently, the route still answers 200, and the failure lands in React** —
+so nothing server-side looks wrong and no log line names it.
+
+**THREE SHAPES WERE INCOMPLETE AND ONLY ONE CRASHED**, because the other two are on
+screens nobody had opened yet: `CostView.findings` (`CostPanel.tsx:166` reads
+`.length`) and `ScoringResponse.scan_provenance`. `run_cost` also returned a
+`total_usd` the contract has never declared — a field nobody renders, reading as data.
+
+The cause is structural and will recur whenever a reader is ported: **it was written
+from the Python it replaced**, and the Python built its answers from a live
+`RunState` rather than from the TypeScript contract. `tsc` cannot catch it — the
+reader's return type is inferred and reaches `readPipeline<T>` through an unchecked
+cast, so the compiler is never asked to compare the two.
+
+`web/__tests__/reader-contract.test.ts` asks at RUNTIME: it parses the required field
+names out of `contract.ts`/`endpoints.ts` (following `extends`, skipping optionals),
+calls the reader against a stubbed DynamoDB, and asserts each is present — **and the
+reverse**, that nothing undeclared is returned. The interfaces are erased at runtime,
+which is exactly why the source is read as text rather than imported.
+
+**The general rule: a typed boundary crossed by a cast is not a checked boundary.**
+Wherever `as T` bridges two modules, the compiler has been told the answer rather than
+asked for it.
+
 ### `gh run list --json databaseId --template` RENDERS SCIENTIFIC NOTATION
 
 Measured 2026-09-15: a run id comes back as `3.5009260743e+10`, because Go's template
