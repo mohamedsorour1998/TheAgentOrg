@@ -178,17 +178,62 @@ def get_run(client, tenant_id: str, run_id: str) -> dict:
     )
 
 
+# **WHY THE WHOLE STATE DOCUMENT RIDES ON THE INDEX ROW.** The run's own record is
+# `gates.save`, and on the deployed pipeline that is a JSONL file on whichever Actions
+# runner ran the stage, handed forward as an artifact. The web application cannot read
+# an Actions artifact -- so `/runs/<id>` could show the index row and NOTHING else, and
+# rendered every stage as `NOT STARTED` for a run whose `plan` had genuinely succeeded.
+# That is the did-not-run-versus-passed conflation this repository exists to refuse,
+# on a screen.
+#
+# A COPY, NOT A MOVE. `gates.save` remains the single writer of the run's record; this
+# is a denormalised read model for one screen, written by the same call that already
+# writes the index. Moving the document here instead would mean removing the artifact
+# handoff across seven jobs, which was attempted and reverted -- see
+# `run-pipeline.yml`'s header.
+#
+# BOUNDED, BECAUSE DYNAMODB REFUSES AN ITEM OVER 400 KB AND `record_run` SWALLOWS
+# EVERY FAILURE. A state that grew past the limit would make indexing stop entirely
+# and silently -- the run list would simply stop gaining rows. Measured on real runs:
+# a complete one is ~5.9 KB, so the bound is ~60x headroom and exists to fail
+# VISIBLY rather than to be reached.
+STATE_BYTES_LIMIT = 350_000
+
+
 def record_run(client, tenant_id: str, run_id: str, ticket_id: str,
-               status: str, state_ref: str) -> None:
-    store.put(client, tenant_id, _dynamo.sk(_dynamo.SK_RUN, run_id), {
+               status: str, state_ref: str, state_json: str = "") -> None:
+    item = {
         "run_id": run_id, "tenant_id": tenant_id, "ticket_id": ticket_id,
         "status": status, "state_ref": state_ref, "created_at": _now(),
-    })
+    }
+    item.update(_state_attributes(state_json))
+    store.put(client, tenant_id, _dynamo.sk(_dynamo.SK_RUN, run_id), item)
 
 
-def update_run_status(client, tenant_id: str, run_id: str, status: str) -> None:
+def _state_attributes(state_json: str) -> dict:
+    """`state` when it fits, and a NAMED refusal when it does not.
+
+    `state_too_large` is written rather than the field being quietly omitted,
+    because an absent `state` and an oversized one want different fixes and look
+    identical on the screen -- the same reason `scan_provenance` distinguishes
+    `fixture-fallback` from `fixture-stub`.
+    """
+    if not state_json:
+        return {}
+    if len(state_json.encode("utf-8")) > STATE_BYTES_LIMIT:
+        return {"state_too_large": True}
+    return {"state": state_json}
+
+
+def update_run_status(client, tenant_id: str, run_id: str, status: str,
+                      state_json: str = "") -> None:
     row = get_run(client, tenant_id, run_id)
     row["status"] = status
+    # REFRESHED AT EVERY STAGE, because `_emit` calls this from every stage and the
+    # screen is meant to follow a run as it happens. A state written only at `plan`
+    # would show the ticket and then never change.
+    row.pop("state_too_large", None)
+    row.update(_state_attributes(state_json))
     store.put(client, tenant_id, _dynamo.sk(_dynamo.SK_RUN, run_id), row)
 
 

@@ -1,0 +1,173 @@
+/**
+ * The detail screen must show what a run actually did.
+ *
+ * **THE DEFECT THIS PINS WAS REPORTED FROM THE DEPLOYED APP.** `/runs/<id>` rendered
+ * every stage as `NOT STARTED`, `STARTED BY unknown`, `AGENTS ANSWERED FROM not
+ * recorded`, `NOT SCANNED`, and no cost — for a run whose `plan` job had *completed
+ * successfully*. Saying a stage did not run when it did is the exact
+ * did-not-run-versus-passed conflation this repository exists to refuse, rendered on
+ * a screen.
+ *
+ * The cause was that the run's own record lives in a GitHub Actions artifact, which
+ * an Amplify SSR Lambda cannot read. `agentorg/tenancy/run_index.py` now writes a
+ * copy onto the index row at every stage, and these assert the reader derives the
+ * screen from it.
+ *
+ * **NOTHING HERE IS INVENTED, AND THAT IS THE PART WORTH GUARDING.** `StageView`
+ * carries `attempt`, `exit_code` and `enqueued_at`, which are QUEUE facts — and a run
+ * on the Actions path never enters the queue. A fabricated `exit_code: 0` would be
+ * the one field on this screen capable of contradicting the run itself.
+ */
+
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const send = vi.fn();
+vi.mock("../lib/dynamo/credentials", () => ({
+  scopedClient: async () => ({ send }),
+  TAG_KEY: "tenant",
+}));
+
+/** A run that planned, developed, was scanned and blocked — the poisoned beat. */
+const BLOCKED_STATE = {
+  run_id: "r1",
+  ticket_id: "43",
+  ticket_text: "Add a per-IP login rate limit.",
+  started_at: "2026-09-16T03:54:55Z",
+  status: "blocked",
+  trigger: "ui",
+  model_provenance: "model",
+  poisoned: true,
+  plan: { tasks: ["a"] },
+  dev: { branch: "feat/x", pr_url: "https://github.com/x/y/pull/44" },
+  review: { verdict: "changes_requested" },
+  security: {
+    verdict: "block",
+    findings: [{ tool: "gitleaks" }, { tool: "gitleaks" }],
+    blocking: [{ tool: "gitleaks" }, { tool: "gitleaks" }],
+    scan_provenance: "scanners",
+    scoring: [{ threshold: "high" }],
+  },
+  sre: null,
+  decisions: [{ gate: "gate1", decision: "approved", by: "a-person", at: "", reason: "" }],
+  cost: { usd: 0.0131, stages: [{ stage: "plan" }, { stage: "develop" }], cache_hit_rate: null, findings: [] },
+};
+
+function rowWith(state: unknown) {
+  return {
+    Item: {
+      run_id: "r1",
+      ticket_id: "43",
+      status: "blocked",
+      created_at: "2026-09-16T03:54:55Z",
+      ...(state === undefined ? {} : { state: JSON.stringify(state) }),
+    },
+  };
+}
+
+async function detail(): Promise<Record<string, unknown>> {
+  const { readTenancy } = await import("../lib/dynamo/reader");
+  return (await readTenancy({
+    action: "run_detail",
+    tenant_id: "t1",
+    run_id: "r1",
+  })) as Record<string, unknown>;
+}
+
+beforeEach(() => {
+  send.mockReset();
+  process.env.TENANCY_TABLE = "t";
+  process.env.TENANT_SCOPED_ROLE_ARN = "arn:aws:iam::339712964409:role/fake";
+});
+
+describe("the detail screen reflects the run", () => {
+  it("marks the stages that ran as done, and omits the ones that did not", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const answer = await detail();
+    const stages = answer.stages as { stage: string; status: string }[];
+    const byName = Object.fromEntries(stages.map((s) => [s.stage, s.status]));
+
+    // Ran, and proven by a field on the run.
+    expect(byName.plan).toBe("done");
+    expect(byName.gate1).toBe("done");
+    expect(byName.develop).toBe("done");
+    expect(byName.review).toBe("done");
+    expect(byName.security).toBe("done");
+
+    // A BLOCKED RUN IS WAITING FOR NOBODY. `gate2` must not be listed as paused —
+    // the run ended at the security verdict, and a gate marked "your decision" on a
+    // run that already refused would invite a click that cannot exist.
+    expect(byName.gate2).toBeUndefined();
+    expect(byName.promote).toBeUndefined();
+  });
+
+  it("invents no queue facts", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const stages = (await detail()).stages as Record<string, unknown>[];
+    for (const stage of stages) {
+      // `exit_code` is the dangerous one: a fabricated 0 would be the single field
+      // here capable of contradicting the run it describes.
+      expect(stage.exit_code, `${stage.stage} invented an exit code`).toBeNull();
+      expect(stage.reclaimed_from).toBe("");
+    }
+  });
+
+  it("carries the security verdict, the provenance and the blocking count", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const answer = await detail();
+    expect(answer.verdict).toBe("block");
+    // `scanners` vs `fixture-fallback` is the distinction the whole verification
+    // story rests on; a screen that showed `""` for a real scan would erase it.
+    expect(answer.scan_provenance).toBe("scanners");
+    expect(answer.blocking).toBe(2);
+    expect(answer.trigger).toBe("ui");
+    expect(answer.model_provenance).toBe("model");
+    expect(answer.poisoned).toBe(true);
+    expect(answer.pr_url).toBe("https://github.com/x/y/pull/44");
+  });
+
+  it("a run with no document shows blanks rather than claiming anything", async () => {
+    // The honest degraded case: an index row written before the read model existed.
+    // It must not assert `verdict: pass` or a stage list it cannot know.
+    send.mockResolvedValue(rowWith(undefined));
+    const answer = await detail();
+    expect(answer.stages).toEqual([]);
+    expect(answer.verdict).toBeNull();
+    expect(answer.scan_provenance).toBe("");
+    expect(answer.blocking).toBeNull();
+  });
+
+  it("a malformed document degrades instead of losing the whole screen", async () => {
+    send.mockResolvedValue({
+      Item: { run_id: "r1", ticket_id: "43", status: "running", state: "{not json" },
+    });
+    const answer = await detail();
+    expect(answer.run_id).toBe("r1");
+    expect(answer.stages).toEqual([]);
+  });
+
+  it("a live run lists the gate it is waiting at", async () => {
+    send.mockResolvedValue(
+      rowWith({ ...BLOCKED_STATE, status: "running", security: null, review: null, dev: null, decisions: [] }),
+    );
+    const stages = (await detail()).stages as { stage: string; status: string }[];
+    const byName = Object.fromEntries(stages.map((s) => [s.stage, s.status]));
+    expect(byName.plan).toBe("done");
+    // THE POINT OF THE SCREEN for a run in flight: somebody is being waited on.
+    expect(byName.gate1).toBe("paused");
+  });
+
+  it("the cost rows come from the document", async () => {
+    send.mockResolvedValue(rowWith(BLOCKED_STATE));
+    const { readTenancy } = await import("../lib/dynamo/reader");
+    const cost = (await readTenancy({
+      action: "run_cost",
+      tenant_id: "t1",
+      run_id: "r1",
+    })) as Record<string, unknown>;
+    // `stages_priced` and not `usd` is how "is cost wired?" is answered — Lane E
+    // measured that an unwired run has zero rows with usd null, while a run that
+    // fell back has a row per stage with usd 0.0.
+    expect(cost.stages_priced).toBe(2);
+    expect(cost.usd).toBe(0.0131);
+  });
+});

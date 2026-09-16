@@ -130,6 +130,36 @@ def _table(name: str):
     return boto3.resource("dynamodb", region_name=config.AWS_REGION).Table(name)
 
 
+def _state_json(state: RunState) -> str:
+    """The run's state as JSON, for the web application to read.
+
+    **THE DEPLOYED UI COULD NOT REACH THE RUN'S RECORD AT ALL.** `gates.save` writes
+    it to a JSONL file on whichever Actions runner ran the stage, handed forward as
+    an artifact -- and an Amplify SSR Lambda cannot read an Actions artifact. So
+    `/runs/<id>` showed the index row and nothing else, rendering every stage as
+    `NOT STARTED` for a run whose `plan` had genuinely succeeded. A screen that says
+    a stage did not run when it did is the exact conflation this repository exists
+    to refuse.
+
+    `mode="json"` because `model_dump()` alone returns objects `json.dumps` cannot
+    encode -- the same requirement `agents/server.py` records.
+
+    NEVER RAISES. It is called from inside `record_run`'s try block, whose whole
+    contract is that indexing may not fail a run that has already done its work; a
+    serialisation error here would be caught there, but returning `""` keeps the
+    index row itself intact rather than losing it along with the document.
+    """
+    try:
+        return state.model_dump_json()
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "could not serialise run %s for the read model; the index row is still "
+            "written and the UI will show the run without its stages.",
+            state.run_id, exc_info=True,
+        )
+        return ""
+
+
 def record_run(state: RunState) -> bool:
     """Index `state` against its tenant. Returns whether a row was written.
 
@@ -153,8 +183,10 @@ def record_run(state: RunState) -> bool:
             state.ticket_id,
             state.status,
             # The reference a reader would resolve, formatted the way `gates.StateRef`
-            # formats itself. Not the document: one writer, and it is `gates.save`.
+            # formats itself. `gates.save` remains the one WRITER of the run's record;
+            # `state_json` below is a denormalised copy for one screen.
             state_ref=str(state.run_id),
+            state_json=_state_json(state),
         )
     except Exception:
         # BROAD ON PURPOSE, and the logger is fetched INLINE -- CLAUDE.md records that
@@ -195,6 +227,7 @@ def update_status(state: RunState) -> bool:
         # does not own rather than inserting one -- the reason this is not an upsert.
         _dynamo_accessors.update_run_status(
             _table(name), tenant_id, state.run_id, state.status,
+            state_json=_state_json(state),
         )
     except Exception:
         logging.getLogger(__name__).warning(

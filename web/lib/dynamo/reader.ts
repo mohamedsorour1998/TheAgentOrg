@@ -185,29 +185,113 @@ async function requireRun(tenantId: string, runId: string): Promise<Row> {
   return answer.Item as Row;
 }
 
+/** The run's own record, denormalised onto the index row by `run_index`. */
+type RunStateDoc = Record<string, unknown>;
+
+function stateOf(row: Row): RunStateDoc | null {
+  const raw = row.state;
+  if (typeof raw !== "string" || !raw) return null;
+  try {
+    return JSON.parse(raw) as RunStateDoc;
+  } catch {
+    // A DOCUMENT THAT WILL NOT PARSE IS `null`, NOT A THROW. The index row is still
+    // a true fact about the run, and losing the whole screen because one field is
+    // malformed would be worse than showing the run without its stages.
+    return null;
+  }
+}
+
 /**
- * Everything one run's detail screen needs that survives without the state document.
+ * The nine stages, derived from WHICH RESULTS THE RUN ACTUALLY HOLDS.
+ *
+ * **ABSENT MEANS NOT STARTED, AND PRESENT MEANS DONE. NOTHING IS INVENTED.** The
+ * pipeline's own `StageView` carries `attempt`, `exit_code` and `enqueued_at`, which
+ * are QUEUE facts -- and a run on the GitHub Actions path never enters the queue, so
+ * this cannot know them. They are reported as one attempt, no exit code and no
+ * timestamps rather than as plausible-looking numbers: a fabricated `exit_code: 0`
+ * would be the one field on this screen that could contradict the run itself.
+ *
+ * A stage the run has not reached is OMITTED, which the spine renders as not started
+ * -- correct, and the only honest answer.
+ */
+function stagesFrom(state: RunStateDoc, row: Row): unknown[] {
+  const decisions = Array.isArray(state.decisions) ? (state.decisions as Record<string, unknown>[]) : [];
+  const decided = new Set(decisions.map((d) => String(d.gate ?? "")));
+  const status = String(state.status ?? row.status ?? "running");
+  const ended = ["blocked", "rejected", "failed", "promoted"].includes(status);
+
+  // Each stage, and the field on the RunState that proves it ran.
+  const proof: [string, boolean][] = [
+    ["plan", state.plan != null],
+    ["gate1", decided.has("gate1")],
+    ["develop", state.dev != null],
+    ["review", state.review != null],
+    ["security", state.security != null],
+    ["gate2", decided.has("gate2")],
+    ["sre", state.sre != null],
+    ["gate3", decided.has("gate3")],
+    ["promote", status === "promoted"],
+  ];
+
+  const out: unknown[] = [];
+  for (const [stage, ran] of proof) {
+    if (!ran) {
+      // THE FIRST UNREACHED GATE OF A LIVE RUN IS `paused`, not absent: that is a
+      // person being waited on, and the spine lifts it. A run that has ENDED is
+      // waiting for nobody, so nothing after its ending is marked paused.
+      const isGate = stage === "gate1" || stage === "gate2" || stage === "gate3";
+      if (isGate && !ended && out.length > 0) {
+        out.push({
+          stage, status: "paused", attempt: 1, exit_code: null,
+          enqueued_at: "", updated_at: "", reclaimed_from: "",
+        });
+      }
+      break;
+    }
+    out.push({
+      stage, status: "done", attempt: 1, exit_code: null,
+      enqueued_at: String(state.started_at ?? row.created_at ?? ""),
+      updated_at: "", reclaimed_from: "",
+    });
+  }
+  return out;
+}
+
+/**
+ * Everything one run's detail screen needs.
  *
  * OWNERSHIP FIRST, and it is the only check there is -- `requireRun` reads through the
  * TENANT-SCOPED credential, so a caller who does not own the run gets a refusal from a
  * credential that physically cannot see another tenant's index row.
+ *
+ * **THE FIELDS BELOW USED TO BE BLANK ON EVERY RUN**, because the run's record lives
+ * in an Actions artifact this runtime cannot read. `run_index` now writes a copy onto
+ * the index row, so the screen shows what the run actually did instead of rendering a
+ * succeeded `plan` as `NOT STARTED`.
  */
 async function runDetail(tenantId: string, runId: string) {
   if (!indexTableName()) throw new ReadRefused("no run index is configured");
   const row = await requireRun(tenantId, runId);
+  const state = stateOf(row);
+  const security = (state?.security ?? null) as Record<string, unknown> | null;
+  const dev = (state?.dev ?? null) as Record<string, unknown> | null;
+
   return {
     ...summarise(row),
-    ticket_text: "",
-    model_provenance: "",
-    trigger: "",
-    poisoned: false,
-    pr_url: null,
-    branch: null,
-    stages: [],
-    decisions: [],
-    // NULL RATHER THAN AN EMPTY OBJECT. An empty security panel and an unscanned run
-    // must not render identically; `null` is what the UI reads as "not available".
-    security: null,
+    // FROM THE DOCUMENT WHERE THERE IS ONE, and the summary's honest blanks where
+    // there is not -- `""` means nobody recorded it, which the UI renders as unknown.
+    verdict: (security?.verdict as string) ?? null,
+    scan_provenance: (security?.scan_provenance as string) ?? "",
+    blocking: Array.isArray(security?.blocking) ? security.blocking.length : null,
+    ticket_text: String(state?.ticket_text ?? ""),
+    model_provenance: String(state?.model_provenance ?? ""),
+    trigger: String(state?.trigger ?? ""),
+    poisoned: state?.poisoned === true,
+    pr_url: (dev?.pr_url as string) ?? null,
+    branch: (dev?.branch as string) ?? null,
+    stages: state ? stagesFrom(state, row) : [],
+    decisions: Array.isArray(state?.decisions) ? state.decisions : [],
+    security,
     // **THE FIELD WHOSE ABSENCE BROKE THE WHOLE PAGE.** `runs/[runId]/page.tsx:192`
     // reads `run.awaiting_gates.length`, and an omitted key is `undefined`, so the
     // detail screen died in React with `Cannot read properties of undefined
@@ -277,20 +361,46 @@ export async function readTenancy(request: ReaderRequest): Promise<unknown> {
       // measured that collapsing them makes a missing price table read as a free
       // run. `cache_hit_rate: null` is the same distinction -- a zero denominator
       // is not a zero rate.
-      return {
-        run_id: request.run_id,
-        usd: null,
-        stages_priced: 0,
-        stages: [],
-        cache_hit_rate: null,
-        findings: [],
-      };
+      {
+        // FROM THE DOCUMENT. `state.cost` is written by `merge_cost_records` in both
+        // pipelines, so a run that reached the agents carries one row per stage.
+        //
+        // `usd: null` MEANS NOT PRICED and `0.0` means priced and free; Lane E
+        // measured that collapsing them makes a missing price table read as a free
+        // run. A run with no rows at all is the third case -- the usage recorder was
+        // not wired on the path that ran it -- and `stages_priced: 0` is what says so.
+        const cost = (stateOf(await requireRun(tenantId, needsRun())) ?? {}).cost as
+          | Record<string, unknown>
+          | undefined;
+        const stages = Array.isArray(cost?.stages) ? cost.stages : [];
+        return {
+          run_id: request.run_id,
+          usd: (cost?.usd as number | null) ?? null,
+          stages_priced: stages.length,
+          stages,
+          cache_hit_rate: (cost?.cache_hit_rate as number | null) ?? null,
+          findings: Array.isArray(cost?.findings) ? cost.findings : [],
+        };
+      }
     case "run_scoring":
-      await requireRun(tenantId, needsRun());
       // `scan_provenance: ""` is the fourth field `ScoringResponse` declares, and
       // `""` is its documented "nobody recorded it" value -- rendered as unknown
       // rather than as a measured mode.
-      return { run_id: request.run_id, threshold: null, rows: [], scan_provenance: "" };
+      {
+        // `SecurityResult.scoring` is one row per finding, written by `score_findings`.
+        const sec = (stateOf(await requireRun(tenantId, needsRun())) ?? {}).security as
+          | Record<string, unknown>
+          | undefined;
+        const rows = Array.isArray(sec?.scoring) ? sec.scoring : [];
+        return {
+          run_id: request.run_id,
+          // The threshold that produced an EMPTY table is still a fact worth
+          // rendering -- otherwise a clean run and an unscanned one look identical.
+          threshold: (rows[0] as Record<string, unknown> | undefined)?.threshold ?? null,
+          rows,
+          scan_provenance: (sec?.scan_provenance as string) ?? "",
+        };
+      }
     default:
       throw new ReadRefused(`unknown reader action ${JSON.stringify(request.action)}`);
   }
