@@ -29,12 +29,65 @@
  * parsed string, which is the one that ships.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 const WEB = join(__dirname, "..");
+
+/**
+ * Source with `//` and block comments removed and **every string body kept**.
+ *
+ * The string-preserving part is not incidental. `components/__tests__/refusals.test.ts`
+ * uses a stripper that blanks string BODIES too — correct for its purpose, and
+ * CLAUDE.md records it making a RED step INERT: the token under test became `""`
+ * before the assertion ran, so reintroducing the defect changed nothing. Here the
+ * thing being looked for IS a string (`href="/api/auth/logout"`), so a stripper of
+ * that kind would delete the evidence rather than the commentary.
+ *
+ * Tracking the quote character is what makes it safe on this file: `"https://…"`
+ * contains `//` and must not be read as the start of a comment.
+ */
+function withoutComments(source: string): string {
+  let out = "";
+  let quote: string | null = null;
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (quote !== null) {
+      if (ch === "\\") {
+        out += ch + (next ?? "");
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      const end = source.indexOf("\n", i);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
 
 /** The matcher Next.js actually applies, compiled the way Next.js compiles it. */
 async function gate(): Promise<RegExp> {
@@ -97,5 +150,67 @@ describe("the sign-in gate", () => {
     ]) {
       expect(gated.test(path), `${path} IS gated, and must not be`).toBe(false);
     }
+  });
+});
+
+describe("signing out is reachable", () => {
+  /**
+   * **THE ROUTE EXISTED AND NOTHING LINKED TO IT.** Reported as "also need
+   * logout" — and `app/api/auth/logout/route.ts` was already 60 careful lines:
+   * it clears this app's cookie with the exact attributes the callback set it
+   * with (a cookie deleted with a different `path` SURVIVES) and redirects to
+   * Cognito's `/logout` so its session ends too. Correct, tested, and reachable
+   * only by typing the URL.
+   *
+   * That is this repository's second named pattern — *a feature complete, tested,
+   * and reached by nothing* — and the prescribed check for it is a grep for the
+   * entry point. This is that grep, kept.
+   */
+  it("is linked from the app shell", () => {
+    /**
+     * **THE FIRST VERSION OF THIS TEST WAS SATISFIED BY ITS OWN COMMENTARY, AND
+     * IT IS RECORDED RATHER THAN QUIETLY FIXED.** It asserted
+     * `shell.includes("/api/auth/logout")`. RED: deleting the `href` from
+     * `Shell.tsx` left this test GREEN, because the explanatory comment beside the
+     * link names `app/api/auth/logout/route.ts` — so the substring was still
+     * present with nothing linking anywhere. The mutation was caught only by the
+     * sibling test, by accident.
+     *
+     * That is this repository's most repeatable failure ("the more carefully a
+     * file explains what it must not do, the more likely a test for that thing is
+     * satisfied by the explanation"), and files here are 40–60% commentary. The
+     * fix is the standard one: assert over COMMENT-STRIPPED source.
+     */
+    const stripped = withoutComments(
+      readFileSync(join(WEB, "components", "Shell.tsx"), "utf8"),
+    );
+
+    // ANTI-VACUITY: the stripper must still leave the component behind. A
+    // stripper that ate everything would make the assertion below unfailable in
+    // the other direction.
+    expect(
+      stripped.includes("export function Shell"),
+      "the comment stripper removed the component itself; this test would pin nothing",
+    ).toBe(true);
+
+    expect(
+      stripped.includes("/api/auth/logout"),
+      "nothing in Shell.tsx links to /api/auth/logout, so signing out is reachable " +
+        "only by typing the URL -- a correct answer nobody asks for",
+    ).toBe(true);
+  });
+
+  it("uses a plain anchor, because the redirect leaves this origin", () => {
+    const shell = readFileSync(join(WEB, "components", "Shell.tsx"), "utf8");
+    // `<Link href="/api/auth/logout">` attempts a client-side navigation, which
+    // cannot follow the cross-origin redirect to the Cognito domain: sign-out then
+    // appears to do nothing while the session continues. The failure is silent,
+    // which is why it is asserted rather than left to review.
+    expect(
+      /<Link[^>]*href=["']\/api\/auth\/logout/.test(shell),
+      "Shell.tsx links sign-out with <Link>. That cannot follow the cross-origin " +
+        "redirect to Cognito, so the click would end nothing while reporting success.",
+    ).toBe(false);
+    expect(/<a[\s\S]{0,200}?href="\/api\/auth\/logout"/.test(shell)).toBe(true);
   });
 });

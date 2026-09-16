@@ -57,6 +57,32 @@ export function Shell({ children }: { children: React.ReactNode }) {
               </Link>
             ))}
           </nav>
+
+          {/* SIGN OUT — the route existed and NOTHING LINKED TO IT.
+              `app/api/auth/logout/route.ts` is 60 lines that clear this app's
+              cookie with the exact attributes the callback set (a cookie deleted
+              with a different `path` survives) and then redirect to Cognito's own
+              `/logout` so its session ends too. All of it correct, all of it
+              reachable only by typing the URL -- this repository's second named
+              pattern, a correct answer nobody asks for, in a navigation bar.
+
+              A PLAIN <a>, NOT <Link>. This is a route handler that redirects to
+              another ORIGIN (the Cognito domain). `<Link>` attempts a client-side
+              navigation, which cannot follow a cross-origin redirect, so sign-out
+              would appear to do nothing while the session continued.
+
+              HIDDEN ON /signin, because a sign-out control on the page you land on
+              AFTER signing out invites a click that ends nothing and reads as a
+              broken button. `pathname` is already loaded for `aria-current`. */}
+          {pathname !== "/signin" ? (
+            <a
+              href="/api/auth/logout"
+              className="nav"
+              style={{ marginLeft: "auto", fontSize: "var(--step-small)" }}
+            >
+              Sign out
+            </a>
+          ) : null}
         </div>
       </header>
 
