@@ -62,7 +62,7 @@ function declaredFields(name: string, seen = new Set<string>()): string[] {
   if (!block) return [];
   const inherited = block[1] ? declaredFields(block[1], seen) : [];
   // Only OPTIONAL fields may be absent; a `?` means the contract permits omission.
-  const own = [...block[2].matchAll(/^ {2}([a-z_]+)(\??):/gm)]
+  const own = [...(block[2] ?? "").matchAll(/^ {2}([a-z_]+)(\??):/gm)]
     .filter((m) => m[2] !== "?")
     .map((m) => m[1] as string);
   return [...inherited, ...own];
