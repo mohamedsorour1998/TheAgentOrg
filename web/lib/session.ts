@@ -92,7 +92,37 @@ export async function currentIdentity(): Promise<SessionIdentity | null> {
   const identity = await verifiedToken();
   const authorised = authorizeSession(identity, Date.now());
   if (!authorised.permitted) {
-    return null;
+    /**
+     * A GITHUB SIGN-IN, WHICH CARRIES NO COGNITO TOKEN AT ALL.
+     *
+     * Cognito cannot federate GitHub — GitHub is OAuth2 and issues no `id_token` —
+     * so a GitHub session is a separate cookie with a separate verifier and its own
+     * key. **The two are never handed to one verifier**, because a verifier that
+     * accepts both RS256 and HS256 can be given a token signed with HMAC using the
+     * published RSA public key as the secret, and it verifies. See
+     * `lib/github-session.ts`.
+     *
+     * TRIED SECOND, so an email/password session keeps winning where both cookies
+     * somehow exist. The callback clears the other cookie on every GitHub sign-in,
+     * so that state should not arise — and "should not arise" is exactly the
+     * reasoning that makes an order worth fixing explicitly rather than leaving to
+     * whichever branch runs first.
+     *
+     * `readSession` returns `null` for every failure, so a tampered, expired or
+     * unconfigured GitHub cookie falls through to the same `null` this function
+     * already returns for the four Cognito cases.
+     */
+    const { GITHUB_SESSION_COOKIE, readSession } = await import("./github-session");
+    const jar = await cookies();
+    const github = await readSession(jar.get(GITHUB_SESSION_COOKIE)?.value);
+    if (github === null) {
+      return null;
+    }
+    const scoped = tenantFromClaim(github.tenantId);
+    if (scoped === null) {
+      return null;
+    }
+    return { login: github.login, tenantId: scoped };
   }
 
   // The tenant is validated rather than trusted for its shape: `tenantFromClaim`

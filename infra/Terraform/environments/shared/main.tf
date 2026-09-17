@@ -306,6 +306,44 @@ resource "aws_iam_role_policy" "amplify_compute_may_read_signup_secret" {
 }
 
 ################################################################################
+# THE GITHUB APP'S USER-OAUTH CREDENTIALS, so a person can sign in with GitHub.
+#
+# GitHub App `4677455`, client id `Iv23liLRifG6SdUoG5yC`. The SSR runtime reads
+# this to turn an authorization code into a user-to-server token -- the identity
+# half of sign-in, and the token the repository picker lists installations with.
+#
+# **A GITHUB APP, NOT AN OAUTH APP, AND THE DIFFERENCE IS A SECURITY PROPERTY.**
+# An OAuth App's `repo` scope is all-or-nothing: the token reaches every
+# repository the account can see. A GitHub App's user token reaches only what the
+# App was INSTALLED on, which is a per-repository choice the person makes and can
+# revoke. CLAUDE.md records per-repository grants as a cost to avoid; it is the
+# cheaper option here because the App already existed.
+#
+# ONE SECRET, NAMED, with the wildcard tail Secrets Manager appends -- never a
+# `theagentorg-shared-*` prefix, which would also match the webhook secret and the
+# dispatch token, neither of which this runtime should hold.
+#
+# **THE FIRST VALUE STORED HERE WAS DISCLOSED IN PLAINTEXT AND IS PENDING
+# ROTATION**, stored on the operator's explicit instruction. Rotation is
+# `update-secret` on this same id with NO redeploy, because `lib/github-oauth.ts`
+# reads it per call rather than at build time -- the property that makes the
+# leaked `github_pat_` in Terraform state so much worse than this one.
+data "aws_iam_policy_document" "amplify_compute_may_read_github_oauth" {
+  statement {
+    sid       = "ReadTheGitHubOAuthSecretAndNothingElse"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:theagentorg-shared-github-oauth-*"]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_read_github_oauth" {
+  name   = "read-github-oauth-secret"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_read_github_oauth.json
+}
+
+################################################################################
 # THE DISPATCH TOKEN, so a run can be started from the UI.
 #
 # Until now the only ways to start a run were opening an issue on the target

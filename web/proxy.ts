@@ -37,9 +37,16 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { SESSION_COOKIE } from "@/lib/cognito";
+import { GITHUB_SESSION_COOKIE } from "@/lib/github-session";
 
 export function proxy(request: NextRequest) {
-  if (request.cookies.get(SESSION_COOKIE)) {
+  // EITHER KIND OF SESSION. There are two sign-in paths and they produce different
+  // cookies: Cognito's ID token, and a GitHub session (Cognito cannot federate
+  // GitHub, which is OAuth2 and issues no `id_token`). Checking only the first
+  // would redirect every GitHub sign-in straight back to `/signin` — a completed
+  // sign-in that reads as a failed one, and an infinite loop from the person's
+  // side, because the callback would keep succeeding.
+  if (request.cookies.get(SESSION_COOKIE) || request.cookies.get(GITHUB_SESSION_COOKIE)) {
     return NextResponse.next();
   }
 

@@ -247,7 +247,29 @@ export const ENDPOINTS: readonly Endpoint[] = [
   {
     method: "GET",
     path: "/api/auth/logout",
-    summary: "Clear this application's cookie and Cognito's, then land on /signin",
+    summary: "Clear BOTH session cookies and Cognito's, then land on /signin",
+    authenticated: false,
+    mutates: false,
+  },
+  // SIGN IN WITH GITHUB — a second path, because Cognito CANNOT federate GitHub:
+  // GitHub is OAuth2 and issues no `id_token` for Cognito to consume. It is a
+  // GitHub APP rather than an OAuth App, so the user token it returns reaches only
+  // the repositories the app was installed on.
+  {
+    method: "GET",
+    path: "/api/auth/github",
+    summary: "Mint a state cookie and redirect to GitHub to authorize",
+    authenticated: false,
+    mutates: false,
+  },
+  {
+    method: "GET",
+    path: "/api/auth/github/callback",
+    // `mutates: false` for the same reason the Cognito callback is: it establishes
+    // a session and writes nothing a person would find in the audit trail. The
+    // field tracks whether a row in the decision log moves.
+    summary:
+      "Compare the state, exchange the code, read the GitHub user, set the session cookie",
     authenticated: false,
     mutates: false,
   },

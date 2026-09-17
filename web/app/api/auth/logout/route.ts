@@ -33,6 +33,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { SESSION_COOKIE, logoutUrl } from "@/lib/cognito";
+import { GITHUB_SESSION_COOKIE } from "@/lib/github-session";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,25 @@ export async function GET(request: NextRequest): Promise<Response> {
   // reports success while the session continues. That is this repository's
   // signature failure shape, in a cookie jar.
   response.cookies.set(SESSION_COOKIE, "", {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+
+  // THE GITHUB SESSION TOO. There are two sign-in paths and two cookies, and
+  // clearing one is a sign-out that reports success while the other session
+  // continues -- which is worse than not offering sign-out at all, because the
+  // person believes they have ended it. Cleared UNCONDITIONALLY rather than only
+  // when present: a `set` with `maxAge: 0` on an absent cookie is a no-op, while a
+  // condition is a branch that can be wrong.
+  //
+  // The Cognito `/logout` redirect above does nothing for this one -- GitHub's own
+  // authorisation also survives, at
+  // github.com/settings/connections/applications/<client-id>, exactly as
+  // `/api/link/github` already says about revocation it cannot reach.
+  response.cookies.set(GITHUB_SESSION_COOKIE, "", {
     httpOnly: true,
     secure: true,
     sameSite: "lax",

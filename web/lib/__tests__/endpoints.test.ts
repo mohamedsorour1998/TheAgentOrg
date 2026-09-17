@@ -126,7 +126,7 @@ describe("what the table claims about each route", () => {
     }
   });
 
-  it("authenticates everything except the six that structurally cannot", () => {
+  it("authenticates everything except the eight that structurally cannot", () => {
     // The `/api/auth/*` routes ARE the sign-in — a route that required a session
     // to establish one could never establish the first — and `/api/session`'s
     // whole answer may be "nobody is signed in". Every other route requires a
@@ -152,6 +152,28 @@ describe("what the table claims about each route", () => {
     //
     // If a future route is added here, those two properties are the test.
     //
+    // **THE TWO GITHUB ROUTES JOINED ON 2026-09-17, AND ONE OF THEM BREAKS THE
+    // FIRST PROPERTY ABOVE — deliberately, and it is the reason this paragraph
+    // exists rather than a silent extra line in the list.** `github/callback`
+    // DOES issue a session, where `signup` and `confirm` pointedly do not. So the
+    // property that makes it safe is the one `/api/auth/callback` has always
+    // relied on, stated plainly:
+    //
+    //   * IT ISSUES A SESSION ONLY AGAINST A CODE THE IDENTITY PROVIDER SIGNED
+    //     OFF. The code is exchanged with GitHub using the client secret, and
+    //     GitHub answers HTTP 200 with `{"error": ...}` for a code that is wrong,
+    //     expired or reused — so the BODY is what decides, not the status. No
+    //     code, no session.
+    //   * THE REQUEST CANNOT CHOOSE A TENANT. `tenantForGitHub` derives it from
+    //     GitHub's IMMUTABLE NUMERIC ID, never from the login (a login can be
+    //     renamed and the freed name claimed by somebody else, which would hand a
+    //     whole workspace to a stranger) and never from anything in the request.
+    //   * THE `state` IS COMPARED, not merely minted. A flow that sends state and
+    //     never checks it lets an attacker hand somebody a callback URL carrying
+    //     the attacker's code, silently signing that person into the wrong account.
+    //
+    // `GET /api/auth/github` merely redirects and issues nothing at all.
+    //
     // THE LIST IS A LITERAL AND NOT DERIVED FROM `ENDPOINTS`, which is the whole
     // reason it can catch anything. A version computing the expectation from the
     // same table it checks would move with any change and refuse none — the
@@ -162,6 +184,8 @@ describe("what the table claims about each route", () => {
     );
     expect(unauthenticated.sort()).toEqual([
       "GET /api/auth/callback",
+      "GET /api/auth/github",
+      "GET /api/auth/github/callback",
       "GET /api/auth/logout",
       "GET /api/auth/signin",
       "GET /api/session",

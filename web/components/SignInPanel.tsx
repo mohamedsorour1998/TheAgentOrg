@@ -183,19 +183,54 @@ export function SignInPanel() {
           headline="You are not signed in"
           action="Signing in records your GitHub login against every gate decision you make."
         >
-          <form action="/api/auth/signin" method="get" onSubmit={onStart}>
-            <button type="submit" className="btn" disabled={starting}>
-              {starting ? "Taking you to sign-in…" : "Sign in"}
-            </button>
-          </form>
+          {/* GITHUB FIRST, because this product acts on GitHub repositories and the
+              account that owns them is the one whose name belongs beside a gate
+              decision. It is a GitHub APP rather than an OAuth App, so the token it
+              returns reaches only the repositories the app was INSTALLED on --
+              `repo` scope on an OAuth App would have reached every repository the
+              account can see.
+
+              A PLAIN <a>, NOT <Link>: this leaves our origin for github.com, and a
+              client-side navigation cannot follow that. */}
+          <a href="/api/auth/github" className="btn" style={{ display: "inline-block" }}>
+            Continue with GitHub
+          </a>
+
           <p
             className="prose"
             style={{ margin: `var(--gap-4) 0 0`, fontSize: "var(--step-small)" }}
           >
-            Signing in happens on the hosted sign-in page, so this application never
-            receives your password. New here? Create an account below — it gets its
-            own organisation, so it starts empty rather than unauthorised.
+            GitHub is the way in: it is where your repositories live, and it is the
+            login recorded against every gate decision you make. This application
+            never sees your password.
           </p>
+
+          {/* THE EMAIL PATH IS KEPT AND DEMOTED, not deleted. Accounts already
+              exist on it -- `reviewer-01` among them -- and removing the only way
+              those accounts can sign in would be a migration, not a redesign. */}
+          <details style={{ marginTop: "var(--gap-6)" }}>
+            <summary style={{ cursor: "pointer", fontSize: "var(--step-small)" }}>
+              Sign in with an email address instead
+            </summary>
+            <form
+              action="/api/auth/signin"
+              method="get"
+              onSubmit={onStart}
+              style={{ marginTop: "var(--gap-3)" }}
+            >
+              <button type="submit" className="btn" disabled={starting}>
+                {starting ? "Taking you to sign-in…" : "Sign in with email"}
+              </button>
+            </form>
+            <p
+              className="prose"
+              style={{ margin: `var(--gap-3) 0 0`, fontSize: "var(--step-small)" }}
+            >
+              Happens on the hosted sign-in page, so this application never receives
+              your password. New here? Create an account below — it gets its own
+              organisation, so it starts empty rather than unauthorised.
+            </p>
+          </details>
         </EmptyState>
       )}
 
