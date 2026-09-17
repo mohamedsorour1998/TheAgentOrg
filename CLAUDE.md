@@ -4694,6 +4694,87 @@ stored on the operator's explicit instruction after the risk was stated. Rotatio
 reads it per call rather than at build time — the property that makes this far less
 costly than the `github_pat_` baked into Terraform state.
 
+#### THE APPROVAL 403, AND A PROBE THAT SEPARATES IT FROM A 422 WITHOUT MUTATING
+
+Approving a gate from the UI answered `HTTP 500 — PipelineError: the approve read
+failed`. The real cause, reproduced by hand against the live API:
+
+```
+POST /repos/.../actions/runs/<id>/pending_deployments
+403 {"message":"Resource not accessible by personal access token"}
+x-accepted-github-permissions: deployments=write
+```
+
+**The dispatch token is a fine-grained PAT that never carried `Deployments: write`.**
+`current_user_can_approve` was `true` and the token's `/user` is the repository owner,
+so nothing about identity was wrong — only one permission was missing. This is the
+**same shape as the DLQ finding** above, where the same token had been narrowed and
+lost `actions:write`: *every component reporting success while the thing did not
+happen.* A token narrowed until one capability disappears fails where nothing reports
+it.
+
+**THE PROBE THAT CONFIRMS THE FIX WITHOUT SPENDING THE GATE.** Re-testing the real
+call would APPROVE the run and destroy the demo it was being fixed for. Sending a
+deliberately impossible `environment_ids: [1]` separates the two answers cleanly,
+because authorization is checked before input:
+
+```
+before the permission:  403 Resource not accessible by personal access token
+after  the permission:  422 Validation Failed: No pending deployment requests
+                            to approve or reject
+```
+
+A 422 is the *input* being refused, which can only happen once the *caller* has been
+accepted. Generalises to any write API whose effect you cannot afford: **send a
+request that must fail validation and read which layer refuses it.**
+
+**`pipeline.ts` WAS DISCARDING THE FIELD THAT NAMED THE CAUSE**, which is why this
+needed a live reproduction at all. It wrapped errors as `${name}: ${message}` and
+dropped `detail` — and `detail` held `GitHub answered 403: Resource not accessible`.
+Errors here carry a `message` a person may be shown and a `detail` for the log; a
+wrapper keeping only the first turns every careful refusal into "something went
+wrong". The log said `DispatchRefused: the decision was not recorded`: true, and
+useless.
+
+**A BETTER DESIGN IS DEFERRED AND NAMED.** The approval goes through the SERVICE
+token, so GitHub attributes it to the token rather than to the person — `dispatch.ts`
+already says so at the call site. Now that GitHub sign-in works the application holds
+the person's own token and could release the gate AS THEM, which is what a gate is
+for. It needs `Deployments: write` on the App and a re-consent, so it is a follow-up
+rather than an hour-before-a-demo change.
+
+#### THE SIGN-IN LANDED ON `localhost`, AND ONLY THE LAST HOP WAS WRONG
+
+`/api/auth/github/callback` completed — state matched, code exchanged, session minted,
+cookie set on the real domain — and then redirected to **`https://localhost:3000/runs`**,
+which the browser cannot reach. It reads as the whole sign-in being broken.
+
+**Behind Amplify the SSR handler runs in a Lambda behind CloudFront, so
+`request.nextUrl.origin` is the INTERNAL origin.** `app/api/auth/logout/route.ts`
+already read `AUTH_URL` for exactly this reason, and the GitHub routes were written
+without carrying it across — so it is now one `appOrigin()` helper rather than five
+call sites each remembering. `originIsSecure()` follows: derived from the internal
+request, the session cookie is marked **non-Secure on an https site**, which browsers
+accept, so it would never have been noticed.
+
+**THIS CANNOT BE REPRODUCED LOCALLY, WHICH IS WHY IT SHIPPED.** With no proxy in
+front, `nextUrl.origin` *is* the public origin and every redirect is correct. Any
+`new URL(path, request.…origin)` in a route has this shape.
+
+#### THE REPOSITORY DROPDOWN — the fix the code had already named
+
+`app/api/repositories/route.ts` said, about OAuth's `repo` scope: *"it is
+all-or-nothing across every repository the person can reach … The honest fix is a
+GitHub App."* There is one now, so `/api/github/repositories` lists what the App was
+**installed on** rather than everything the account can see — per-repository scope
+that an OAuth App cannot express.
+
+**THREE EMPTIES, THREE REMEDIES, and collapsing them tells somebody to install an app
+they have already installed:** `linked: false` (sign in with GitHub), `linked: true`
+with `[]` (install it somewhere), `unavailable: true` (GitHub did not answer; type the
+name). `scan_provenance`'s rule, on a dropdown. The text field stays beside it,
+because the list covers only installed repositories.
+
 #### MANAGED LOGIN v2, AND THE OBJECTION THAT WAS NEVER ABOUT BRANDING
 
 Both this file and the reference deployment declined the v2 upgrade as *"a cosmetic
