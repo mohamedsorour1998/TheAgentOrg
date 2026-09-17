@@ -344,6 +344,40 @@ resource "aws_iam_role_policy" "amplify_compute_may_read_github_oauth" {
 }
 
 ################################################################################
+# THE SESSION KEY, which encrypts a GitHub sign-in's cookie.
+#
+# **THIS GRANT WAS MISSING FOR ONE COMMIT AND THE FAILURE WOULD HAVE BEEN
+# PERFECTLY SILENT UNTIL SOMEBODY CLICKED SIGN IN.** The secret was created, the
+# code read it, and the role had no `GetSecretValue` on it -- so
+# `/api/auth/github` (which reads only the OAuth secret) answered a correct 307
+# while the CALLBACK would have failed at the last step, after GitHub had already
+# authorised the person. A sign-in that works right up until the moment it
+# completes.
+#
+# Found by reading the role's policy list back rather than by any test: no test in
+# either suite can see an IAM policy, which is the same blind spot that left
+# `computeRoleArn` null while every gate was green.
+#
+# A256GCM content encryption, so a stolen cookie can be REPLAYED but the GitHub
+# token inside it cannot be extracted. Rotating this key signs everybody out by
+# design, which is why it is a separate secret from the GitHub App's credentials:
+# one can be rotated without the other.
+data "aws_iam_policy_document" "amplify_compute_may_read_session_key" {
+  statement {
+    sid       = "ReadTheWebSessionKeyAndNothingElse"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${local.region}:${local.account_id}:secret:theagentorg-shared-web-session-key-*"]
+  }
+}
+
+resource "aws_iam_role_policy" "amplify_compute_may_read_session_key" {
+  name   = "read-web-session-key"
+  role   = aws_iam_role.amplify_compute.id
+  policy = data.aws_iam_policy_document.amplify_compute_may_read_session_key.json
+}
+
+################################################################################
 # THE DISPATCH TOKEN, so a run can be started from the UI.
 #
 # Until now the only ways to start a run were opening an issue on the target
