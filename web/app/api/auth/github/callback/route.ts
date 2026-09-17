@@ -29,7 +29,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { SESSION_COOKIE } from "@/lib/cognito";
-import { exchangeCode } from "@/lib/github-oauth";
+import { appOrigin, exchangeCode, originIsSecure } from "@/lib/github-oauth";
 import {
   GITHUB_SESSION_COOKIE,
   MAX_AGE_SECONDS,
@@ -41,7 +41,7 @@ import { STATE_COOKIE } from "../route";
 export const dynamic = "force-dynamic";
 
 function back(request: NextRequest, reason: string): NextResponse {
-  const url = new URL(`/signin?error=${reason}`, request.nextUrl.origin);
+  const url = new URL(`/signin?error=${reason}`, appOrigin(request.nextUrl.origin));
   const response = NextResponse.redirect(url);
   // THE STATE COOKIE IS CLEARED ON EVERY EXIT, success or failure. A state left
   // behind is a value an attacker gets a second attempt against, and a stale one
@@ -95,10 +95,10 @@ export async function GET(request: NextRequest): Promise<Response> {
     return back(request, "github_session");
   }
 
-  const response = NextResponse.redirect(new URL("/runs", request.nextUrl.origin));
+  const response = NextResponse.redirect(new URL("/runs", appOrigin(request.nextUrl.origin)));
   response.cookies.set(GITHUB_SESSION_COOKIE, cookieValue, {
     httpOnly: true,
-    secure: request.nextUrl.protocol === "https:",
+    secure: originIsSecure(request.nextUrl.origin),
     sameSite: "lax",
     path: "/",
     maxAge: MAX_AGE_SECONDS,

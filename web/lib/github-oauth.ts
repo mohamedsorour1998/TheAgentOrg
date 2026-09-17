@@ -68,6 +68,43 @@ export class GitHubAuthRefused extends Error {
   }
 }
 
+/**
+ * THE PUBLIC ORIGIN — never `request.nextUrl.origin`.
+ *
+ * **MEASURED FROM THE DEPLOYED APP: THE SIGN-IN COMPLETED AND SENT THE BROWSER TO
+ * `https://localhost:3000/runs`.** Everything before that had worked — the state
+ * matched, the code was exchanged, the session cookie was minted and set on the
+ * real domain — and the last line of the callback sent the person to an address
+ * their machine cannot reach. Safari says it cannot connect, which reads as the
+ * whole sign-in being broken when in fact only the final hop is.
+ *
+ * Behind Amplify the SSR handler runs in a Lambda behind CloudFront, so the request
+ * it receives carries the INTERNAL origin. `request.nextUrl.origin` is that internal
+ * value; the public one is only ever `AUTH_URL`. `app/api/auth/logout/route.ts`
+ * already read it this way (`process.env.AUTH_URL ?? request.nextUrl.origin`) and
+ * the GitHub routes were written without carrying that across — which is the
+ * argument for one helper rather than four call sites each remembering.
+ *
+ * The fallback is kept for the self-hosted stack, where there is no proxy and the
+ * request origin IS the public one.
+ */
+export function appOrigin(fallback: string): string {
+  const base = process.env.AUTH_URL;
+  return base ? base.replace(/\/+$/, "") : fallback;
+}
+
+/**
+ * Is the public origin HTTPS? Decides the `Secure` flag on session cookies.
+ *
+ * Read from the PUBLIC origin for the same reason: behind the proxy the internal
+ * request is plain http, so a flag derived from it marks a cookie non-Secure on a
+ * site served entirely over https. Browsers accept that, which is exactly why it
+ * would not have been noticed.
+ */
+export function originIsSecure(fallback: string): boolean {
+  return appOrigin(fallback).startsWith("https:");
+}
+
 /** The redirect URI, which must match the App's "Redirect URI" field EXACTLY. */
 export function redirectUri(): string {
   const base = process.env.AUTH_URL;

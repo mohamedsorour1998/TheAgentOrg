@@ -23,7 +23,7 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 
-import { authorizeUrl } from "@/lib/github-oauth";
+import { appOrigin, authorizeUrl, originIsSecure } from "@/lib/github-oauth";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,7 @@ export async function GET(request: NextRequest): Promise<Response> {
   try {
     target = await authorizeUrl(state);
   } catch (error) {
-    const back = new URL("/signin?error=github", request.nextUrl.origin);
+    const back = new URL("/signin?error=github", appOrigin(request.nextUrl.origin));
     // The REASON is not put on the URL: it names a secret id and a configuration
     // state, which is information an unauthenticated visitor has no use for.
     console.warn("[auth/github] refused to start:", (error as Error).message);
@@ -53,7 +53,7 @@ export async function GET(request: NextRequest): Promise<Response> {
     // `secure` follows the origin: a bare-http localhost stack would silently drop
     // a `secure` cookie and the callback would then refuse every sign-in with a
     // state mismatch -- a working flow reading as a CSRF failure.
-    secure: request.nextUrl.protocol === "https:",
+    secure: originIsSecure(request.nextUrl.origin),
     sameSite: "lax",
     // SCOPED TO THE AUTH PATH, not the whole site: this cookie is only ever read by
     // the callback, and a cookie sent on every request is a cookie with more

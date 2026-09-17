@@ -66,6 +66,26 @@ export function RepositoryPicker() {
   const [typed, setTyped] = useState("");
   const [typoed, setTypoed] = useState("");
 
+  /**
+   * THE REPOSITORIES THIS PERSON CAN PICK, from their GitHub App installation.
+   *
+   * Reported: *"i need dropdown i dont want to write any"*. Typing `owner/name`
+   * means knowing the exact spelling, leaving the product to check it, and getting
+   * a run scoped to a repository that does not exist if one character is wrong.
+   *
+   * **THREE STATES, NOT TWO**, because they want three different remedies and a
+   * screen that collapses them sends people to the wrong one:
+   *
+   *     null                     still loading
+   *     linked === false         signed in with email -- sign in with GitHub
+   *     [] with linked === true  the app is installed nowhere -- install it
+   *     unavailable === true     GitHub did not answer -- type the name instead
+   */
+  const [available, setAvailable] = useState<string[] | null>(null);
+  const [linked, setLinked] = useState<boolean | null>(null);
+  const [unavailable, setUnavailable] = useState(false);
+  const [picked, setPicked] = useState("");
+
   /** Seed BOTH from one answer, so the baseline and the boxes cannot drift. */
   const adopt = useCallback((repositories: RepositoryView[]) => {
     setServer(repositories);
@@ -93,6 +113,37 @@ export function RepositoryPicker() {
       await load();
     })();
   }, [load]);
+
+  /**
+   * The pickable list, loaded once and INDEPENDENTLY of the scope above.
+   *
+   * Separate from `load()` on purpose: this one reaches GitHub, so it is slower and
+   * it can fail on its own. Folding it into the scope read would make a GitHub
+   * outage empty the screen that shows what is already in scope — a convenience
+   * taking a working screen down with it.
+   *
+   * The async IIFE is not decoration: Next 16's `react-hooks/set-state-in-effect`
+   * refuses a loader called from an effect body and cannot see through
+   * `useCallback`, so every `setState` has to cross a microtask boundary.
+   */
+  useEffect(() => {
+    void (async () => {
+      const result = await getJson<{
+        repositories: string[];
+        linked: boolean;
+        unavailable?: boolean;
+      }>("/api/github/repositories");
+      if (result.ok) {
+        setAvailable(result.value.repositories);
+        setLinked(result.value.linked);
+        setUnavailable(result.value.unavailable === true);
+        return;
+      }
+      // A refusal here is not worth a red banner: the text field still works.
+      setAvailable([]);
+      setLinked(false);
+    })();
+  }, []);
 
   function toggle(fullName: string) {
     setSaved(false);
@@ -129,8 +180,16 @@ export function RepositoryPicker() {
    * person learns about a typo while they are looking at the field, rather than
    * after a round trip.
    */
-  function addTyped() {
-    const name = typed.trim();
+  /**
+   * ONE PATH INTO THE LIST, whether the name was PICKED or TYPED.
+   *
+   * Extracted when the dropdown arrived. Two entry points each doing their own
+   * de-duplication and ticking is how the picked path and the typed path end up
+   * disagreeing about what "already listed" means -- and only one of them would
+   * ever be exercised by hand.
+   */
+  function addName(raw: string) {
+    const name = raw.trim();
     if (name.split("/").length !== 2 || name.split("/").some((part) => !part)) {
       setTypoed("Use the form owner/name, as GitHub writes it.");
       return;
@@ -150,6 +209,10 @@ export function RepositoryPicker() {
     setTypoed("");
   }
 
+  function addTyped() {
+    addName(typed);
+  }
+
   if (failure && server === null) {
     return <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />;
   }
@@ -164,10 +227,81 @@ export function RepositoryPicker() {
         <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />
       ) : null}
 
+      {/* PICK, DO NOT TYPE. The list is what the GitHub App was INSTALLED on --
+          not everything the account can see, which is what an OAuth App's `repo`
+          scope would have given. Already-listed repositories are filtered out, so
+          the dropdown only ever offers something that would actually change the
+          scope; an option that does nothing when chosen reads as a broken control. */}
+      {available === null ? null : (() => {
+        const offerable = available.filter((name) => !server.some((r) => r.full_name === name));
+        if (offerable.length > 0) {
+          return (
+            <div style={{ display: "grid", gap: "var(--gap-2)" }}>
+              <label htmlFor="pick-repository" className="eyebrow" style={{ margin: 0 }}>
+                Pick a repository
+              </label>
+              <div style={{ display: "flex", gap: "var(--gap-3)", flexWrap: "wrap" }}>
+                <select
+                  id="pick-repository"
+                  value={picked}
+                  onChange={(event) => setPicked(event.target.value)}
+                  style={{
+                    padding: "var(--gap-2)",
+                    font: "inherit",
+                    minWidth: "22ch",
+                    flex: "1 1 22ch",
+                    background: "var(--surface-raised)",
+                    color: "var(--text)",
+                    border: "1px solid var(--border)",
+                  }}
+                >
+                  <option value="">Choose from your GitHub installation…</option>
+                  {offerable.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={!picked}
+                  onClick={() => {
+                    addName(picked);
+                    setPicked("");
+                  }}
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          );
+        }
+        // THE THREE EMPTIES, EACH WITH ITS OWN REMEDY. Collapsing them tells
+        // somebody to install an app they have already installed, or to sign in
+        // when they already are.
+        const note = unavailable
+          ? "GitHub did not answer, so there is no list to choose from. Type the name instead."
+          : linked === false
+            ? "Sign in with GitHub to pick from a list instead of typing."
+            : available.length === 0
+              ? "The Agent Org app is not installed on any repository yet. Install it on GitHub, then reload."
+              : "Every repository from your installation is already listed below.";
+        return (
+          <p className="prose" style={{ margin: 0, fontSize: "var(--step-small)", opacity: 0.8 }}>
+            {note}
+          </p>
+        );
+      })()}
+
       {/* ADD A REPOSITORY. A form so Enter submits, which is how anyone types
           one name after another. `noValidate` is absent deliberately -- there is
           no `pattern` here, because the message this component writes is better
-          than the browser's, and the server revalidates regardless. */}
+          than the browser's, and the server revalidates regardless.
+
+          KEPT BESIDE THE DROPDOWN rather than replaced by it: the list covers only
+          repositories the App is installed on, and somebody adding a repository
+          before installing there would otherwise have no way in at all. */}
       <form
         onSubmit={(event) => {
           event.preventDefault();

@@ -6,6 +6,9 @@
  * version of it reads as obviously correct.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const send = vi.fn();
@@ -71,6 +74,99 @@ describe("which tenant a GitHub account acts in", () => {
     expect(tenantForGitHub("MohamedSorour1998", 111)).toBe("tenant-zero");
     // And nobody else gets it.
     expect(tenantForGitHub("someone", 112)).toBe("t-gh-112");
+  });
+});
+
+describe("the origin a redirect is built from", () => {
+  /**
+   * **THE SIGN-IN COMPLETED AND SENT THE BROWSER TO `https://localhost:3000/runs`.**
+   * Reported from the deployed app. Everything before the last line had worked —
+   * the state matched, the code was exchanged, the session was minted and the
+   * cookie set on the real domain — and then the person was sent to an address
+   * their machine cannot reach. Safari says it cannot connect, which reads as the
+   * whole sign-in being broken when only the final hop is.
+   *
+   * **THIS CANNOT BE REPRODUCED LOCALLY**, which is the whole reason it shipped:
+   * with no proxy in front, `request.nextUrl.origin` IS the public origin and
+   * every redirect is correct. Behind Amplify the handler runs in a Lambda behind
+   * CloudFront and receives the internal origin. `app/api/auth/logout/route.ts`
+   * already read `AUTH_URL` for exactly this reason; the GitHub routes were
+   * written without carrying it across.
+   */
+  it("prefers AUTH_URL over the request's own origin", async () => {
+    const { appOrigin } = await import("../lib/github-oauth");
+    process.env.AUTH_URL = "https://theagentorg.rosettacloud.app";
+
+    // The internal origin the Lambda actually sees, which must NOT win.
+    expect(appOrigin("https://localhost:3000")).toBe("https://theagentorg.rosettacloud.app");
+    expect(new URL("/runs", appOrigin("https://localhost:3000")).toString()).toBe(
+      "https://theagentorg.rosettacloud.app/runs",
+    );
+    delete process.env.AUTH_URL;
+  });
+
+  it("falls back to the request origin for the self-hosted stack", async () => {
+    const { appOrigin } = await import("../lib/github-oauth");
+    delete process.env.AUTH_URL;
+    // No proxy there, so the request origin is the public one.
+    expect(appOrigin("http://127.0.0.1:3000")).toBe("http://127.0.0.1:3000");
+  });
+
+  it("tolerates a trailing slash on AUTH_URL", async () => {
+    const { appOrigin } = await import("../lib/github-oauth");
+    process.env.AUTH_URL = "https://theagentorg.rosettacloud.app/";
+    // `new URL("/runs", base)` is fine either way, but a doubled slash shows up in
+    // logs and in the address bar, and somebody will file it as a bug.
+    expect(appOrigin("x")).toBe("https://theagentorg.rosettacloud.app");
+    delete process.env.AUTH_URL;
+  });
+
+  it("is what the routes actually build their redirects from", () => {
+    /**
+     * The tests above prove `appOrigin` WORKS. They cannot prove anything CALLS it,
+     * and a correct helper nobody calls is this repository's second named pattern —
+     * which is precisely the state the routes were in when the bug shipped.
+     *
+     * Asserted over comment-stripped source, because the docstrings in both routes
+     * discuss `request.nextUrl.origin` at length and a bare substring check would
+     * be satisfied by the prose explaining the hazard. That exact failure was
+     * caught in this session on the sign-out link.
+     */
+    const strip = (source: string) =>
+      source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
+    for (const file of [
+      "app/api/auth/github/route.ts",
+      "app/api/auth/github/callback/route.ts",
+    ]) {
+      const code = strip(readFileSync(join(__dirname, "..", file), "utf8"));
+
+      // ANTI-VACUITY: the stripper must leave the route behind.
+      expect(code.includes("export async function GET"), `${file}: stripped to nothing`).toBe(true);
+
+      expect(
+        /new URL\([^)]*,\s*request\.nextUrl\.origin\s*\)/.test(code),
+        `${file} builds a redirect from request.nextUrl.origin. Behind Amplify that is ` +
+          `the Lambda's INTERNAL origin, so sign-in completes and sends the browser to ` +
+          `https://localhost:3000/runs, which their machine cannot reach.`,
+      ).toBe(false);
+
+      expect(
+        code.includes("appOrigin("),
+        `${file} does not use appOrigin, so its redirects are not public-origin safe`,
+      ).toBe(true);
+    }
+  });
+
+  it("marks the session cookie Secure from the PUBLIC origin", async () => {
+    const { originIsSecure } = await import("../lib/github-oauth");
+    process.env.AUTH_URL = "https://theagentorg.rosettacloud.app";
+    // Behind the proxy the internal request is plain http, so a flag derived from
+    // it marks the cookie non-Secure on a site served entirely over https.
+    // Browsers ACCEPT that, which is exactly why it would not have been noticed.
+    expect(originIsSecure("http://localhost:3000")).toBe(true);
+    delete process.env.AUTH_URL;
+    expect(originIsSecure("http://127.0.0.1:3000")).toBe(false);
   });
 });
 

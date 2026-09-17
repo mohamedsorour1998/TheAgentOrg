@@ -251,6 +251,18 @@ export const ENDPOINTS: readonly Endpoint[] = [
     authenticated: false,
     mutates: false,
   },
+  {
+    // THE PICKABLE LIST, from the signed-in person's GitHub App INSTALLATION --
+    // not every repository their account can see. `authenticated: true`: it reads
+    // a credential this application holds on their behalf, so an anonymous caller
+    // must not be able to drive GitHub API calls from this deployment's address.
+    // `mutates: false` -- it reads GitHub and writes nothing here.
+    method: "GET",
+    path: "/api/github/repositories",
+    summary: "The repositories this person's GitHub App installation covers",
+    authenticated: true,
+    mutates: false,
+  },
   // SIGN IN WITH GITHUB — a second path, because Cognito CANNOT federate GitHub:
   // GitHub is OAuth2 and issues no `id_token` for Cognito to consume. It is a
   // GitHub APP rather than an OAuth App, so the user token it returns reaches only

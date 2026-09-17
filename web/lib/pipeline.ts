@@ -265,9 +265,22 @@ async function readPipeline<T>(
     // deployment is misconfigured -- an unset role ARN, or a session tag STS
     // refused -- and reporting it as an empty list would hide a broken deployment
     // behind a screen that reads as "you have no runs".
+    // **THE INNER `detail` IS CARRIED, AND DROPPING IT COST A DIAGNOSIS.** This
+    // used to report `${name}: ${message}` only. An approval failed with
+    // `DispatchRefused: the decision was not recorded` -- true, and useless: the
+    // sentence naming the actual cause was sitting in that error's OWN `detail`
+    // field (`GitHub answered 403: Resource not accessible by personal access
+    // token`), which this line discarded. The failure had to be reproduced by hand
+    // against the live API to learn a thing the server already knew.
+    //
+    // Errors in this codebase carry a two-part shape on purpose: a `message` a
+    // person may be shown and a `detail` for the log. A wrapper that keeps only
+    // the first turns every careful refusal into "something went wrong".
+    const inner = error as Error & { detail?: string };
+    const detail = typeof inner.detail === "string" && inner.detail ? ` -- ${inner.detail}` : "";
     throw new PipelineError(
       `the ${moduleName} read failed`,
-      `${(error as Error).name}: ${(error as Error).message}`,
+      `${inner.name}: ${inner.message}${detail}`,
     );
   }
 }
