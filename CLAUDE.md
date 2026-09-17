@@ -4694,6 +4694,94 @@ stored on the operator's explicit instruction after the risk was stated. Rotatio
 reads it per call rather than at build time — the property that makes this far less
 costly than the `github_pat_` baked into Terraform state.
 
+#### MANAGED LOGIN v2, AND THE OBJECTION THAT WAS NEVER ABOUT BRANDING
+
+Both this file and the reference deployment declined the v2 upgrade as *"a cosmetic
+gain"* because it *"changes the sign-in URL shape"*. **That was true of `/login`, and
+`/login` was a choice.** It is the CLASSIC hosted UI path and is version-specific;
+`/oauth2/authorize` is the standard OAuth endpoint and **both versions serve it**.
+
+So the coupling was removed first and verified alone, against the pool while it was
+still at v1:
+
+```
+/oauth2/authorize -> 302 -> /login -> 200 <title>Signin</title>
+```
+
+Then the domain was flipped. **Two changes at once would have left no way to tell
+which one broke a sign-in**, which is the only reason this is worth a paragraph.
+
+**EVERY KEY IN THE SETTINGS DOCUMENT WAS READ OUT OF COGNITO, NOT OUT OF THE DOCS.**
+The first attempt was written from reasoning and refused — and the API names each
+offender, which is the good failure:
+
+```
+InvalidParameterException: Invalid settings provided. Validation errors:
+  [{property: $.components.form.instructions, errorType: UnknownProperty},
+   {property: $.components.pageBackground.lightMode.backgroundColor, ...},
+   {property: $.categories.form.borderRadius, ...}]
+```
+
+Six guesses, six wrong, and the corrections are not derivable: **`instructions`
+belongs to `categories.form` while `borderRadius` belongs to `components.form`, and
+the page background's colour key is `color` where the form's is `backgroundColor`.**
+The authoritative schema comes from the service, not the documentation:
+
+```python
+create_managed_login_branding(UseCognitoProvidedValues=True)
+describe_managed_login_branding(ReturnMergedResources=True)   # Cognito's OWN document
+```
+
+**VERIFIED SERVED, NOT MERELY STORED**, which is the distinction that matters because
+`describe` lists an asset that renders as nothing:
+
+```
+domain ManagedLoginVersion   2   (READ BACK, never the value sent) · ACTIVE
+/api/auth/signin -> 307 -> /oauth2/authorize -> 200  <title>Sign-in</title>
+                                                     ^ v2; v1 said "Signin"
+theme CSS 39722b   0b0f17 x3 · 131a25 x2 · e8ecf3 · 22d3ee · 1f2937 x3
+dark-form_logo.svg    200 535b -> "The Agent Org" / "SECURITY GATES FOR AGENT-WRITTEN CODE"
+dark-favicon_svg.svg  200 300b
+--cognito-page-background-image -> dark-page_background.svg
+the landed page carries <form>, name="username", type="password"
+```
+
+Four constraints, each measured off a rejection rather than read: `pageBackground.image`
+and `form.logo` both default to **`enabled: False`** (colours alone produce a page that
+reads as unstyled, 200 either way); a `FORM_LOGO` must be **1:1 to 4:1** (360×54 is
+`Invalid file dimension`, 360×96 is accepted); the SVG sanitiser **refuses `role` and
+`aria-label` on the root**; and `Assets` must be sent on the **converge** path too.
+`tests/test_cognito_branding.py` pins all four plus the palette agreeing with
+`globals.css` — the only thing standing between a redesign and a sign-in page in last
+month's colours.
+
+**A v1 `HOSTED_UI_CSS` BLOCK WAS WRITTEN AND DELETED UNAPPLIED, TWENTY MINUTES OLD.**
+The reference keeps its v1 CSS because it still serves a v1 prefix domain; this project
+does not, so that CSS styles a page nobody is served. Deleted rather than kept "as a
+fallback": **a palette that agrees with a page nobody visits is worse than none,
+because it reads as coverage.**
+
+#### A RED-STEP REVERT THAT APPEARED NOT TO TAKE — STALE BYTECODE
+
+Worth more than the test it happened under, and new to this file. After reverting
+M20 the named test **still failed**, reporting `360x54` while `grep` showed `96` in
+the source and `spec.__file__` named the right path.
+
+`96` → `54` **changes no byte count**, and CPython invalidates a `.pyc` on
+**(mtime, size)**. A same-size edit reverted inside the same filesystem-timestamp
+second therefore leaves a cache entry that still validates, and the mutated code keeps
+being served from `__pycache__`. It reads exactly like a failed revert, or like the
+code being broken.
+
+```
+find infra -name "__pycache__" -type d -exec rm -rf {} +
+```
+
+**The general form: a RED mutation that preserves file SIZE can outlive its own
+revert.** Prefer mutations that change length; and when a revert "does not take",
+suspect the bytecode before the edit. Same family as the artifact/configuration
+confusion — *code that runs, and is not the code you edited* — one layer down.
+
 ### ONE POSTGRES-SHAPED FLAG KEPT THE WHOLE TENANCY UI DARK — 2026-09-15
 
 Found by being asked "is it all working?" rather than by any gate, and it is the
