@@ -217,10 +217,23 @@ export const OAUTH_STATE_COOKIE = "agentorg_oauth_state";
 /**
  * Where to send a signed-out visitor. `redirect_uri` must be a registered callback.
  *
- * `/login` is the CLASSIC hosted UI path, which a pool at `ManagedLoginVersion: 1`
- * serves. Managed login (version 2) uses a different URL shape and needs a
- * branding style, so a pool provisioned at version 2 needs this builder rewritten
- * and the round trip re-tested — it is not a cosmetic setting.
+ * **`/oauth2/authorize`, NOT `/login`, AND THE SWITCH IS WHAT MAKES THE MANAGED
+ * LOGIN v2 UPGRADE SAFE.** `/login` is the CLASSIC hosted UI path: it is what a
+ * pool at `ManagedLoginVersion: 1` serves, and it is version-specific. This
+ * previously said that upgrading to v2 "needs this builder rewritten and the round
+ * trip re-tested", which was true of `/login` and is the reason the reference
+ * deployment declined the upgrade as "a cosmetic gain".
+ *
+ * `/oauth2/authorize` is the STANDARD OAuth 2.0 endpoint and is served identically
+ * under both versions — v1 renders the classic page, v2 renders managed login — so
+ * the sign-in URL stops being coupled to the pool's branding version at all. The
+ * builder is now correct before, during and after the upgrade, which means the
+ * upgrade cannot strand a deployed bundle pointing at a path that changed
+ * underneath it.
+ *
+ * Changed FIRST and verified on its own, deliberately: two changes at once (the
+ * endpoint and the domain's version) would have left no way to tell which one broke
+ * a sign-in.
  *
  * `state` IS CARRIED, AND THE REFERENCE IMPLEMENTATION DOES NOT CARRY IT. That is
  * the one deliberate addition this lane makes to the reference's flow, and the
@@ -261,7 +274,7 @@ export function hostedUiUrl(options: {
     redirect_uri: options.redirectUri,
     state: options.state,
   });
-  return `${domain()}/login?${params.toString()}`;
+  return `${domain()}/oauth2/authorize?${params.toString()}`;
 }
 
 /** Where to send somebody signing out. Clears COGNITO's session, not ours. */

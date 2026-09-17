@@ -363,3 +363,306 @@ def hosted_domain() -> str:
     from it, so it is an ORIGIN with a scheme and no trailing slash.
     """
     return f"https://{DOMAIN_PREFIX}.auth.{REGION}.amazoncognito.com"
+
+
+################################################################################
+# THE SIGN-IN PAGE'S PALETTE — restated from `web/app/globals.css`.
+#
+# **A v1 `HOSTED_UI_CSS` BLOCK STOOD HERE FOR TWENTY MINUTES AND WAS DELETED
+# UNAPPLIED**, recorded because the reasoning that produced it was sound and the
+# conclusion still expired. It styled the CLASSIC hosted UI, which is what this pool
+# served at `ManagedLoginVersion: 1`, and it was chosen over v2 because v2 "changes
+# the sign-in URL shape" — the reference deployment's own reason for declining the
+# upgrade.
+#
+# That objection was never about branding: it was that `/login` is version-specific.
+# Once `lib/cognito.ts` built `/oauth2/authorize` instead — the standard OAuth
+# endpoint both versions serve — the coupling was gone and v2 cost nothing extra.
+# The domain is now v2, so `set_ui_customization` styles a page nobody is served.
+#
+# Deleted rather than kept "as a fallback": the reference deployment keeps its v1 CSS
+# because it still has a v1 prefix domain in use, and this project does not. Code
+# reached by nothing is the second named pattern, and a palette that agrees with a
+# page nobody visits is worse than none — it reads as coverage.
+#
+# `PALETTE` itself is KEPT, because managed login v2 renders from it.
+#
+# **THE RULE ABOUT THIS BLOCK IS THAT IT RESTATES `globals.css`.** The sign-in page
+# is a different origin serving a page this repository does not render, so the
+# palette has to be written twice — and two copies keep agreeing right up until one
+# moves. `tests/test_cognito_branding.py` reads `web/app/globals.css` and asserts
+# every colour below appears there, which is the only thing standing between a
+# redesign and a sign-in page in last month's colours.
+
+PALETTE: dict[str, str] = {
+    "surface": "#0b0f17",  # near-black, hint of blue
+    "surface_raised": "#131a25",
+    "text": "#e8ecf3",  # off-white, never #fff
+    "text_muted": "#8b97ab",
+    "accent": "#22d3ee",  # cyan
+    "refused": "#fb7185",  # rose: a stated failure
+    "border": "#1f2937",
+}
+
+################################################################################
+# MANAGED LOGIN v2 — the sign-in page as a designed surface rather than a default.
+#
+# **THE OPERATOR ASKED FOR v2 AFTER THE RISK WAS STATED, AND THE RISK IS NOW
+# RETIRED RATHER THAN ACCEPTED.** The objection to v2 was never the branding: it was
+# that `/login` is a version-specific path, so upgrading would strand a deployed
+# bundle pointing at a URL that changed underneath it. `lib/cognito.ts` now builds
+# `/oauth2/authorize`, the standard OAuth endpoint, which both versions serve —
+# verified against the live v1 pool (302 -> /login -> 200 `<title>Signin</title>`)
+# BEFORE the version was touched. With that coupling gone the upgrade is a branding
+# change, which is what it was always described as.
+#
+# v2 replaces v1's `*-customizable` CSS classes with a JSON document over three
+# namespaces: `components` (named parts of the page), `componentClasses` (things
+# that recur, like every input) and `categories` (layout and which chrome is on).
+# Anything omitted falls back to Cognito's default — so this is a PARTIAL document
+# on purpose. Restating a default would freeze it, and the only values worth
+# pinning are the ones that are this product's rather than AWS's.
+#
+# FOUR CONSTRAINTS, EVERY ONE MEASURED BY THE REFERENCE DEPLOYMENT OFF A REJECTION
+# RATHER THAN READ IN THE DOCS. They are copied here as constraints, not as prose:
+#
+#   1. **`pageBackground.image` and `form.logo` default to `enabled: False`.** A
+#      settings document made only of colours produces a page that reads as
+#      UNSTYLED, and the branding call returns 200 either way. Colours alone left
+#      that project with a white card on near-white and a heading Cognito wrote.
+#   2. **A `FORM_LOGO` must be between 1:1 and 4:1.** A 360x54 lockup came back
+#      `Invalid file dimension`; 360x96 was accepted. Hence the 3.75:1 below.
+#   3. **The SVG sanitiser refuses `role` and `aria-label` on the root element**
+#      (`element [svg#role] is not allowed`). So these SVGs carry no ARIA, which is
+#      why the background is decorative and the logo's name is also the form's own
+#      heading.
+#   4. **`Assets` must be sent on the CONVERGE path as well as the create.** An
+#      update that sent only `Settings` would leave the page asking for images that
+#      were never uploaded — worse than the flat page it replaced.
+#
+# **`ColorMode` IS `DARK` ON EVERY ASSET, MATCHING `colorSchemeMode`.** An asset
+# uploaded under a mode the page never enters is stored and never rendered — the
+# same silent shape as a switch left off. This application has one palette and no
+# light mode; leaving the page browser-adaptive would give somebody on a light-mode
+# laptop a light sign-in page in front of a near-black dashboard.
+
+MANAGED_LOGIN_VERSION = 2
+
+
+def _hex8(colour: str, alpha: str = "ff") -> str:
+    """A `PALETTE` colour as managed login wants it: `rrggbbaa`, no leading `#`.
+
+    Every colour in the branding document is eight hex digits with an alpha byte.
+    A six-digit value is accepted by the API and drawn as nothing — the failure the
+    reference deployment describes as "a green call and no change".
+    """
+    return f"{colour.lstrip('#')}{alpha}"
+
+
+def login_logo_svg() -> str:
+    """The wordmark, 360x96 — 3.75:1, inside the 1:1..4:1 the API enforces.
+
+    The same lockup as `Shell.tsx`'s masthead: the name, then a cyan full stop.
+    No ARIA on the root: the sanitiser refuses it (constraint 3 above), and the
+    logo's text is the form's heading anyway.
+    """
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="360" height="96" '
+        'viewBox="0 0 360 96">'
+        f'<rect width="360" height="96" fill="{PALETTE["surface"]}"/>'
+        '<text x="180" y="52" text-anchor="middle" '
+        'font-family="system-ui, -apple-system, Segoe UI, sans-serif" '
+        f'font-size="30" font-weight="600" fill="{PALETTE["text"]}">The Agent Org'
+        f'<tspan fill="{PALETTE["accent"]}">.</tspan></text>'
+        '<text x="180" y="76" text-anchor="middle" '
+        'font-family="system-ui, -apple-system, Segoe UI, sans-serif" '
+        f'font-size="12" letter-spacing="2" fill="{PALETTE["text_muted"]}">'
+        "SECURITY GATES FOR AGENT-WRITTEN CODE</text>"
+        "</svg>"
+    )
+
+
+def login_favicon_svg() -> str:
+    """A 64x64 mark: the wordmark's full stop, which is the app's one accent."""
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" '
+        'viewBox="0 0 64 64">'
+        f'<rect width="64" height="64" rx="14" fill="{PALETTE["surface"]}"/>'
+        '<text x="32" y="45" text-anchor="middle" '
+        'font-family="system-ui, -apple-system, Segoe UI, sans-serif" '
+        f'font-size="34" font-weight="700" fill="{PALETTE["accent"]}">A</text>'
+        "</svg>"
+    )
+
+
+def login_background_svg() -> str:
+    """The page behind the form: this pipeline's own shape, ghosted back.
+
+    NINE STAGES AS A SPINE, drawn at 6-14% opacity — the same nine `Stage` values
+    the product renders, with the three GATES marked in cyan and the security
+    stage in rose. It is the demo's own diagram used as a texture, which is why it
+    is decorative and carries no ARIA (constraint 3).
+
+    Deliberately NOT a stock illustration: this page guards the approval of code a
+    machine wrote, and Cognito's default graphic is a picture of nothing.
+    """
+    stages = [
+        ("plan", False), ("gate1", True), ("develop", False), ("review", False),
+        ("security", False), ("gate2", True), ("sre", False), ("gate3", True),
+        ("promote", False),
+    ]
+    parts = [
+        (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" '
+            'viewBox="0 0 1200 800">'
+        ),
+        f'<rect width="1200" height="800" fill="{PALETTE["surface"]}"/>',
+        # The spine.
+        (
+            f'<line x1="140" y1="400" x2="1060" y2="400" stroke="{PALETTE["border"]}" '
+            'stroke-width="2" opacity="0.55"/>'
+        ),
+    ]
+    for index, (name, is_gate) in enumerate(stages):
+        x = 140 + index * 115
+        colour = PALETTE["accent"] if is_gate else PALETTE["text_muted"]
+        if name == "security":
+            colour = PALETTE["refused"]
+        # A GATE IS A DIFFERENT MARK FROM AN AGENT STAGE, exactly as `StageSpine`
+        # draws it: a hollow ring for a decision a person makes, a filled dot for
+        # a stage that simply runs.
+        if is_gate:
+            parts.append(
+                f'<circle cx="{x}" cy="400" r="16" fill="none" stroke="{colour}" '
+                'stroke-width="3" opacity="0.30"/>'
+            )
+        else:
+            parts.append(f'<circle cx="{x}" cy="400" r="9" fill="{colour}" opacity="0.22"/>')
+        parts.append(
+            f'<text x="{x}" y="446" text-anchor="middle" '
+            'font-family="ui-monospace, SF Mono, Menlo, monospace" font-size="13" '
+            f'fill="{colour}" opacity="0.28">{name}</text>'
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def branding_assets() -> list[dict]:
+    """The three images managed login will actually serve.
+
+    `Bytes` is raw UTF-8 here; the provisioner base64-encodes at the call site,
+    because boto3 wants bytes and the API wants base64 and mixing those up produces
+    an asset that uploads and renders as nothing.
+    """
+    return [
+        {
+            "Category": "PAGE_BACKGROUND",
+            "ColorMode": "DARK",
+            "Extension": "SVG",
+            "Bytes": login_background_svg().encode("utf-8"),
+        },
+        {
+            "Category": "FORM_LOGO",
+            "ColorMode": "DARK",
+            "Extension": "SVG",
+            "Bytes": login_logo_svg().encode("utf-8"),
+        },
+        {
+            "Category": "FAVICON_SVG",
+            "ColorMode": "DARK",
+            "Extension": "SVG",
+            "Bytes": login_favicon_svg().encode("utf-8"),
+        },
+    ]
+
+
+def branding_settings() -> dict:
+    """Managed login v2's settings document, in this product's palette.
+
+    **EVERY KEY BELOW WAS READ OUT OF COGNITO, NOT OUT OF THE DOCUMENTATION**, and
+    the first version of this function was written the other way and refused. The
+    API validates strictly and names each offender, which is the good failure:
+
+        InvalidParameterException: Invalid settings provided. Validation errors:
+          [{property: $.components.form.instructions, errorType: UnknownProperty},
+           {property: $.components.pageBackground.lightMode.backgroundColor, ...},
+           {property: $.categories.form.backgroundColor, ...},
+           {property: $.categories.form.borderRadius, ...}]
+
+    Six guesses, six wrong, and the corrections are not intuitive: `instructions`
+    belongs to `categories.form` while `borderRadius` belongs to `components.form`;
+    the page background's colour key is `color` where the form's is
+    `backgroundColor`. No amount of reading would have settled that.
+
+    The schema was obtained empirically, which is the method worth keeping:
+
+        create_managed_login_branding(UseCognitoProvidedValues=True)
+        describe_managed_login_branding(ReturnMergedResources=True)
+
+    That returns Cognito's OWN complete document, which is the authoritative shape.
+    This repository already has the rule — *verify the SDK, do not trust its docs* —
+    and a strict validator that names properties is the cheapest possible teacher.
+
+    **PARTIAL ON PURPOSE.** Anything omitted falls back to Cognito's default, so
+    restating a default would freeze it. Only values that are this product's rather
+    than AWS's appear here.
+    """
+    dark = {
+        "backgroundColor": _hex8(PALETTE["surface_raised"]),
+        "borderColor": _hex8(PALETTE["border"]),
+    }
+    button = {
+        "defaults": {
+            "backgroundColor": _hex8(PALETTE["accent"]),
+            "textColor": _hex8(PALETTE["surface"]),
+        },
+        "hover": {
+            "backgroundColor": _hex8(PALETTE["text"]),
+            "textColor": _hex8(PALETTE["surface"]),
+        },
+    }
+    return {
+        "categories": {
+            "global": {
+                "colorSchemeMode": "DARK",
+                "pageHeader": {"enabled": False},
+                "pageFooter": {"enabled": False},
+                "spacingDensity": "REGULAR",
+            },
+            "form": {
+                "location": {"horizontal": "CENTER", "vertical": "CENTER"},
+                "sessionTimerDisplay": "NONE",
+                "languageSelector": {"enabled": False},
+                # Cognito's stock illustration, ON by default (measured: the merged
+                # document reports `displayGraphics: true`). This page guards the
+                # approval of machine-written code; a stock graphic says nothing.
+                "displayGraphics": False,
+                "instructions": {"enabled": True},
+            },
+        },
+        "components": {
+            # **`image.enabled` DEFAULTS TO FALSE, AND SO DOES `form.logo.enabled`.**
+            # A settings document made only of colours produces a page that reads as
+            # unstyled while the branding call returns 200 either way. These two
+            # lines are what separate a branded page from a default one.
+            "pageBackground": {
+                "image": {"enabled": True},
+                # `color`, NOT `backgroundColor` -- the form uses the other spelling
+                # and mixing them is an UnknownProperty refusal.
+                "darkMode": {"color": _hex8(PALETTE["surface"])},
+                "lightMode": {"color": _hex8(PALETTE["surface"])},
+            },
+            "form": {
+                "logo": {
+                    "enabled": True,
+                    "location": "CENTER",
+                    "position": "TOP",
+                    "formInclusion": "IN",
+                },
+                "borderRadius": 10,
+                "darkMode": dark,
+                "lightMode": dark,
+            },
+            "primaryButton": {"darkMode": button, "lightMode": button},
+        },
+    }

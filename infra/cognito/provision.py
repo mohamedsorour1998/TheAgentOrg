@@ -421,3 +421,75 @@ if __name__ == "__main__":
     origin = os.getenv("AUTH_URL", "https://theagentorg.rosettacloud.app").strip()
     for key, value in provision(dashboard_urls=(origin,)).items():
         print(f"{key}: {value}")
+
+
+def ensure_branding(client, pool_id: str, client_id: str) -> str:
+    """Apply managed login v2's branding for one app client. Idempotent.
+
+    Returns the branding id.
+
+    **`Assets` GOES ON BOTH PATHS.** The reference deployment measured that an
+    update sending only `Settings` leaves the page asking for images that were never
+    uploaded — worse than the flat page it replaced, because the switches are on and
+    there is nothing behind them. So create and converge send the same two keys.
+
+    **`UseCognitoProvidedValues` IS ABSENT, NOT `False`.** The API refuses it
+    alongside `Settings`/`Assets` (they are alternatives, not a default plus an
+    override), and sending it `False` "to be explicit" is the reading that fails.
+
+    `Bytes` is raw UTF-8 and boto3 base64-encodes blob members itself. Encoding here
+    as well produces an asset that uploads successfully and renders as nothing — the
+    same two-interfaces-to-one-API trap as `invoke_agent_runtime`, where the CLI
+    wants base64 and boto3 wants raw bytes.
+    """
+    assets = spec.branding_assets()
+    settings = spec.branding_settings()
+
+    try:
+        existing = client.describe_managed_login_branding_by_client(
+            UserPoolId=pool_id, ClientId=client_id
+        )
+        branding_id = existing["ManagedLoginBranding"]["ManagedLoginBrandingId"]
+    except client.exceptions.ResourceNotFoundException:
+        created = client.create_managed_login_branding(
+            UserPoolId=pool_id,
+            ClientId=client_id,
+            Settings=settings,
+            Assets=assets,
+        )
+        return created["ManagedLoginBranding"]["ManagedLoginBrandingId"]
+
+    client.update_managed_login_branding(
+        UserPoolId=pool_id,
+        ManagedLoginBrandingId=branding_id,
+        Settings=settings,
+        Assets=assets,
+    )
+    return branding_id
+
+
+def ensure_managed_login_version(client, pool_id: str, domain: str) -> int:
+    """Move the domain onto managed login v2, and READ IT BACK.
+
+    Returns the version the domain reports AFTERWARDS, never the one that was asked
+    for. `assign_tenant` is the precedent and the reason: its read-back is the only
+    thing that found the `Mutable: False` dead end, and a provisioner that reports
+    what it SENT cannot discover that the account disagreed.
+
+    **THIS IS SAFE ONLY BECAUSE `hostedUiUrl` BUILDS `/oauth2/authorize`.** `/login`
+    is version-specific; the standard OAuth endpoint is served by both. Verified
+    against this pool at v1 before the upgrade: 302 -> /login -> 200. Flipping the
+    version with a deployed bundle pointing at `/login` is the failure this ordering
+    exists to avoid.
+    """
+    current = client.describe_user_pool_domain(Domain=domain)["DomainDescription"]
+    if current.get("ManagedLoginVersion") == spec.MANAGED_LOGIN_VERSION:
+        return spec.MANAGED_LOGIN_VERSION
+
+    client.update_user_pool_domain(
+        Domain=domain,
+        UserPoolId=pool_id,
+        ManagedLoginVersion=spec.MANAGED_LOGIN_VERSION,
+    )
+    after = client.describe_user_pool_domain(Domain=domain)["DomainDescription"]
+    return int(after.get("ManagedLoginVersion", 0))
