@@ -308,6 +308,27 @@ async function runDetail(tenantId: string, runId: string) {
     // `""` distinct from `scanners`: `null` means the stage has not run, `{}` would
     // mean it ran and produced nothing. A screen that renders those the same way
     // tells somebody their reviewer had no objections when the reviewer never ran.
+    /**
+     * THE GITHUB ACTIONS RUN, so a person can go and watch the thing itself.
+     *
+     * Asked for directly: *"i need link of the run to be visible for user to click
+     * on it"*. It was already on the row — `approveRun` reads it to find the
+     * Environment to release — and no screen showed it, so the one place where the
+     * jobs, the logs and the live progress actually live was reachable only by
+     * somebody who already knew the URL.
+     *
+     * `""` WHERE THERE IS NONE, never a fabricated link. A run indexed before
+     * `ci_run_id` was recorded, or one executed anywhere but Actions, genuinely has
+     * no page to open — and a link that 404s is worse than no link, because it
+     * reads as the run having been deleted.
+     */
+    // THE WHOLE URL, BUILT HERE. The repository name lives in `PIPELINE_REPO`, a
+    // server-side value; handing the browser a bare id and asking it to know the
+    // owner/name would put that constant in two places, and the copy on the client
+    // would be the one that goes stale when the pipeline moves.
+    ci_run_id: typeof row.ci_run_id === "string" && row.ci_run_id
+      ? `https://github.com/${process.env.PIPELINE_REPO ?? "mohamedsorour1998/TheAgentOrg"}/actions/runs/${row.ci_run_id}`
+      : "",
     plan: (state?.plan ?? null) as Record<string, unknown> | null,
     dev,
     review: (state?.review ?? null) as Record<string, unknown> | null,

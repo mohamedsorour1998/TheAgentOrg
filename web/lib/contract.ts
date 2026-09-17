@@ -261,6 +261,14 @@ export interface RunDetail extends RunSummary {
    * objections when the reviewer never ran -- the did-not-run-versus-passed
    * conflation this repository exists to refuse.
    */
+  /**
+   * The GitHub Actions run id, or `""` when this run has no Actions page.
+   *
+   * `""` rather than `null` because it is an id, and the screen's question is "is
+   * there one to link to" rather than "was it recorded". A fabricated link would
+   * 404 and read as the run having been deleted.
+   */
+  ci_run_id: string;
   plan: PlanView | null;
   dev: DevView | null;
   review: ReviewView | null;

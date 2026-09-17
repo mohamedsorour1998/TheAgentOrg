@@ -233,8 +233,22 @@ export function RepositoryPicker() {
           the dropdown only ever offers something that would actually change the
           scope; an option that does nothing when chosen reads as a broken control. */}
       {available === null ? null : (() => {
-        const offerable = available.filter((name) => !server.some((r) => r.full_name === name));
-        if (offerable.length > 0) {
+        const listed = (name: string) => server.some((r) => r.full_name === name);
+        /**
+         * **SHOWN EVEN WHEN EVERYTHING IS ALREADY IN SCOPE, and the first version
+         * was not.** It filtered added repositories out of the options, so with one
+         * installed repository already listed there was nothing to offer and the
+         * control vanished, replaced by a sentence. Reported: *"where is the damn
+         * dropmenu"* — with the explanation sitting right above it, unread, because
+         * a person looking for a dropdown scans for a dropdown.
+         *
+         * A control that disappears when it has nothing to say is indistinguishable
+         * from one that is broken. The already-added entries stay, DISABLED and
+         * marked, so the list still answers "what can I pick?" and shows why each
+         * one is not pickable.
+         */
+        if (available.length > 0) {
+          const offerable = available.filter((name) => !listed(name));
           return (
             <div style={{ display: "grid", gap: "var(--gap-2)" }}>
               <label htmlFor="pick-repository" className="eyebrow" style={{ margin: 0 }}>
@@ -255,10 +269,15 @@ export function RepositoryPicker() {
                     border: "1px solid var(--border)",
                   }}
                 >
-                  <option value="">Choose from your GitHub installation…</option>
-                  {offerable.map((name) => (
-                    <option key={name} value={name}>
+                  <option value="">
+                    {offerable.length > 0
+                      ? "Choose from your GitHub installation…"
+                      : "All of your installed repositories are already in scope"}
+                  </option>
+                  {available.map((name) => (
+                    <option key={name} value={name} disabled={listed(name)}>
                       {name}
+                      {listed(name) ? "  — already in scope" : ""}
                     </option>
                   ))}
                 </select>

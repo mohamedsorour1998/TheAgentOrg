@@ -113,6 +113,41 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
     return () => clearInterval(id);
   }, [ended, run]);
 
+  /**
+   * RE-READS THE RUN WHILE IT IS LIVE, so the page moves on its own.
+   *
+   * **REPORTED FROM THE DEPLOYED APP, AND IT MADE A WORKING APPROVAL LOOK
+   * BROKEN.** Approving gate1 succeeded — GitHub released the Environment,
+   * `develop` ran, the scanners ran, and the run advanced to gate2 — and this page
+   * showed none of it. The operator saw "Approval recorded", nothing move, and
+   * then a gate button again after a manual refresh, and read the whole thing as
+   * *"like I clicked on nothing"*. The click had in fact done everything it
+   * claimed.
+   *
+   * **THE SSE STREAM CANNOT COVER THIS AND IS NOT THE FIX.** `useRunStream` reads
+   * the QUEUE, and a run on the GitHub Actions path never enters the queue — so
+   * "As it happens" is structurally empty for exactly the runs this product
+   * demonstrates. That is documented in `runDetail` and it is why the fix is a
+   * poll of the run's own record rather than another stream.
+   *
+   * FIVE SECONDS. A stage takes tens of seconds and a gate waits for a person, so
+   * anything faster is load without information; anything slower and a stage
+   * completes, is replaced by the next, and is never seen. `revision` is what the
+   * loader depends on, so this is one `setState` per tick and not a cascade.
+   *
+   * **IT STOPS WHEN THE TAB IS HIDDEN.** A run left open in a background tab
+   * overnight would otherwise be thousands of reads of a table, each one billed,
+   * for a screen nobody is looking at.
+   */
+  useEffect(() => {
+    if (ended || run === null) return;
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      reload();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [ended, run, reload]);
+
   if (loading) {
     return (
       <div>
@@ -180,6 +215,23 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
             <dt className="eyebrow">Pull request</dt>
             <dd style={{ margin: 0 }}>
               <a href={run.pr_url}>{run.pr_url.replace(/^https:\/\/github\.com\//, "")}</a>
+            </dd>
+          </div>
+        ) : null}
+        {/* THE ACTIONS RUN. Asked for directly, and it was already on the row --
+            `approveRun` reads it to find the Environment to release. The jobs, the
+            logs and the live progress all live there, and nothing linked to it, so
+            the one page that shows the pipeline actually running was reachable
+            only by somebody who already knew the URL.
+
+            A plain <a>: it leaves this origin. */}
+        {run.ci_run_id ? (
+          <div>
+            <dt className="eyebrow">Actions run</dt>
+            <dd style={{ margin: 0 }}>
+              <a href={run.ci_run_id} target="_blank" rel="noreferrer">
+                watch it on GitHub ↗
+              </a>
             </dd>
           </div>
         ) : null}

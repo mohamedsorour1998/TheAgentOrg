@@ -153,6 +153,51 @@ describe("the sign-in gate", () => {
   });
 });
 
+describe("every surface that decides 'is somebody signed in' knows about BOTH sessions", () => {
+  /**
+   * **`/account` SAID "Nobody is signed in" WHILE THE NAV SHOWED SIGN OUT AND THE
+   * RUNS LOADED.** Reported from the deployed app: *"how come sign out is
+   * available and I see runs"*.
+   *
+   * There are two sign-in paths and two cookies, because Cognito cannot federate
+   * GitHub. `currentIdentity()` was taught the second one — so everything reading
+   * authorisation through it kept working — and `GET /api/session` reads
+   * authentication DIRECTLY, on purpose, because it has to tell *signed in but
+   * unassigned* apart from *signed out*. That direct read knew only the Cognito
+   * cookie.
+   *
+   * **The general form, and why this is a test rather than a fixed line:** adding
+   * a second way to be signed in does not update the places that ask the question
+   * their own way, and those places look correct in isolation. Each file below
+   * decides whether somebody is signed in without going through
+   * `currentIdentity()`, so each has to know both answers.
+   */
+  const SURFACES = [
+    // The navigation gate: which cookie lets a page render at all.
+    "proxy.ts",
+    // The direct authentication read, for the three-state answer.
+    "app/api/session/route.ts",
+    // The resolver every authorised route depends on.
+    "lib/session.ts",
+  ];
+
+  it.each(SURFACES)("%s consults the GitHub session too", (file) => {
+    const source = withoutComments(readFileSync(join(WEB, file), "utf8"));
+
+    // ANTI-VACUITY: these files are 40-60% commentary and every one of them
+    // DISCUSSES the GitHub session at length, so a check over raw text would be
+    // satisfied by the prose explaining the hazard. Confirm code survived.
+    expect(source.trim().length, `${file}: stripped to nothing`).toBeGreaterThan(200);
+
+    expect(
+      source.includes("GITHUB_SESSION_COOKIE"),
+      `${file} decides whether somebody is signed in and never looks at the GitHub ` +
+        `session cookie. A GitHub sign-in reads as signed-out there, which is how ` +
+        `/account came to say "Nobody is signed in" under a Sign out button.`,
+    ).toBe(true);
+  });
+});
+
 describe("signing out is reachable", () => {
   /**
    * **THE ROUTE EXISTED AND NOTHING LINKED TO IT.** Reported as "also need

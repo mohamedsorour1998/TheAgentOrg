@@ -42,6 +42,9 @@ import { NextResponse } from "next/server";
 
 import type { SessionView } from "@/lib/endpoints";
 import { respond, unhandled } from "@/lib/http";
+import { cookies } from "next/headers";
+
+import { GITHUB_SESSION_COOKIE, readSession } from "@/lib/github-session";
 import { currentIdentity, verifiedToken } from "@/lib/session";
 import { tenantFromClaim } from "@/lib/tenant";
 
@@ -52,11 +55,32 @@ export async function GET(): Promise<NextResponse> {
     const token = await verifiedToken();
     const identity = await currentIdentity();
 
+    /**
+     * **THE THIRD READ, AND ITS ABSENCE BROKE `/account` COMPLETELY.** Reported
+     * from the deployed app: *"how come sign out is available and I see runs"* on
+     * a page saying **"Nobody is signed in"**. Every other surface worked —
+     * `currentIdentity()` had already been taught the GitHub session, so the runs
+     * loaded and the nav rendered — and this route still answered
+     * `signed_in: false`, because `verifiedToken()` reads the COGNITO cookie and
+     * nothing else.
+     *
+     * A route whose entire job is "who is signed in" was the one place that did
+     * not know. The lesson is narrow and worth keeping: **teaching
+     * `currentIdentity()` a second session did not teach the surfaces that read
+     * authentication DIRECTLY**, and this one deliberately bypasses it in order to
+     * tell signed-in-but-unauthorised apart from signed-out.
+     */
+    const jar = await cookies();
+    const github = await readSession(jar.get(GITHUB_SESSION_COOKIE)?.value);
+
     const view: SessionView = {
-      signed_in: token !== null,
-      // The pool's `cognito:username`. It is what `HumanDecision.by` will read,
-      // so showing it is showing a person the name a gate decision would carry.
-      login: token?.login ?? null,
+      // EITHER SESSION. The three states this route keeps apart are unchanged;
+      // there are simply two ways to reach the first of them now.
+      signed_in: token !== null || github !== null,
+      // The pool's `cognito:username`, or the GitHub login. It is what
+      // `HumanDecision.by` will read, so showing it is showing a person the name a
+      // gate decision would carry.
+      login: token?.login ?? github?.login ?? null,
       // NULL, ALWAYS, AND THAT IS HONEST RATHER THAN UNFINISHED. `cognito.ts`
       // carries neither `name` nor `email` into the identity, because inbound JWT
       // claims are logged by AWS outside every redaction this application has.
@@ -70,20 +94,22 @@ export async function GET(): Promise<NextResponse> {
       // tenant as though it were a scope. `currentIdentity` applies the same
       // function, so the two agree by construction rather than by coincidence.
       tenant_id: identity?.tenantId ?? tenantFromClaim(token?.tenantId ?? null),
-      // FALSE, ALWAYS, AND IT IS A TRUE STATEMENT ABOUT A CAPABILITY THAT NO
-      // LONGER EXISTS. This field meant "an Auth.js `accounts` row holds a GitHub
-      // access token". Removing the GitHub OAuth provider removed the only writer
-      // of that row, so this deployment holds no GitHub grant for anybody.
+      // **THIS WAS HARDCODED `false`, AND THAT STOPPED BEING TRUE.** The comment
+      // here argued, correctly at the time, that the field meant "an Auth.js
+      // `accounts` row holds a GitHub access token", that removing the GitHub
+      // OAuth provider removed the only writer of that row, and that reporting
+      // `true` would render a "linked" mark for a credential that is not there —
+      // "a check present, enumerable, and backed by nothing".
       //
-      // Reporting `true` would render a "linked" mark on `/account` for a
-      // credential that is not there — a check present, enumerable, and backed by
-      // nothing, which is the exact shape `pg_policies` takes under a superuser.
-      // The cost of `false` is stated rather than hidden: `SignInPanel` renders
-      // "Continuing with GitHub again restores it", which is now a remedy that
-      // does not work, and `AccountPanel`'s GitHub-link section describes a
-      // capability this deployment does not have. Both are Lane J's files and
-      // both are named in this lane's report.
-      github_linked: false,
+      // Every word of that was right until GitHub sign-in shipped. There IS a
+      // GitHub grant now: it is the encrypted session cookie, and the token in it
+      // is what `/api/github/repositories` lists installations with. So the field
+      // means what it always claimed to, and the honest value is the live one.
+      //
+      // **A HARDCODED FALSE IS A CLAIM WITH A SHELF LIFE**, and it reads as
+      // permanent because a constant has no date on it. This one survived exactly
+      // as long as the sentence explaining it.
+      github_linked: github !== null,
     };
 
     return respond(view);
