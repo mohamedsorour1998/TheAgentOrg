@@ -4694,6 +4694,50 @@ stored on the operator's explicit instruction after the risk was stated. Rotatio
 reads it per call rather than at build time — the property that makes this far less
 costly than the `github_pat_` baked into Terraform state.
 
+#### A WORKING APPROVAL THAT LOOKED LIKE A DEAD BUTTON
+
+Reported as *"i approved the gate nothing happened … like i clicked on nothing"*.
+GitHub disagreed: `gate1 success`, `develop success`, the scanners ran, and the run
+advanced to **gate2**. The stored state agreed too — `decisions` carried
+`gate1 approved by mohamedsorour1998`, with `dev`, `review` and `security` all
+populated. **The click did everything it claimed and the screen showed none of it**,
+so a manual refresh produced a gate button again — gate2's — which reads as the first
+click having done nothing.
+
+**THE SSE STREAM CANNOT COVER THIS AND IS NOT THE FIX.** `useRunStream` reads the
+QUEUE, and a run on the GitHub Actions path never enters the queue, so *"As it
+happens"* is structurally empty for exactly the runs this product demonstrates. The
+detail page now **re-reads the run every five seconds while it is live** — a stage
+takes tens of seconds, so faster is load without information and slower means a stage
+completes, is replaced by the next, and is never seen — and stops while the tab is
+hidden, because a run left open overnight is otherwise thousands of billed reads for a
+screen nobody is looking at.
+
+**`/account` SAID "Nobody is signed in" UNDER A SIGN OUT BUTTON**, with the runs
+loading normally. Two sign-in paths, two cookies: `currentIdentity()` had been taught
+the second, so everything reading AUTHORISATION through it worked, while
+`GET /api/session` reads AUTHENTICATION **directly and on purpose** — it must tell
+*signed in but unassigned* apart from *signed out* — and that direct read knew only
+the Cognito cookie.
+
+**The general form is the keeper: adding a second way to be signed in does not update
+the places that ask the question their own way, and each of those looks correct in
+isolation.** Now a test over the three surfaces that bypass `currentIdentity()` —
+`proxy.ts`, the session route, and `lib/session.ts` itself.
+
+`github_linked` was **hardcoded `false`**, with a comment arguing — correctly, when
+written — that reporting `true` would render a linked mark for a credential that is
+not there. Every word held until GitHub sign-in shipped. **A hardcoded false is a
+claim with a shelf life, and it reads as permanent because a constant has no date on
+it.**
+
+**A CONTROL THAT DISAPPEARS WHEN IT HAS NOTHING TO SAY IS INDISTINGUISHABLE FROM A
+BROKEN ONE.** The new repository dropdown filtered already-added repositories out of
+its options, so with one installed repository already in scope there was nothing to
+offer, the `<select>` vanished, and a sentence took its place — sitting directly above
+where somebody was scanning for a dropdown (*"where is the damn dropmenu"*). Added
+entries now stay, disabled and marked.
+
 #### THE APPROVAL 403, AND A PROBE THAT SEPARATES IT FROM A 422 WITHOUT MUTATING
 
 Approving a gate from the UI answered `HTTP 500 — PipelineError: the approve read
