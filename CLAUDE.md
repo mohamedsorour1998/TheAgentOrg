@@ -4565,6 +4565,135 @@ reads `tenant_id: ""`. That matters because `??` falls back on `null`/`undefined
 **not** on `""`: had the row carried the state's blank, every approval would have been
 refused again for a different reason.
 
+### SIGN IN WITH GITHUB, AND THE GATE THAT WAS NEVER THERE — 2026-09-17
+
+**The product showed the whole dashboard to a signed-out visitor.** Opening the site
+rendered `/runs` — heading, nav, table frame — and only the data inside came back
+refused. `app/page.tsx` documented the behaviour that did not exist: *"a signed-out
+visitor is sent on to `/signin` by the runs screen itself, which is where that
+decision belongs"*. Correct about where it belongs; **a comment describing a guard is
+not a guard**, which this file has now recorded in a workflow expression, in a test
+satisfied by its own prose, and in a route.
+
+Two layers, because neither covers everything. `lib/guard.ts` verifies properly on the
+three SERVER pages; `proxy.ts` covers everything including `costs` and `runs/[runId]`,
+which are `"use client"` and cannot call a server guard. Verified live, signed out:
+
+```
+GET /  /runs  /costs  /repositories  /account  /runs/<id>   ->  307 /signin
+GET /signin                                                 ->  200
+GET /api/session                                            ->  200 JSON
+```
+
+- **`proxy.ts`, NOT `middleware.ts`.** Next 16.3.3 deprecated that convention and
+  prints a warning on every build; **having both files is a hard error.** The
+  reference deployment had already paid for this.
+- **The proxy checks PRESENCE, not validity, deliberately.** Verifying there means a
+  JWKS fetch from the edge runtime, and a cold or failed fetch signs out a VALID
+  session. A gate whose failure mode is locking out legitimate users is worse than one
+  that renders an empty shell. The API routes are the boundary.
+- **The matcher went from default-ALLOW to default-DENY**, and that correction is the
+  lesson: an explicit list of screens means **a screen added later arrives ungated**,
+  and an ungated screen looks healthy because it renders. Anchor on segment
+  boundaries — `signin$|signin/`, never bare `signin`, or `/signinx` slips past.
+- **The redirect loop is refused by construction.** `currentIdentity()` returns null
+  for four situations; sending all four to `/signin` loops forever for the two where
+  the person IS signed in. `guard.ts` asks both layers and splits the destination.
+
+**SIGN-OUT EXISTED AND NOTHING LINKED TO IT.** `app/api/auth/logout/route.ts` was
+already 60 careful lines — clearing the cookie with the exact attributes the callback
+set it with, because *a cookie deleted with a different `path` SURVIVES* — and was
+reachable only by typing the URL. The second named pattern, in a navigation bar. It is
+a plain `<a>`: the redirect leaves our origin for Cognito, and `<Link>` cannot follow
+that, so the click would end nothing while looking fine.
+
+#### A GITHUB APP IS NOT AN OAUTH APP, AND I HAD THIS BACKWARDS
+
+Recorded because the advice I gave was wrong in the direction that costs work. This
+file said per-repository grants "need a GitHub App (installation tokens, a different
+authorisation model)" and treated that as a cost to avoid. **The App is the better
+model and one already existed** (App ID `4677455`).
+
+| | OAuth App | **GitHub App (ours)** |
+|---|---|---|
+| repository reach | `repo` is ALL-OR-NOTHING — every repo the account can see | only repos it was **installed** on |
+| `scope` at authorize | required | **ignored** |
+| the field to fill | "Authorization callback URL" | **"Redirect URI"** |
+
+The middle row breaks a copied implementation silently: code reasoning about it as an
+OAuth App asks for a reach the token does not carry. The third row is why the operator
+could not find the field I had named.
+
+**GITHUB ANSWERS HTTP 200 ON A FAILED CODE EXCHANGE**, with `{"error":
+"bad_verification_code"}` in the body, for a code that is wrong, expired or reused. A
+`response.ok` check passes and `access_token` reads `undefined` — the reassuring
+non-answer this repository exists to refuse. **The body decides, not the status.**
+
+#### TWO SIGN-INS, TWO COOKIES, AND THE TWO VERIFIERS MUST NEVER MEET
+
+Cognito **cannot** federate GitHub: GitHub is OAuth2 and issues no `id_token`. The
+tempting move is to teach `cognito.verifySession` a second token type. **That is the
+JWT algorithm-confusion hole** — a verifier accepting both RS256 and HS256 can be
+handed a token signed with HMAC using the *published* RSA public key as the secret,
+and it verifies. So: separate cookie (`agentorg_gh`), separate key, separate verifier,
+and `cognito.ts` untouched. `currentIdentity()` tries Cognito first and falls through.
+
+**ENCRYPTED (JWE), NOT SIGNED (JWS)**, because the session carries the GitHub user
+access token for the repository picker. A signed JWT is base64, not ciphertext, so
+anyone holding the cookie could read that token out and use it against GitHub
+directly — outliving the session and reaching repositories this application never
+touches. Encrypted, the cookie can be REPLAYED at us but the credential cannot be
+extracted. Both halves are true: **a stolen cookie is still a stolen session** until it
+expires (one hour, matching the Cognito path).
+
+**`tenantForGitHub` IS FOUR LINES AND THE MOST DANGEROUS FUNCTION IN THE FLOW.** It
+keys on GitHub's **immutable numeric id**, never the login: a login can be renamed and
+the freed name registered by somebody else, so a login-derived tenant would hand a
+renamed account's entire workspace — every run, every gate decision — to whoever
+claimed the old name. It reads as correct code. The owner maps to `tenant-zero` as a
+bootstrap, or the person who owns this deployment signs in and sees an empty workspace,
+which reads as the migration having lost everything.
+
+**TWO EXISTING GUARDS CAUGHT THE NEW ROUTES ON THE FIRST RUN**, both working as
+designed: every route must be declared in `ENDPOINTS`, and the count of
+UNAUTHENTICATED routes is a **literal** (six → eight). The second forced the
+justification into the test where somebody will look — `github/callback` DOES issue a
+session, unlike `signup`/`confirm`, so what makes it safe is named there.
+
+#### AN IAM GRANT MISSING FOR ONE COMMIT, AND THE FAILURE'S SHAPE
+
+The session key secret was created, the code read it, and the compute role had **no
+`GetSecretValue` on it**. So `/api/auth/github` — which reads only the OAuth secret —
+answered a correct **307 verified live**, and the callback would have failed at the
+last step, *after* GitHub had already authorised the person. **A sign-in that works
+right up until the moment it completes**, which is the most confusing place to fail.
+
+Found by reading `list-role-policies` back after the apply, not by a test: **no test in
+either suite can see an IAM policy.** Same blind spot that left `computeRoleArn` null
+for a week with all eight gates green. The role now carries six named grants, none of
+them a `theagentorg-shared-*` prefix — that would also match the webhook secret and the
+dispatch token, neither of which the web runtime should hold.
+
+**VERIFIED LIVE**, authorize leg only:
+
+```
+GET /api/auth/github -> 307
+  location: github.com/login/oauth/authorize?client_id=Iv23liLRifG6SdUoG5yC&redirect_uri=...
+  set-cookie: agentorg_gh_state=<uuid>; Path=/api/auth; Max-Age=600; Secure; HttpOnly; SameSite=lax
+  (the state in the URL equals the state in the cookie)
+"Continue with GitHub" is in the shipped client bundle; /signin's server HTML shows
+the loading state, which is correct for a client component.
+```
+
+**THE CALLBACK LEG IS UNVERIFIED** and needs a real GitHub login, which is the
+operator's click and not something to claim from here.
+
+**THE APP'S FIRST CLIENT SECRET WAS DISCLOSED IN PLAINTEXT AND IS PENDING ROTATION**,
+stored on the operator's explicit instruction after the risk was stated. Rotation is
+`update-secret` on the same id with **no redeploy**, because `lib/github-oauth.ts`
+reads it per call rather than at build time — the property that makes this far less
+costly than the `github_pat_` baked into Terraform state.
+
 ### ONE POSTGRES-SHAPED FLAG KEPT THE WHOLE TENANCY UI DARK — 2026-09-15
 
 Found by being asked "is it all working?" rather than by any gate, and it is the
