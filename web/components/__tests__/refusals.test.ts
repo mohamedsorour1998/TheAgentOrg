@@ -42,6 +42,66 @@ function read(...parts: string[]): string {
   return stripComments(readFileSync(join(WEB, ...parts), "utf8"));
 }
 
+/**
+ * Comments removed, **string bodies KEPT**.
+ *
+ * **`read()` CANNOT BE USED TO LOOK FOR A HARDCODED COLOUR, AND THE HEX
+ * ASSERTION BELOW WAS VACUOUS FOR EVERY FILE IN ITS LIST UNTIL THIS EXISTED.**
+ * `stripComments` blanks string bodies -- correct for its own purpose, which is
+ * stopping a test being satisfied by the prose explaining the thing it checks --
+ * and a hardcoded colour only ever appears INSIDE a string. So
+ * `"3px solid #2c3a4f"` became `""` before the regex ran, and the check could
+ * not fail.
+ *
+ * Caught by a RED step that came back INERT: injecting `#2c3a4f` into a listed
+ * file left the suite at 279 passed. CLAUDE.md records this same helper making
+ * the `var(--border)` assertion inert in the same file; that one was fixed and
+ * this one was not.
+ *
+ * Tracking the quote character is what makes it safe: `"https://..."` contains
+ * `//` and must not be read as the start of a comment.
+ */
+function readKeepingStrings(...parts: string[]): string {
+  const source = readFileSync(join(WEB, ...parts), "utf8");
+  let out = "";
+  let quote: string | null = null;
+  let i = 0;
+  while (i < source.length) {
+    const ch = source[i]!;
+    const next = source[i + 1];
+    if (quote !== null) {
+      if (ch === "\\") {
+        out += ch + (next ?? "");
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = source.indexOf("*/", i + 2);
+      i = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      const end = source.indexOf("\n", i);
+      i = end === -1 ? source.length : end;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 describe("the comment stripper", () => {
   // If this breaks, every assertion below starts passing for the wrong reason.
   it("removes both comment forms and string bodies", () => {
@@ -194,7 +254,6 @@ describe("every screen", () => {
     // page now and nothing imported the panel any more, which is this
     // repository's second named pattern -- code reached by nothing.
     ["app/(auth)/signin", "page.tsx"],
-    ["app/(auth)/signup", "page.tsx"],
   ];
 
   it("declares no colour of its own -- the palette lives in globals.css", () => {
@@ -204,7 +263,10 @@ describe("every screen", () => {
     // the deck generator and its HTML preview.
     expect(files.length).toBeGreaterThan(5);
     for (const parts of files) {
-      const source = read(...parts);
+      // STRING-PRESERVING, or this finds nothing anywhere -- see the helper.
+      const source = readKeepingStrings(...parts);
+      // ANTI-VACUITY: the stripper must leave the component behind.
+      expect(source.length, `${parts.join("/")} stripped to nothing`).toBeGreaterThan(200);
       const hexes = source.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
       expect(hexes, `${parts.join("/")} hardcodes ${hexes.join(", ")}`).toEqual([]);
     }

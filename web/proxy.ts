@@ -87,6 +87,6 @@ export const config = {
     // "Create an account" -- the one screen they cannot use bouncing them off the
     // one screen they need. Anchored like `signin`: `signup$|signup/`, never bare,
     // or `/signupx` slips past as a prefix match.
-    "/((?!signin$|signin/|signup$|signup/|api/|_next/static/|_next/image/|favicon\\.ico$).*)",
+    "/((?!signin$|signin/|api/|_next/static/|_next/image/|favicon\\.ico$).*)",
   ],
 };

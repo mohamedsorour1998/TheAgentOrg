@@ -129,7 +129,10 @@ describe("the sign-in gate", () => {
       // THE ANCHOR. A bare `signin` exclusion would match this prefix and leave it
       // ungated — measured on the reference deployment's matcher.
       "/signinx",
-      "/signupx",
+      // `/signup` IS GATED AGAIN and that is correct: there is no register page.
+      // GitHub sign-in is sign-up, so the URL names nothing and a signed-out
+      // visitor typing it belongs at the one door that exists.
+      "/signup",
     ]) {
       expect(gated.test(path), `${path} is NOT gated, so it renders to a signed-out visitor`).toBe(true);
     }
@@ -141,11 +144,6 @@ describe("the sign-in gate", () => {
       // An infinite redirect if gated.
       "/signin",
       "/signin/",
-      // REGISTER IS PUBLIC TOO, and omitting it is the sharper bug: somebody with
-      // no account clicks "Create an account" and is redirected to the one screen
-      // they cannot use.
-      "/signup",
-      "/signup/",
       // These answer 401 as JSON; an HTML redirect makes that an unparseable 200.
       "/api/session",
       "/api/runs",

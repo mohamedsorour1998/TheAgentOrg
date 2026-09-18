@@ -76,7 +76,9 @@ describe("navigation", () => {
     // header and nav -- which is the reported bug: `/signin` wearing Runs ·
     // Repositories · Costs · Account, four links whose only outcome is a
     // redirect back to the page you are already on.
-    for (const screen of ["signin", "signup"]) {
+    // ONE SCREEN, because GitHub sign-in IS sign-up: a first "Continue with
+    // GitHub" derives a workspace, so a register page has nothing to ask for.
+    for (const screen of ["signin"]) {
       expect(
         existsSync(join(AUTH_DIR, screen, "page.tsx")),
         `app/(auth)/${screen}/page.tsx is missing`,

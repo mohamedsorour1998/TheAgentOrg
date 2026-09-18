@@ -1,53 +1,46 @@
 /**
- * `/signin` — the front door.
+ * `/signin` — one door.
  *
- * **THE "WHAT IT DOES NOT GRANT" PANEL IS GONE**, and its removal is the point
- * rather than a tidy-up. It read: *"No account here can override a security block.
- * That verdict comes from five lines of Python with no model in it, and overriding
- * it requires shell access rather than a click."* Every word true, and the operator
- * had already cut the same sentence once from `StartRun` as confusing. It is an
- * argument aimed at a judge, placed in front of somebody trying to get in — and a
- * sign-in screen is the worst possible place to explain an architectural boundary
- * to a reader who has not seen the product yet. It belongs in the docs and on the
- * deck, both of which carry it.
+ * **GITHUB IS THE ONLY WAY IN, AND SIGNING UP IS THE SAME ACT AS SIGNING IN.**
+ * There is no register page and nothing is missing: `tenantForGitHub` derives a
+ * workspace from the GitHub account id, so a person who has never been here gets
+ * one on their first "Continue with GitHub". A separate registration form would be
+ * asking for facts we already have from GitHub, to create an account that already
+ * exists the moment they authorise.
  *
- * What replaces it is one sentence about the only thing signing in changes for the
- * person doing it: their name goes on the decision.
+ * That also removes the thing the two-account model could not answer honestly: an
+ * email account and a GitHub account were two identities for one human, with two
+ * workspaces and two different names on the same person's gate decisions. One
+ * provider, one identity, one name in the audit trail.
  *
- * **ONE SATURATED COLOUR, SPENT ONCE** — the reference deployment's rule, quoted in
- * the layout. Cyan is the GitHub button and the wordmark's full stop. Nothing else
- * on this page is coloured, so the eye lands on the only control that matters.
+ * **THE EMAIL PATH IS GONE FROM THE UI.** `/api/auth/signin` and its callback still
+ * exist and still work if typed — `currentIdentity()` still verifies a Cognito
+ * session, so `reviewer-01` is not locked out — but nothing links to them any more.
+ * That is stated rather than implied, because unreferenced routes are this
+ * repository's second named pattern and somebody should delete them deliberately
+ * rather than discover them.
  *
- * **GITHUB IS FIRST AND EMAIL IS A LINK**, because this product acts on GitHub
- * repositories and the account that owns them is the one whose name belongs beside
- * a gate decision. The email path is kept because accounts already exist on it —
- * `reviewer-01` among them — and removing the only way those accounts sign in is a
- * migration, not a redesign.
- *
- * A PLAIN `<a>` FOR BOTH, not `<Link>`: each leaves this origin (github.com, and
- * the Cognito domain). A client-side navigation cannot follow a cross-origin
- * redirect, so the click would end nowhere while looking fine.
+ * A PLAIN `<a>`, not `<Link>`: this leaves our origin for github.com, and a
+ * client-side navigation cannot follow a cross-origin redirect, so the click would
+ * end nowhere while looking fine.
  */
-
-import Link from "next/link";
 
 export const metadata = {
   title: "Sign in · The Agent Org",
-  description: "Sign in with GitHub to record a gate decision under your own name.",
+  description: "Sign in with GitHub to approve or reject security gates under your own name.",
 };
 
 /**
  * Why a person landed back here, in their words rather than a code.
  *
- * Every one of these is reachable: `guard.ts` sends an authenticated account with
- * no workspace, and `/api/auth/github/callback` sends four distinct refusals. A
- * redirect that drops somebody on a blank sign-in form with no explanation is the
- * failure this map exists to prevent — they try the same button again and get the
- * same silence.
+ * Every one is reachable: `guard.ts` sends an authenticated account with no
+ * workspace, and the GitHub callback sends four distinct refusals. A redirect that
+ * drops somebody on a blank form with no explanation is the failure this map
+ * prevents — they press the same button again and get the same silence.
  */
 const NOTICES: Record<string, string> = {
   unassigned:
-    "You are signed in, and this account has no workspace yet. An administrator has to assign one before there is anything to see.",
+    "You are signed in, and this account has no workspace yet. An administrator has to assign one.",
   github_denied: "GitHub did not grant access. Nothing was changed.",
   github_state:
     "That sign-in took too long, or was started in another tab. Start it again from this page.",
@@ -67,15 +60,15 @@ export default async function SignInPage({
   return (
     <>
       <div style={{ display: "grid", gap: "var(--gap-3)" }}>
-        {/* MONO, because it is the product's own name -- the reference
-            deployment's distinction: mono for what the system wrote, sans for
-            sentences a person reads. */}
+        {/* MONO, because it is the product's own name. The reference deployment's
+            distinction: mono for what the system wrote, sans for sentences a
+            person reads. */}
         <p className="wordmark" style={{ fontSize: "var(--step-title)" }}>
           The Agent Org<span>.</span>
         </p>
-        <h1 className="display" style={{ margin: 0, fontSize: "var(--step-title)" }}>
-          Sign in
-        </h1>
+        <p className="prose" style={{ margin: 0, color: "var(--text-muted)" }}>
+          Five agents write the change. Three gates need a person. You are the person.
+        </p>
       </div>
 
       {notice ? (
@@ -102,32 +95,16 @@ export default async function SignInPage({
           Continue with GitHub
         </a>
 
+        {/* ONE SENTENCE, and it is about the person rather than the architecture.
+            A panel here used to explain what an account cannot override; that is
+            an argument for a judge, aimed at somebody trying to get in. */}
         <p
           className="prose"
           style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--text-muted)" }}
         >
-          Your GitHub login is written to the audit trail of every gate you approve
-          or reject. This application never sees your password.
-        </p>
-      </div>
-
-      {/* A HAIRLINE, NOT A CARD. The email route is an alternative, not a second
-          offer of equal weight -- giving it a box would make the page ask a
-          question it does not need to ask. */}
-      <div
-        style={{
-          borderTop: "1px solid var(--border)",
-          paddingTop: "var(--gap-4)",
-          display: "grid",
-          gap: "var(--gap-3)",
-          fontSize: "var(--step-small)",
-        }}
-      >
-        <p style={{ margin: 0 }}>
-          <a href="/api/auth/signin">Sign in with an email address</a>
-        </p>
-        <p style={{ margin: 0, color: "var(--text-muted)" }}>
-          New here? <Link href="/signup">Create an account</Link>
+          First time here works the same way — your GitHub account is the account.
+          Your login is written to the audit trail of every gate you decide, and this
+          application never sees your password.
         </p>
       </div>
     </>

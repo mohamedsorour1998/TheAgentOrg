@@ -20,9 +20,7 @@ import { requireIdentity } from "@/lib/guard";
 
 export const metadata: Metadata = {
   title: "Account · The Agent Org",
-  description:
-    "The signed-in account, the tenant the server resolved for it, and the " +
-    "GitHub link.",
+  description: "Who you are signed in as, and the workspace it acts in.",
 };
 
 /**
@@ -35,16 +33,15 @@ export default async function AccountPage() {
 
   return (
     <>
+      {/* NO STANDING EXPLANATION. This carried a paragraph about how the tenant
+          is resolved and what removing the GitHub link would stop -- an account
+          screen explaining its own authorisation model to the person whose
+          account it is. The facts below are self-describing; anything that needed
+          a paragraph to justify it has been removed rather than annotated. */}
       <p className="eyebrow">Account</p>
-      <h1 className="display" style={{ marginBottom: "var(--gap-4)" }}>
+      <h1 className="display" style={{ marginBottom: "var(--gap-8)" }}>
         This account
       </h1>
-      <p className="prose" style={{ margin: "0 0 var(--gap-8)" }}>
-        The tenant below is the one the server resolved for this sign-in. It is
-        shown, not chosen: no request this app sends carries a tenant, so there
-        is nothing here to change it with. A run acts on repositories through
-        the GitHub link, so removing the link stops every future run.
-      </p>
 
       <AccountPanel />
     </>

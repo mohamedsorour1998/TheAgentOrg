@@ -1,114 +1,80 @@
 /**
- * THE ACCOUNT PANEL. Who is signed in, which tenant, and the GitHub link.
+ * ACCOUNT — who you are here, and the one control that belongs on this screen.
  *
- * A client component, because it fetches and because removing the link is a
- * two-step interaction. Three states, all rendered: `Skeleton`, `ErrorState`,
- * `EmptyState`.
+ * **THIS PAGE USED TO EXPLAIN ITS OWN ARCHITECTURE.** Under the tenant it printed:
+ * *"Resolved by the server for this sign-in, and not editable here. No request this
+ * app sends carries a tenant, so a caller cannot name one."* True, load-bearing,
+ * and written for somebody auditing the design rather than for the person reading
+ * their own account. Nobody looking at their workspace name needs to be told which
+ * request field does not exist. The rule it describes is enforced in `authz.ts` and
+ * argued in `session.ts`, where a reader can act on it.
  *
- * THE CONFIRM IS A SECOND CLICK IN THE PAGE, NOT `window.confirm`. A native
- * confirm dialog cannot say what removing the link does -- it gets one line, no
- * mono for the identifier, and no way to name the reversal -- and it is dismissed
- * by the same reflex that opened it. Removing the link revokes the grant, so no
- * further run can act on any repository; that sentence has to be on screen at the
- * moment of the decision, which means it has to be our markup.
+ * **THE "GITHUB LINK" SECTION IS DELETED, AND IT HAD STOPPED BEING TRUE.** It
+ * showed LINKED / NOT LINKED with a "Remove link" button and a confirmation step,
+ * from the era when a GitHub token hung off a database account row that a person
+ * could drop while keeping their login. GitHub IS the login now — there is nothing
+ * to unlink that is not simply signing out, and the `DELETE /api/link/github` the
+ * button called still reaches for Postgres, which this deployment does not have.
+ * A control whose only outcomes are "no change" or "an error" is worse than none.
  *
- * THE LINK MARK IS DECLARED HERE and that is deliberate rather than lazy.
- * `components/vocabulary.ts` is the ONE table for provenance, run status and
- * verdict -- the three whose collapse makes a screen state something false. Link
- * state is not in it, and this lane does not own that file, so a local `Mark`
- * value is the honest option: it is a use of the shared type, not a second
- * declaration of a shared fact.
+ * What replaces it is the one sentence that is still actionable: this application
+ * cannot revoke GitHub's own grant, and the place that can is named.
+ *
+ * Four facts, one control. Nothing here is a paragraph.
  */
 
 "use client";
 
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
-import { getJson, sendJson } from "@/components/fetching";
-import { EmptyState, ErrorState, Mark, Skeleton } from "@/components/primitives";
-import type { Mark as MarkValue } from "@/components/vocabulary";
+import { getJson } from "@/components/fetching";
+import { EmptyState, Skeleton } from "@/components/primitives";
 import type { SessionView } from "@/lib/endpoints";
 
-/** Linked and not linked. Two states, and neither is ever a default. */
-const LINK: Readonly<Record<"linked" | "absent", MarkValue>> = {
-  linked: {
-    label: "Linked",
-    meaning: "A GitHub grant is in place, so runs can act on repositories.",
-    tone: "shipped",
-    form: "solid",
-  },
-  absent: {
-    label: "Not linked",
-    meaning:
-      "No GitHub grant. Runs cannot open pull requests or post comments until " +
-      "this account signs in again.",
-    tone: "muted",
-    form: "dashed",
-  },
-};
-
-/** What the unlink control is doing right now. `confirm` is the second click. */
-type Step = "idle" | "confirm" | "sending" | "done";
+/** One labelled fact. The label is mono because it names a field, not a sentence. */
+function Fact({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gap: "var(--gap-1)",
+        paddingBlock: "var(--gap-3)",
+        borderTop: "1px solid var(--border)",
+      }}
+    >
+      <span className="eyebrow">{label}</span>
+      <div style={{ fontSize: "var(--step-body)" }}>{children}</div>
+    </div>
+  );
+}
 
 export function AccountPanel() {
   const [session, setSession] = useState<SessionView | null>(null);
-  const [failure, setFailure] = useState<{
-    error: string;
-    fix: string;
-    detail?: string;
-  } | null>(null);
-  const [step, setStep] = useState<Step>("idle");
+  const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    const result = await getJson<SessionView>("/api/session");
-    if (result.ok) {
-      setSession(result.value);
-      setFailure(null);
-      return;
-    }
-    setFailure({ error: result.error, fix: result.fix, detail: result.detail });
-  }, []);
-
-  // AWAITED INSIDE AN ASYNC IIFE, not `void load()`. The preset's
-  // `react-hooks/set-state-in-effect` refuses a setState reachable from an
-  // effect's SYNCHRONOUS body and cannot see through `useCallback`. Awaiting puts
-  // every setState after a microtask boundary, which satisfies the rule by moving
-  // the calls rather than by hiding them.
   useEffect(() => {
     void (async () => {
-      await load();
+      const result = await getJson<SessionView>("/api/session");
+      if (result.ok) setSession(result.value);
+      setLoading(false);
     })();
-  }, [load]);
+  }, []);
 
-  /**
-   * Remove the link, then RE-READ the session rather than assuming what changed.
-   * The DELETE's body shape is not in the contract, so the truth about this
-   * account after the call is whatever `/api/session` now says.
-   */
-  async function removeLink() {
-    setStep("sending");
-    const result = await sendJson<unknown>("DELETE", "/api/link/github");
-    if (!result.ok) {
-      setFailure({ error: result.error, fix: result.fix, detail: result.detail });
-      setStep("idle");
-      return;
-    }
-    setStep("done");
-    await load();
-  }
+  if (loading) return <Skeleton label="Loading this account" rows={3} />;
 
-  if (failure && !session) {
-    return <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />;
-  }
-  if (!session) return <Skeleton label="Loading this account" rows={4} />;
-
-  if (!session.signed_in) {
+  if (session === null || !session.signed_in) {
     return (
       <EmptyState
         headline="Nobody is signed in"
-        action="Sign in with GitHub to see this account and the tenant it resolves to."
+        action="Sign in with GitHub to see this account."
       >
         <Link href="/signin" className="btn" style={{ display: "inline-block" }}>
           Go to sign in
@@ -117,116 +83,62 @@ export function AccountPanel() {
     );
   }
 
-  const linked = session.github_linked;
-
   return (
     <div style={{ display: "grid", gap: "var(--gap-6)", maxWidth: "var(--measure)" }}>
-      <section className="card" style={{ display: "flex", gap: "var(--gap-4)", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: "var(--gap-4)", alignItems: "center", flexWrap: "wrap" }}>
         {session.image ? (
           // `alt=""` on purpose: the login is beside it, so a description would be
           // read out twice. `unoptimized` because the avatar host is not in
-          // `next.config.mjs`'s image config, which is not this lane's file.
+          // `next.config.mjs`'s image config.
           <Image
             src={session.image}
             alt=""
-            width={48}
-            height={48}
+            width={44}
+            height={44}
             unoptimized
             style={{ borderRadius: "50%", border: "1px solid var(--border-strong)" }}
           />
         ) : null}
-        <div style={{ minWidth: "12rem" }}>
-          <p className="title" style={{ marginBottom: "var(--gap-1)" }}>
-            {session.login ?? "Unknown login"}
-          </p>
-          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "var(--step-small)" }}>
-            {session.name ?? "This account set no display name."}
-          </p>
-        </div>
-      </section>
-
-      <section className="card">
-        <p className="eyebrow">Tenant</p>
-        <p className="ident" style={{ margin: "0 0 var(--gap-2)" }}>
-          {session.tenant_id ?? "none resolved"}
+        <p className="title" style={{ margin: 0 }}>
+          {session.login ?? "Unknown login"}
         </p>
-        <p style={{ margin: 0, color: "var(--text-muted)", fontSize: "var(--step-small)" }}>
-          Resolved by the server for this sign-in, and not editable here. No
-          request this app sends carries a tenant, so a caller cannot name one.
-        </p>
-      </section>
+      </div>
 
-      <section className="card">
-        <p className="eyebrow">GitHub link</p>
-        <Mark mark={linked ? LINK.linked : LINK.absent} explain />
+      <div>
+        <Fact label="Signed in with">GitHub</Fact>
 
-        {failure ? (
-          <div style={{ marginTop: "var(--gap-4)" }}>
-            <ErrorState error={failure.error} fix={failure.fix} detail={failure.detail} />
-          </div>
-        ) : null}
+        <Fact label="Workspace">
+          {/* `ident` is the mono treatment for a value the system generated. */}
+          <span className="ident">{session.tenant_id ?? "none"}</span>
+        </Fact>
 
-        {step === "done" && !linked ? (
-          <p
-            role="status"
-            style={{ margin: "var(--gap-4) 0 0", color: "var(--shipped)", fontSize: "var(--step-small)" }}
-          >
-            Link removed. Sign in again to re-link this account.
-          </p>
-        ) : null}
+        <Fact label="Repositories">
+          {/* ACTIONABLE, where the removed paragraph was not. What a person wants
+              from this row is the screen that changes it. */}
+          <Link href="/repositories">Choose which repositories runs can act on</Link>
+        </Fact>
 
-        {/* `idle` and `done` only. NOT `step !== "confirm"`, which would put this
-            button back on screen while the DELETE is in flight -- a second click
-            would send a second request against a link that may already be gone. */}
-        {linked && (step === "idle" || step === "done") ? (
-          <p style={{ margin: "var(--gap-4) 0 0" }}>
-            <button type="button" className="btn btn-reject" onClick={() => setStep("confirm")}>
-              Remove link
-            </button>
-          </p>
-        ) : null}
-
-        {linked && step === "confirm" ? (
-          <div
-            style={{
-              marginTop: "var(--gap-4)",
-              padding: "var(--gap-4)",
-              border: "1px solid var(--refused)",
-              borderLeftWidth: "3px",
-              borderRadius: "4px",
-              background: "var(--surface-sunken)",
-            }}
-          >
-            <p style={{ margin: "0 0 var(--gap-3)", fontSize: "var(--step-body)" }}>
-              Removing the link revokes the GitHub grant and drops the linked
-              account. No further run can open a pull request or post a comment
-              on any repository, including the ones in scope now.
-            </p>
-            <p style={{ margin: "0 0 var(--gap-4)", color: "var(--text-muted)", fontSize: "var(--step-small)" }}>
-              Signing in again re-links this account. Runs already finished keep
-              their record.
-            </p>
-            <div style={{ display: "flex", gap: "var(--gap-3)", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                className="btn btn-reject"
-                onClick={() => void removeLink()}
-              >
-                Remove link
-              </button>
-              <button type="button" className="btn" onClick={() => setStep("idle")}>
-                Keep the link
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {step === "sending" ? (
-          <p role="status" style={{ margin: "var(--gap-4) 0 0", color: "var(--text-muted)", fontSize: "var(--step-small)" }}>
-            Removing the link.
-          </p>
-        ) : null}
-      </section>
+        <Fact label="Ending access">
+          {/* THE HONEST LIMIT, in one line and only because it is still actionable.
+              Signing out ends the session here; GitHub's own authorisation
+              survives until it is removed at GitHub, and this application cannot
+              do that for you -- revoking a grant needs the client secret, which
+              must not be reachable from a browser session on the process that can
+              approve a gate. */}
+          <a href="/api/auth/logout">Sign out</a>
+          <span style={{ color: "var(--text-muted)", fontSize: "var(--step-small)" }}>
+            {" "}
+            · to withdraw the app&apos;s access entirely, remove it in{" "}
+            <a
+              href="https://github.com/settings/applications"
+              target="_blank"
+              rel="noreferrer"
+            >
+              your GitHub settings
+            </a>
+          </span>
+        </Fact>
+      </div>
     </div>
   );
 }

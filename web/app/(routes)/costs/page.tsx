@@ -31,7 +31,6 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-import { CostPanel } from "@/components/CostPanel";
 import { getJson } from "@/components/fetching";
 import { EmptyState, ErrorState, Skeleton, Stat } from "@/components/primitives";
 import { renderUsd, renderWhen } from "@/components/vocabulary";
@@ -50,7 +49,6 @@ type Priced = { run: RunSummary; cost: CostView | null };
 
 export default function CostsPage() {
   const [priced, setPriced] = useState<Priced[] | null>(null);
-  const [total, setTotal] = useState(0);
   const [failure, setFailure] = useState<{ error: string; fix: string; detail?: string } | null>(
     null,
   );
@@ -75,8 +73,6 @@ export default function CostsPage() {
         ),
       );
       if (cancelled) return;
-
-      setTotal(runs.length);
       setPriced(
         head.map((run, i) => {
           const answer = costs[i];
@@ -133,174 +129,101 @@ export default function CostsPage() {
   // that visible; without it a total over three of twenty runs reads as twenty.
   const withMoney = priced.filter((p) => p.cost !== null && p.cost.usd !== null);
   const sum = withMoney.reduce((acc, p) => acc + (p.cost?.usd ?? 0), 0);
-  const byDay = groupByDay(priced);
 
   return (
     <div>
       <p className="eyebrow">Costs</p>
       <h1 className="display">What these runs cost</h1>
-      <p className="prose">
-        Priced from the {priced.length} most recent {priced.length === 1 ? "run" : "runs"}
-        {total > priced.length ? ` of ${total}` : ""}. Every figure is a model bill,
-        not an infrastructure one.
+      {/* ONE LINE. This page carried five explanatory paragraphs -- what a model
+          bill is, what "summed from above" means, why per-repository is missing,
+          and what an unpriced run is -- for two runs and one number. Reported as
+          noisy and unclear, and it was: the prose outweighed the data. */}
+      <p className="prose" style={{ margin: "0 0 var(--gap-8)" }}>
+        Model spend only. Infrastructure is a rounding error beside it.
       </p>
 
-      <div className="grid-stats" style={{ margin: "var(--gap-8) 0" }}>
+      <div className="grid-stats" style={{ marginBottom: "var(--gap-8)" }}>
         <Stat
           value={withMoney.length > 0 ? renderUsd(sum) : renderUsd(null)}
-          label="Total across priced runs"
+          label="Total"
         />
-        <Stat
-          value={`${withMoney.length} of ${priced.length}`}
-          label="Runs that could be priced"
-          tone={withMoney.length < priced.length ? "muted" : "neutral"}
-        />
+        {/* SHOWN ONLY WHEN IT DIFFERS. "2 of 2" is a statistic about nothing; the
+            count earns its place exactly when some runs could not be priced, and
+            then it is the thing stopping the total being read as complete. */}
+        {withMoney.length < priced.length ? (
+          <Stat
+            value={`${withMoney.length} of ${priced.length}`}
+            label="Runs priced"
+            tone="muted"
+          />
+        ) : (
+          <Stat value={String(priced.length)} label={priced.length === 1 ? "Run" : "Runs"} />
+        )}
       </div>
 
       {withMoney.length < priced.length ? (
-        <p className="prose" style={{ fontSize: "var(--step-small)" }}>
-          The total covers only the runs that could be priced, so it understates.
-          A run is unpriced when nothing recorded its model usage, or when the price
-          table does not know the model it used — neither is a run that cost
-          nothing.
+        <p
+          className="prose"
+          style={{ margin: "0 0 var(--gap-6)", fontSize: "var(--step-small)" }}
+        >
+          The total skips runs nothing priced, so it understates. An unpriced run is
+          not a free one.
         </p>
       ) : null}
 
-      {/* PER PERIOD — derived, and labelled as such. */}
-      <section style={{ margin: "var(--gap-12) 0" }}>
-        <h2 className="title">By day</h2>
-        <p className="prose" style={{ fontSize: "var(--step-small)" }}>
-          Summed from the per-run figures above.
-        </p>
-        <div className="table-scroll">
-          <table className="data">
-            <caption>
-              Each day&apos;s runs and what they cost. A day whose runs are all
-              unpriced shows no figure rather than a zero.
-            </caption>
-            <thead>
-              <tr>
-                <th scope="col">Day</th>
-                <th scope="col" style={{ textAlign: "right" }}>
-                  Runs
+      {/* ONE TABLE, ONE ROW PER RUN. This was three sections -- by day, by
+          repository, by run -- and the last repeated a full stage table per run
+          with its own header and its own caption. At two runs that is two tables
+          to read one number each.
+
+          **THE STAGE COLUMN IS GONE AND ITS ABSENCE IS THE HONEST PART.** It
+          printed `plan` on every row, including three times for one run, because
+          per-stage attribution needs a line in `graph.py` / `run_stage.py` that
+          nothing has added -- so every model call in a run lands in a single
+          `plan` row. A column that always says the same wrong word is worse than
+          no column: it reads as data. The call COUNT is real and is shown instead.
+
+          "By day" is gone too: at this volume it was one row restating the total.
+          "By repository" was a heading over a paragraph explaining that there is
+          nothing to show, which is a section that exists to apologise. */}
+      <div className="table-scroll">
+        <table className="data">
+          <thead>
+            <tr>
+              <th scope="col">Run</th>
+              <th scope="col">When</th>
+              <th scope="col">Model calls</th>
+              <th scope="col">Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {priced.map(({ run, cost }) => (
+              <tr key={run.run_id}>
+                <th scope="row">
+                  <Link href={`/runs/${run.run_id}`}>{run.ticket_id}</Link>
                 </th>
-                <th scope="col" style={{ textAlign: "right" }}>
-                  Priced
-                </th>
-                <th scope="col" style={{ textAlign: "right" }}>
-                  Cost
-                </th>
+                <td>
+                  <time dateTime={run.created_at}>{renderWhen(run.created_at)}</time>
+                </td>
+                <td>{cost ? cost.stages_priced : "—"}</td>
+                <td>{cost ? renderUsd(cost.usd) : "not read"}</td>
               </tr>
-            </thead>
-            <tbody>
-              {byDay.map((day) => (
-                <tr key={day.day}>
-                  <td style={{ fontFamily: "var(--mono)" }}>{day.day}</td>
-                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>
-                    {day.runs}
-                  </td>
-                  <td
-                    style={{
-                      textAlign: "right",
-                      fontFamily: "var(--mono)",
-                      color: day.pricedRuns < day.runs ? "var(--text-muted)" : "inherit",
-                    }}
-                  >
-                    {day.pricedRuns}
-                  </td>
-                  <td style={{ textAlign: "right", fontFamily: "var(--mono)" }}>
-                    {day.pricedRuns > 0 ? renderUsd(day.usd) : renderUsd(null)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-      {/* PER REPOSITORY — the honest gap. */}
-      <section style={{ margin: "var(--gap-12) 0" }}>
-        <h2 className="title">By repository</h2>
-        <div
-          className="card"
-          style={{ borderStyle: "dashed", maxWidth: "var(--measure)" }}
-        >
-          <p style={{ margin: 0 }}>
-            Cost per repository is not available yet.
-          </p>
-          <p
-            style={{
-              margin: "var(--gap-3) 0 0",
-              color: "var(--text-muted)",
-              fontSize: "var(--step-small)",
-            }}
-          >
-            A run records the ticket it came from, not the repository it ran
-            against, so there is nothing here to group by. Grouping by ticket id
-            would look like an answer and would not be one. Closing this needs a
-            repository on the run summary.
-          </p>
-        </div>
-      </section>
-
-      {/* PER RUN — measured. */}
-      <section>
-        <h2 className="title">By run</h2>
-        <div style={{ marginTop: "var(--gap-6) " }}>
-          {priced.map(({ run, cost }) => (
-            <article
-              key={run.run_id}
-              style={{
-                borderTop: "1px solid var(--border)",
-                paddingTop: "var(--gap-6)",
-                marginBottom: "var(--gap-8)",
-              }}
-            >
-              <p className="eyebrow" style={{ marginBottom: "var(--gap-3)" }}>
-                <Link href={`/runs/${run.run_id}`} style={{ color: "inherit" }}>
-                  {run.ticket_id}
-                </Link>{" "}
-                · <time dateTime={run.created_at}>{renderWhen(run.created_at)}</time>
-              </p>
-              {cost ? (
-                <CostPanel cost={cost} />
-              ) : (
-                <p className="prose" style={{ fontSize: "var(--step-small)" }}>
-                  This run&apos;s cost could not be read. The run itself is
-                  unaffected — open it to see what it did.
-                </p>
-              )}
-            </article>
-          ))}
-        </div>
-      </section>
+      {/* THE ONE CAVEAT WORTH KEEPING, because it changes how the number is read
+          rather than describing the page. Every agent re-sends the repository
+          snapshot uncached, which is where the money goes. */}
+      <p
+        className="prose"
+        style={{ marginTop: "var(--gap-6)", fontSize: "var(--step-small)", color: "var(--text-muted)" }}
+      >
+        Nothing is cached between agents yet, so each run pays full price for the
+        same repository snapshot five times. Open a run for its per-call detail.
+      </p>
     </div>
   );
 }
 
-/**
- * Group by calendar day, newest first.
- *
- * The day is taken as the first 10 characters of the ISO timestamp -- the UTC
- * date, not the reader's local one. Deliberate: converting to a local date makes
- * the same run appear on different days for two people reading the same screen,
- * and every other timestamp in this product is the recorded UTC value.
- */
-function groupByDay(
-  priced: readonly Priced[],
-): { day: string; runs: number; pricedRuns: number; usd: number }[] {
-  const days = new Map<string, { day: string; runs: number; pricedRuns: number; usd: number }>();
-
-  for (const { run, cost } of priced) {
-    const day = run.created_at.slice(0, 10) || "unknown";
-    const row = days.get(day) ?? { day, runs: 0, pricedRuns: 0, usd: 0 };
-    row.runs += 1;
-    if (cost && cost.usd !== null) {
-      row.pricedRuns += 1;
-      row.usd += cost.usd;
-    }
-    days.set(day, row);
-  }
-
-  return [...days.values()].sort((a, b) => (a.day < b.day ? 1 : -1));
-}
