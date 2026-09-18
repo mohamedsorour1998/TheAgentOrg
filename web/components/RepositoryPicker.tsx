@@ -168,6 +168,21 @@ export function RepositoryPicker() {
    * revalidates every entry server-side regardless, which is the check that
    * matters.
    */
+  /**
+   * Is this repository in scope but NO LONGER in the App's installation?
+   *
+   * **ONLY ANSWERABLE WHEN THE INSTALLATION WAS ACTUALLY READ.** `available` is
+   * `[]` for three different reasons and two of them are not "access was removed":
+   * still loading, signed in without GitHub, and GitHub not answering. Treating
+   * any of those as lost access would paint every repository red during an outage
+   * -- an alarm on the screen that decides what runs may touch, caused by a slow
+   * API. So this refuses to answer unless the list is real.
+   */
+  function lostAccess(fullName: string): boolean {
+    if (available === null || !linked || unavailable) return false;
+    return !available.includes(fullName);
+  }
+
   function addName(name: string) {
     // TICK IT RATHER THAN RE-ADDING. A repository that is listed-but-unticked is
     // one somebody removed from scope and is now putting back; appending a second
@@ -348,11 +363,57 @@ export function RepositoryPicker() {
                     style={{ width: "1.1rem", height: "1.1rem", accentColor: "var(--accent)", flex: "none" }}
                   />
                   <span className="ident">{repository.full_name}</span>
+                  {lostAccess(repository.full_name) ? (
+                    // **SCOPE CAN OUTLIVE THE INSTALLATION**, and this is the only
+                    // place that can say so. Reported: a repository was added from
+                    // the dropdown, its access was then removed on GitHub, and it
+                    // stayed ticked here -- so a run could be started against a
+                    // repository the App can no longer open a pull request on. The
+                    // same trap the typed field created, arriving from the other
+                    // direction.
+                    //
+                    // NOT AUTO-REMOVED. Access may have been pulled by mistake, or
+                    // for an hour, and silently dropping a repository out of scope
+                    // is a change nobody asked for to a list that decides what runs
+                    // may touch. It is marked, and the person unticks it or
+                    // restores access on GitHub.
+                    <span
+                      style={{
+                        fontSize: "var(--step-small)",
+                        color: "var(--refused)",
+                        borderBottom: "1px solid var(--refused)",
+                      }}
+                    >
+                      no access
+                    </span>
+                  ) : null}
                 </label>
               </li>
             );
           })}
         </ul>
+
+        {/* THE REMEDY, shown only when there is something to remedy. A standing
+            explanation of a state that is normally absent is noise on every other
+            visit. */}
+        {server.some((r) => lostAccess(r.full_name)) ? (
+          <p
+            className="prose"
+            style={{ margin: "var(--gap-3) 0 0", fontSize: "var(--step-small)" }}
+          >
+            The Agent Org no longer has access to the repositories marked{" "}
+            <span style={{ color: "var(--refused)" }}>no access</span>. A run against
+            one cannot open a pull request or post a comment. Untick and save, or{" "}
+            <a
+              href="https://github.com/settings/installations"
+              target="_blank"
+              rel="noreferrer"
+            >
+              restore access on GitHub
+            </a>
+            .
+          </p>
+        ) : null}
       </fieldset>
 
       <div style={{ display: "flex", alignItems: "center", gap: "var(--gap-4)", flexWrap: "wrap" }}>
