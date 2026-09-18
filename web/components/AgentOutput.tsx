@@ -174,38 +174,7 @@ export function AgentOutput({
               </p>
             ) : null}
             {dev.diff ? (
-              <div>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setShowDiff((v) => !v)}
-                  aria-expanded={showDiff}
-                >
-                  {showDiff ? "Hide the diff" : `Show the diff (${dev.diff.split("\n").length} lines)`}
-                </button>
-                {showDiff ? (
-                  // `overflow-x: auto` on its OWN container: a diff is the one thing
-                  // on this page allowed to be wider than the screen, and letting it
-                  // widen the page body instead is what breaks the phone layout.
-                  <pre
-                    style={{
-                      marginTop: "var(--gap-3)",
-                      marginBottom: 0,
-                      overflowX: "auto",
-                      maxHeight: "28rem",
-                      overflowY: "auto",
-                      padding: "var(--gap-3)",
-                      background: "var(--surface-sunken)",
-                      border: "1px solid var(--border)",
-                      fontFamily: "var(--mono)",
-                      fontSize: "var(--step-caption)",
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    {dev.diff}
-                  </pre>
-                ) : null}
-              </div>
+              <Diff text={dev.diff} open={showDiff} onToggle={() => setShowDiff((v) => !v)} />
             ) : (
               <p className="prose" style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--text-muted)" }}>
                 The developer recorded no diff.
@@ -316,4 +285,122 @@ export function AgentOutput({
   // The page renders those, because they are the verdict, the decision controls and
   // the merge -- and none of them is a model's answer.
   return null;
+}
+
+/**
+ * THE DIFF, drawn as a diff rather than as a paragraph of grey monospace.
+ *
+ * Reported from the deployed app: *"show diff needs to be more modern and nice"*.
+ * It was the raw string in a `<pre>`, so an added line and a removed line and the
+ * unchanged context around them were all the same colour -- which is the one thing
+ * a diff exists to distinguish, and it is also the thing the whole product turns on:
+ * `common/diff.py` records that the scanners read ADDED LINES ONLY, and a finding at
+ * `app/auth.py:3` means the third ADDED line.
+ *
+ * **ADDED IS MINT AND REMOVED IS ROSE, WHICH ARE THIS PALETTE'S EXISTING TOKENS** --
+ * `--shipped` and `--refused`, the same two the verdict marks use. No new colours:
+ * `vocabulary.ts` decides what green and rose mean in this product, and a diff view
+ * inventing its own pair would be a second declaration of that.
+ *
+ * THE TINT IS ON THE ROW, NOT ONLY THE TEXT. A 6% wash the width of the line is what
+ * makes the shape of a change readable at a glance while scrolling; colouring the
+ * glyphs alone leaves it looking like prose with some coloured words in it.
+ *
+ * `overflow-x: auto` ON ITS OWN CONTAINER: a diff is the one thing on this page
+ * allowed to be wider than the screen, and letting it widen the page body instead is
+ * what breaks the phone layout.
+ */
+function Diff({ text, open, onToggle }: { text: string; open: boolean; onToggle: () => void }) {
+  const lines = text.split("\n");
+  const added = lines.filter((l) => l.startsWith("+") && !l.startsWith("+++")).length;
+  const removed = lines.filter((l) => l.startsWith("-") && !l.startsWith("---")).length;
+
+  return (
+    <div>
+      <button
+        type="button"
+        className="btn"
+        onClick={onToggle}
+        aria-expanded={open}
+        style={{ display: "inline-flex", alignItems: "center", gap: "var(--gap-3)" }}
+      >
+        <span>{open ? "Hide the diff" : "Show the diff"}</span>
+        {/* THE SHAPE OF THE CHANGE, BEFORE IT IS OPENED. A line count answered
+            "how long", which is the least interesting thing about a diff; added
+            and removed answer "how big a change is this" without opening it. */}
+        <span style={{ color: "var(--shipped)" }}>+{added}</span>
+        <span style={{ color: "var(--refused)" }}>−{removed}</span>
+      </button>
+
+      {open ? (
+        <div
+          style={{
+            marginTop: "var(--gap-3)",
+            border: "1px solid var(--border)",
+            borderRadius: "4px",
+            background: "var(--surface-sunken)",
+            overflow: "hidden",
+          }}
+        >
+          <pre
+            style={{
+              margin: 0,
+              overflowX: "auto",
+              maxHeight: "28rem",
+              overflowY: "auto",
+              padding: "var(--gap-3) 0",
+              fontFamily: "var(--mono)",
+              fontSize: "var(--step-small)",
+              lineHeight: 1.6,
+            }}
+          >
+            {lines.map((line, i) => (
+              <span key={i} style={rowStyle(line)}>
+                {line || " "}
+              </span>
+            ))}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One diff row. Tinted by what the line DOES, not by where it sits. */
+function rowStyle(line: string): React.CSSProperties {
+  const base: React.CSSProperties = {
+    display: "block",
+    padding: "0 var(--gap-3)",
+    whiteSpace: "pre",
+  };
+  // THE FILE HEADERS FIRST. `+++`/`---` begin with the same characters as an added
+  // and a removed line, so testing for `+` before them paints every header as a
+  // change -- and the header is the one line that tells you WHICH file this is.
+  if (line.startsWith("+++") || line.startsWith("---")) {
+    return { ...base, color: "var(--text-muted)" };
+  }
+  // The hunk header. It carries the line numbers, which on this project mean the
+  // ORIGINAL file -- unlike a finding's line, which counts added lines only.
+  if (line.startsWith("@@")) {
+    return {
+      ...base,
+      color: "var(--accent)",
+      background: "color-mix(in srgb, var(--accent) 6%, transparent)",
+    };
+  }
+  if (line.startsWith("+")) {
+    return {
+      ...base,
+      color: "var(--shipped)",
+      background: "color-mix(in srgb, var(--shipped) 8%, transparent)",
+    };
+  }
+  if (line.startsWith("-")) {
+    return {
+      ...base,
+      color: "var(--refused)",
+      background: "color-mix(in srgb, var(--refused) 8%, transparent)",
+    };
+  }
+  return { ...base, color: "var(--text-muted)" };
 }

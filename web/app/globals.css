@@ -516,13 +516,30 @@ table.data tr[data-blocking="true"] td:first-child {
   text-align: center;
 }
 
+/* SEAMLESS, NOT A BLOCK. The first version filled the button with
+   `--surface-sunken` (#070a10), which is DARKER than the card it sits on
+   (#131a25) -- so hovering a stage, and the currently-running stage, punched a
+   black rectangle into the panel. Reported as exactly that.
+
+   A hairline underline and a barely-there wash do the same job: the underline
+   carries the state (and survives greyscale, which a tint does not), while the
+   wash only warms the area under the pointer. `color-mix` against the accent
+   rather than a new token, so the highlight follows the palette instead of
+   becoming an eleventh colour nobody signed off. */
+.spine-btn {
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
 .spine-btn:hover {
-  background: var(--surface-sunken);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 
 .spine-btn[aria-current="true"] {
   border-bottom-color: var(--accent);
-  background: var(--surface-sunken);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 /* The rail: a line in, the mark, a line out. Rendering the lines as siblings of

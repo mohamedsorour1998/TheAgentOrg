@@ -61,8 +61,6 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
   const [cost, setCost] = useState<CostView | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [loading, setLoading] = useState(true);
-  const [readAt, setReadAt] = useState<Date | null>(null);
-  const [now, setNow] = useState(() => new Date());
   /**
    * THE STAGE THE READER CHOSE, or `null` for "follow the run".
    *
@@ -101,7 +99,6 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
       }
       setFailure(null);
       setRun(result.value);
-      setReadAt(new Date());
       setLoading(false);
 
       // Scoring and cost are separate reads and each may legitimately be absent
@@ -136,7 +133,6 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
     if (ended || run === null) return;
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
-      setNow(new Date());
       reload();
     }, 5000);
     return () => clearInterval(id);
@@ -215,7 +211,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
         <p className="prose" style={{ margin: "var(--gap-2) 0 var(--gap-3)" }}>
           {run.ticket_text}
         </p>
-        <Facts run={run} readAt={readAt} now={now} live={!ended} />
+        <Facts run={run} live={!ended} />
       </header>
 
       {/* ── THE DECISION, IF ONE IS OWED ─────────────────────────────────────
@@ -281,10 +277,47 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
       <section style={{ margin: "var(--gap-6) 0 var(--gap-8)" }}>
         <h2
           className="eyebrow"
-          style={{ display: "flex", gap: "var(--gap-3)", alignItems: "baseline" }}
+          style={{
+            display: "flex",
+            gap: "var(--gap-3)",
+            alignItems: "baseline",
+            flexWrap: "wrap",
+          }}
         >
           <span style={{ color: "var(--text)" }}>{selected}</span>
           <span>{openGate === selected ? "your decision" : PHASE_WORD[phase]}</span>
+
+          {/* **PINNING IS DELIBERATE AND IT WAS INVISIBLE.** Reported from the
+              deployed app: *"why do I see `show diff` and `develop` when I approve
+              gate3, then out of the blue security and review are already
+              completed"*. Clicking a stage pins it, on purpose -- a panel that
+              yanked itself away while somebody was reading a diff would be worse.
+              But nothing said the run had moved on underneath, so the stages
+              finishing behind the pinned panel read as them happening "out of the
+              blue".
+
+              One control fixes both halves: it only appears when the two disagree,
+              it NAMES where the run actually is, and it puts the reader back in
+              sync in a click. Unpinning is `setPicked(null)`, which returns to
+              following rather than jumping to a second fixed choice. */}
+          {picked !== null && picked !== following ? (
+            <button
+              type="button"
+              onClick={() => setPicked(null)}
+              style={{
+                border: 0,
+                background: "none",
+                padding: 0,
+                font: "inherit",
+                color: "var(--accent)",
+                cursor: "pointer",
+                textDecoration: "underline",
+                textUnderlineOffset: "0.2em",
+              }}
+            >
+              the run is at {following} — follow it
+            </button>
+          ) : null}
         </h2>
 
         <AgentOutput
@@ -342,17 +375,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
  * three LINKS in it -- the pull request, the branch, the Actions run -- stand out
  * because they are the only coloured things in it.
  */
-function Facts({
-  run,
-  readAt,
-  now,
-  live,
-}: {
-  run: RunDetail;
-  readAt: Date | null;
-  now: Date;
-  live: boolean;
-}) {
+function Facts({ run, live }: { run: RunDetail; live: boolean }) {
   const bits: React.ReactNode[] = [
     <span key="id" className="ident" title="This run's id">
       {run.run_id.slice(0, 8)}
@@ -428,32 +451,22 @@ function Facts({
           {bit}
         </span>
       ))}
-      {/* WHEN THIS WAS LAST READ, rather than a spinner. A run spends most of its
-          wall clock waiting, so "quiet and current" and "quiet and stuck" are the
-          two states a viewer needs told apart -- and a spinner says neither.
+      {/* **"checked 5s ago" IS GONE, AND IT WAS NOISE.** Reported from the deployed
+          app: *"remove this text, it is confusing -- sometimes now, sometimes 5s,
+          checked just now"*. It was a counter ticking on a line of stable facts, and
+          it answered a question nobody had: the page reads every five seconds, so
+          the number was never anything but 0-5.
 
-          **THREE ANSWERS, NOT TWO, AND THE FIRST VERSION COLLAPSED THEM.** It read
-          `run.live` alone and rendered "GitHub could not be reached" for a run that
-          simply HAS no Actions run -- reported immediately, on a stale row whose
-          `ci_run_id` is empty. Nothing had failed and the screen reported a fault.
-
-          That is `scan_provenance`'s rule arriving in my own new field: a CHOICE
-          (there is nothing to ask) and a FAULT (the ask failed) must not share a
-          spelling, because they want different reactions -- one is "this run
-          predates the link", the other is "try again". */}
-      {live ? (
+          THE ONE CASE STAYS, because it is not a clock -- it is a warning that the
+          stage marks above may be behind. `live: false` means GitHub was not asked
+          (or could not be), and the two reasons are still kept apart. */}
+      {live && !run.live ? (
         <span key="read" style={{ display: "inline-flex", gap: "var(--gap-3)" }}>
           <span aria-hidden="true">·</span>
-          <span
-            style={{
-              color: run.live || !run.ci_run_id ? "var(--text-muted)" : "var(--refused)",
-            }}
-          >
-            {run.live
-              ? `checked ${secondsAgo(readAt, now)}`
-              : run.ci_run_id
-                ? "stored record — GitHub could not be reached"
-                : "stored record — this run has no Actions run to follow"}
+          <span style={{ color: run.ci_run_id ? "var(--refused)" : "var(--text-muted)" }}>
+            {run.ci_run_id
+              ? "stored record — GitHub could not be reached"
+              : "stored record — this run has no Actions run to follow"}
           </span>
         </span>
       ) : null}
@@ -461,13 +474,6 @@ function Facts({
   );
 }
 
-function secondsAgo(at: Date | null, now: Date): string {
-  if (!at) return "just now";
-  const seconds = Math.max(0, Math.round((now.getTime() - at.getTime()) / 1000));
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds}s ago`;
-  return `${Math.round(seconds / 60)}m ago`;
-}
 
 /**
  * A gate, as a stage: the decision made there, or why there is not one.
@@ -516,6 +522,25 @@ function GateStage({ gate, run, phase }: { gate: Gate; run: RunDetail; phase: st
     return (
       <p className="prose" style={{ fontSize: "var(--step-small)" }}>
         The run stopped at this gate.
+      </p>
+    );
+  }
+  /**
+   * **`GATE1 RUNNING NOW` SAT ABOVE "the run has not reached this gate".** Two
+   * statements on one screen contradicting each other, reported from the deployed
+   * app — and the same shape as the `DONE` case below, missed because only one of
+   * the branches had been thought about.
+   *
+   * A gate job reports `in_progress` in the window between GitHub creating it and
+   * the Environment taking hold, and again while it records a decision. In neither
+   * moment has the run "not reached" it: it is there, and there is nothing yet to
+   * show. Saying so beats denying it.
+   */
+  if (phase === "running" || phase === "waiting") {
+    return (
+      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+        The run is at this gate. Nothing is recorded yet — a decision appears here
+        once somebody makes one.
       </p>
     );
   }
