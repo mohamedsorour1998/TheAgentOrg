@@ -160,6 +160,32 @@ on:
         required: false
         type: string
         default: manual
+      repo:
+        # WHICH REPOSITORY THIS RUN ACTS ON. Empty means the repository variable,
+        # which is what every run did before this input existed.
+        #
+        # **THE PRODUCT COULD ONLY EVER CHANGE ONE REPOSITORY.** `DEMO_REPO` is a
+        # repository VARIABLE, so the target was a property of this workflow rather
+        # than of the run -- a tenant could put three repositories in scope, see all
+        # three on the repositories screen, and every run would still go to whichever
+        # one the variable named. Reported from the deployed app: *"when creating an
+        # issue we should be able to select which repo"*.
+        #
+        # **THE INPUT DOES NOT AUTHORISE ANYTHING, AND THAT SEPARATION IS THE POINT.**
+        # The dispatch token can already write to every repository it was installed
+        # on, so a value here cannot widen what is reachable -- what bounds a run is
+        # `web/app/api/runs/route.ts`, which refuses a repository outside the caller's
+        # own tenant-scoped list BEFORE the token is read. Checking it here instead
+        # would put the check behind the credential it is meant to gate.
+        #
+        # `type: string` and defaulted EMPTY rather than to the variable's value:
+        # `vars.DEMO_REPO` cannot be read in an input default, and duplicating the
+        # literal here would be a second declaration of the deployment's target that
+        # drifts silently. Empty is resolved once, at the `env:` below.
+        description: "owner/name to act on (default: the DEMO_REPO variable)"
+        required: false
+        type: string
+        default: ""
 
 # One run at a time, and NEVER cancel one mid-flight: a cancelled run can leave a
 # pull request open, a block comment posted and a gate approved with nothing on
@@ -198,6 +224,25 @@ env:
   # omit one -- and the omission is silent by construction.
   TENANCY_TABLE: theagentorg-tenancy
 
+  # WHICH REPOSITORY EVERY JOB ACTS ON, resolved ONCE.
+  #
+  # `config.GITHUB_REPO` reads the env var named DEMO_REPO -- the one name mismatch
+  # in `common/config.py` -- and ten jobs set it. They all set it to the same thing,
+  # which is why the target was a property of this WORKFLOW rather than of the run:
+  # a tenant with three repositories in scope still had every run go to the one the
+  # repository variable named.
+  #
+  # `inputs.repo || vars.DEMO_REPO` keeps the variable as the answer for every
+  # existing caller. The ingress transformer sends no `repo`, a hand `gh workflow
+  # run` sends none, and an empty string is falsy to GitHub -- so all three land on
+  # the variable exactly as before, and only a caller that names one moves.
+  #
+  # RESOLVED HERE AND NOT PER JOB. Ten copies of an `||` expression is ten chances
+  # to fix nine of them: a job left on `vars.DEMO_REPO` would open the pull request
+  # on a DIFFERENT repository from the one the plan commented on, and every job
+  # would stay green while it happened.
+  DEMO_REPO: ${{ inputs.repo || vars.DEMO_REPO }}
+
 jobs:
   # ── PLAN ────────────────────────────────────────────────────────────────────
   #
@@ -213,7 +258,6 @@ jobs:
       run_id: ${{ steps.stage.outputs.run_id }}
     env:
       REMOTE_AGENTS: "true"
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -312,7 +356,6 @@ jobs:
     # comment degrades to a `local://` ref, so the approval a judge is looking for
     # never appears while the job still reports green.
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -364,7 +407,6 @@ jobs:
       id-token: write
     env:
       REMOTE_AGENTS: "true"
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
       # ONE REVISION ON A POISONED RUN, THREE ON A CLEAN ONE, and the asymmetry is
       # the point rather than a shortcut.
@@ -474,7 +516,6 @@ jobs:
     # comment degrades to a `local://` ref, so the approval a judge is looking for
     # never appears while the job still reports green.
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -521,7 +562,6 @@ jobs:
       id-token: write
     env:
       REMOTE_AGENTS: "true"
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -580,7 +620,6 @@ jobs:
     # comment degrades to a `local://` ref, so the approval a judge is looking for
     # never appears while the job still reports green.
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -666,7 +705,6 @@ jobs:
     # run whose central action did not happen -- reintroduced by adding a real
     # write to the one job that had been deliberately credential-free.
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -758,7 +796,6 @@ jobs:
     permissions:
       contents: read
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -823,7 +860,6 @@ jobs:
     permissions:
       contents: read
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
@@ -888,7 +924,6 @@ jobs:
     permissions:
       contents: read
     env:
-      DEMO_REPO: ${{ vars.DEMO_REPO }}
       GITHUB_TOKEN: ${{ secrets.DEMO_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4

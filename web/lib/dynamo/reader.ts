@@ -93,21 +93,79 @@ async function rowsOfType(tenantId: string, token: string): Promise<Row[]> {
   return out;
 }
 
-function summarise(row: Row) {
+/** `https://github.com/owner/name/pull/61` -> `owner/name`. */
+const PULL_REQUEST = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/\d+/;
+
+/**
+ * WHICH REPOSITORY A RUN ACTED ON.
+ *
+ * `agentorg/state.py` is frozen and declares no repository field, so there are two
+ * honest sources and no third: the column `run_index.record_run` writes, and the
+ * pull request's own URL for rows written before that column existed.
+ *
+ * **IT DOES NOT FALL BACK TO "the tenant's only repository".** That guess is right
+ * today, because one repository is in scope, and it becomes wrong silently the
+ * moment a second is added -- displaying a change as having been made somewhere it
+ * was not. `""` renders as "not recorded", which is true.
+ */
+function repositoryOf(row: Row, state: RunStateDoc | null): string {
+  const declared = String(row.repository ?? "").trim();
+  if (declared) return declared;
+  const pr = (state?.dev as Record<string, unknown> | undefined)?.pr_url;
+  const matched = typeof pr === "string" ? PULL_REQUEST.exec(pr) : null;
+  return matched?.[1] ?? "";
+}
+
+/**
+ * The row as the LIST needs it.
+ *
+ * **THE LAST THREE FIELDS WERE HARDCODED NULL AND THE REASON HAD EXPIRED.** The
+ * comment here said they "come from the run's STATE DOCUMENT, which lives in
+ * `theagentorg-runs` and is only written when the pipeline runs on
+ * STATE_BACKEND=dynamodb" -- true when written, and obsolete the moment
+ * `run_index` began denormalising the whole document onto THIS row. So every run
+ * in the list rendered `NOT SCANNED · not scanned · PROVENANCE UNKNOWN`, including
+ * runs that were scanned by three real scanners and promoted.
+ *
+ * That is the worst possible direction for this particular screen: the product's
+ * entire claim is that a deterministic rule reads real scanner output, and the
+ * list was reporting that no scan had happened, for runs where it had. Measured on
+ * the live row for run f8f67ab3: `verdict='pass'`, `blocking=0`,
+ * `scan_provenance='scanners'` -- all three present and all three discarded.
+ *
+ * **IT IS THE SAME EXPIRED PREMISE AS `awaiting_gates: []`**, which made the
+ * approve button unreachable. A comment that justifies a constant outlives the
+ * fact that justified it, and reads as a decision rather than as a stale one.
+ */
+function summarise(row: Row, progress: CiProgress | null = null) {
+  const state = stateOf(row);
+  const security = (state?.security ?? null) as Record<string, unknown> | null;
+  const status = reconcileStatus(
+    String(state?.status ?? row.status ?? "running"),
+    progress,
+    state,
+  );
+
   return {
     run_id: String(row.run_id ?? ""),
     ticket_id: String(row.ticket_id ?? ""),
-    status: (row.status as string) || "running",
+    status,
     created_at: String(row.created_at ?? ""),
-    // NULL, NOT A GUESS. These come from the run's STATE DOCUMENT, which lives in
-    // `theagentorg-runs` and is only written when the pipeline runs on
-    // STATE_BACKEND=dynamodb. Today it runs on the artifact handoff, so these are
-    // genuinely unknown -- and `""` for provenance means "nobody recorded it",
-    // which the UI renders as unknown rather than as a measured value.
-    verdict: null,
-    scan_provenance: "",
-    blocking: null,
-    awaiting_gate: "",
+    // `null` STILL MEANS NOT SCANNED, and now it means it truthfully: the security
+    // stage has not produced a verdict rather than the reader having declined to
+    // look. A run at `plan` genuinely has none.
+    verdict: (security?.verdict as string) ?? null,
+    // `""` MEANS NOBODY RECORDED PROVENANCE -- a row written before the field
+    // existed. The UI renders it as unknown, which is distinct from `scanners`
+    // (a real scan) and from `fixture-fallback` (a scanner failed and the fixture
+    // stood in). Collapsing those hides a broken gate behind a demo setting.
+    scan_provenance: (security?.scan_provenance as string) ?? "",
+    blocking: Array.isArray(security?.blocking) ? security.blocking.length : null,
+    // ONE GATE AT MOST, and from GitHub when GitHub could be asked -- the same
+    // source the detail screen and the approval route use, so a run cannot read as
+    // waiting in the list and not waiting when it is opened.
+    awaiting_gate: (progress ? gatesAwaiting(progress) : awaitingGates(state, status))[0] ?? "",
+    repository: repositoryOf(row, state),
   };
 }
 
@@ -143,14 +201,10 @@ async function listRuns(tenantId: string) {
   }
 
   return {
-    runs: rows.map((row) => {
-      const summary = summarise(row);
-      const progress = conclusions[String(row.ci_run_id ?? "")] ?? null;
-      // The same reconciler the detail screen uses, so a run cannot read as ended
-      // in one place and running in the other. Two derivations of one fact is how
-      // a list and a detail page start disagreeing about the same run.
-      return { ...summary, status: reconcileStatus(summary.status, progress, stateOf(row)) };
-    }),
+    // The same reconciler the detail screen uses, so a run cannot read as ended in
+    // one place and running in the other. Two derivations of one fact is how a
+    // list and a detail page start disagreeing about the same run.
+    runs: rows.map((row) => summarise(row, conclusions[String(row.ci_run_id ?? "")] ?? null)),
     indexed: true,
   };
 }
@@ -378,23 +432,11 @@ async function runDetail(tenantId: string, runId: string) {
   const progress = ciRunId ? await (await import("../dispatch")).runProgress(ciRunId) : null;
 
   return {
-    ...summarise(row),
-    /**
-     * CORRECTED, NEVER OVERWRITTEN. `reconcileStatus` may turn a stale `running`
-     * into the ending GitHub can see, and may not replace one ending with another
-     * — a BLOCK is `develop` exiting 3, which from outside is indistinguishable
-     * from a crash, and the document is the only thing that knows the difference.
-     */
-    status: reconcileStatus(
-      String(state?.status ?? row.status ?? "running"),
-      progress,
-      state,
-    ),
-    // FROM THE DOCUMENT WHERE THERE IS ONE, and the summary's honest blanks where
-    // there is not -- `""` means nobody recorded it, which the UI renders as unknown.
-    verdict: (security?.verdict as string) ?? null,
-    scan_provenance: (security?.scan_provenance as string) ?? "",
-    blocking: Array.isArray(security?.blocking) ? security.blocking.length : null,
+    // `summarise` ALREADY READS THE DOCUMENT AND RECONCILES THE STATUS, so the
+    // verdict, the provenance, the blocking count, the repository and the status
+    // are not restated here. They were, until the list was fixed -- and two
+    // derivations of one fact is how a row and the page it opens start disagreeing.
+    ...summarise(row, progress),
     ticket_text: String(state?.ticket_text ?? ""),
     model_provenance: String(state?.model_provenance ?? ""),
     trigger: String(state?.trigger ?? ""),
@@ -448,6 +490,24 @@ async function runDetail(tenantId: string, runId: string) {
     ci_run_id: typeof row.ci_run_id === "string" && row.ci_run_id
       ? `https://github.com/${process.env.PIPELINE_REPO ?? "mohamedsorour1998/TheAgentOrg"}/actions/runs/${row.ci_run_id}`
       : "",
+    /**
+     * THE ISSUE, which is the other half of the run's public record.
+     *
+     * The ticket id IS the issue number -- `github_ops.post_comment` refuses a
+     * non-numeric one and CLAUDE.md records what happens then: every stage comment
+     * goes *nowhere, silently, while every job stays green*. So the plan, the gate
+     * decisions and the outcome are written on the issue, while the diff, the
+     * review and the security verdict are on the pull request. Linking only to the
+     * second sent people to half of it.
+     *
+     * BUILT ONLY WHEN BOTH HALVES ARE KNOWN. A numeric ticket on a repository we
+     * cannot name would produce a link to somebody else's issue of that number,
+     * which is worse than no link.
+     */
+    issue_url:
+      repositoryOf(row, state) && /^[0-9]+$/.test(String(row.ticket_id ?? ""))
+        ? `https://github.com/${repositoryOf(row, state)}/issues/${row.ticket_id}`
+        : "",
     plan: (state?.plan ?? null) as Record<string, unknown> | null,
     dev,
     review: (state?.review ?? null) as Record<string, unknown> | null,

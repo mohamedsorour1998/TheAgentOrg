@@ -145,6 +145,26 @@ def _ci_run_id() -> str:
     return os.environ.get("GITHUB_RUN_ID", "").strip()
 
 
+def _repository() -> str:
+    """The repository this run acts on: `owner/name`, or "" if none is configured.
+
+    **`RunState` CANNOT CARRY THIS, WHICH IS WHY IT IS HERE.** `agentorg/state.py` is
+    the frozen contract and declares no repository field, so the run's own record
+    genuinely does not say which repository it changed. The web application was
+    reduced to naming the tenant's ONLY repository -- right today, and silently wrong
+    the moment a second one is in scope, because it would show a change as having
+    been made somewhere it was not.
+
+    Read through `config` and never from the environment directly: the variable is
+    named DEMO_REPO while the setting is `GITHUB_REPO`, which CLAUDE.md calls the one
+    name mismatch in that file. `os.environ["GITHUB_REPO"]` returns "" on a correctly
+    configured runner.
+    """
+    from ..common import config
+
+    return (config.GITHUB_REPO or "").strip()
+
+
 def _state_json(state: RunState) -> str:
     """The run's state as JSON, for the web application to read.
 
@@ -203,6 +223,7 @@ def record_run(state: RunState) -> bool:
             state_ref=str(state.run_id),
             state_json=_state_json(state),
             ci_run_id=_ci_run_id(),
+            repository=_repository(),
         )
     except Exception:
         # BROAD ON PURPOSE, and the logger is fetched INLINE -- CLAUDE.md records that
@@ -245,6 +266,7 @@ def update_status(state: RunState) -> bool:
             _table(name), tenant_id, state.run_id, state.status,
             state_json=_state_json(state),
             ci_run_id=_ci_run_id(),
+            repository=_repository(),
         )
     except Exception:
         logging.getLogger(__name__).warning(

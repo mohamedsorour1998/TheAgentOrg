@@ -92,6 +92,15 @@ export type RunRequest = {
   body?: string;
   /** Seed a fake credential, to demonstrate the block. */
   poisoned: boolean;
+  /**
+   * `owner/name` to act on. Empty falls back to the deployment's `DEMO_REPO`.
+   *
+   * **THIS IS NOT WHERE IT IS AUTHORISED.** `app/api/runs/route.ts` refuses a
+   * repository outside the caller's tenant-scoped list before this is reached, and
+   * before the dispatch token is read. Checking it here would put the check on the
+   * far side of the credential it exists to gate.
+   */
+  repository?: string;
 };
 
 /**
@@ -108,9 +117,9 @@ export type RunRequest = {
  * body: the body is unbounded, may contain anything, and goes straight into an agent
  * prompt. The title is the ticket; the body is for a human reading the issue later.
  */
-async function createIssue(title: string, body: string): Promise<string> {
+async function createIssue(title: string, body: string, repo: string): Promise<string> {
   const token = await dispatchToken();
-  const response = await fetch(`https://api.github.com/repos/${TARGET_REPO}/issues`, {
+  const response = await fetch(`https://api.github.com/repos/${repo}/issues`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -124,7 +133,7 @@ async function createIssue(title: string, body: string): Promise<string> {
     const text = await response.text().catch(() => "");
     throw new DispatchRefused(
       "the issue could not be created",
-      `GitHub answered ${response.status} for ${TARGET_REPO}: ${text.slice(0, 160)}`,
+      `GitHub answered ${response.status} for ${repo}: ${text.slice(0, 160)}`,
     );
   }
   const issue = (await response.json()) as { number?: number };
@@ -229,11 +238,18 @@ export async function startRun(request: RunRequest): Promise<{ issue: string }> 
   // lands on it. Creating it here is what removed the "issue number" field the
   // operator rightly objected to.
   const since = new Date(Date.now() - 5_000).toISOString();
+  // THE ISSUE AND THE WORKFLOW MUST NAME THE SAME REPOSITORY. Resolved once, here,
+  // and passed to both: the issue is where every stage comment lands, and the
+  // workflow input is what the agents change. Two resolutions would let a run
+  // comment its plan onto one repository and open its pull request on another --
+  // with every job green, because neither half can see the other's choice.
+  const repo = request.repository?.trim() || TARGET_REPO;
   const ticketId = await createIssue(
     request.title.trim(),
     request.body?.trim()
       ? `${request.body.trim()}\n\n---\nOpened from The Agent Org.`
       : "Opened from The Agent Org.",
+    repo,
   );
 
   const response = await fetch(
@@ -261,6 +277,10 @@ export async function startRun(request: RunRequest): Promise<{ issue: string }> 
           poisoned: request.poisoned ? "true" : "false",
           auto_approve: "false",
           trigger: "ui",
+          // EVERY VALUE A STRING, this one included. Empty is impossible here --
+          // `repo` is resolved above -- but the workflow's own default is `""` so
+          // the ingress and a hand dispatch still fall through to the variable.
+          repo,
         },
       }),
     },

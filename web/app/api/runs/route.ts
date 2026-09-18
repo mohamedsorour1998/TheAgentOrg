@@ -50,7 +50,10 @@ export async function POST(request: Request): Promise<NextResponse> {
     } catch {
       return refuse("the request could not be parsed", 400);
     }
-    const { title, body: detail, poisoned } = (body ?? {}) as Record<string, unknown>;
+    const { title, body: detail, poisoned, repository } = (body ?? {}) as Record<
+      string,
+      unknown
+    >;
     if (typeof title !== "string") {
       return refuse("say what the change should do", 400);
     }
@@ -68,6 +71,40 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
 
+    /**
+     * WHICH REPOSITORY, AND THIS IS THE ONLY THING THAT BOUNDS IT.
+     *
+     * The pipeline gained a `repo` input so a run is no longer stuck on whichever
+     * repository the `DEMO_REPO` variable named. That input authorises nothing --
+     * the dispatch token can already write to every repository the GitHub App was
+     * installed on -- so the refusal has to live HERE, against the caller's own
+     * tenant-scoped list, and it has to run BEFORE the token is read. A check on
+     * the other side of the credential is a check the credential has already got
+     * past.
+     *
+     * **THE LIST IS THE ALLOW-LIST, NOT A SUGGESTION.** `web/lib/authz.ts` already
+     * refuses an approval whose run is outside the tenant's scope; starting a run
+     * outside it would create exactly that run -- one this tenant could never then
+     * approve, on a repository it does not own.
+     *
+     * Omitted means the tenant's first repository, which is what every caller got
+     * before this existed. A blank string is treated as omitted rather than as a
+     * refusal, because that is what an unset form field submits.
+     */
+    const names = scope.repositories.map((r) => r.full_name);
+    const chosen =
+      typeof repository === "string" && repository.trim() ? repository.trim() : names[0]!;
+    if (!names.includes(chosen)) {
+      // NAMES WHAT IS ALLOWED rather than just refusing: the caller picked from a
+      // list this deployment served, so a mismatch means the scope changed under
+      // them, and "not in scope" alone sends somebody looking for a typo.
+      return refuse(
+        `this tenant cannot run against ${chosen}`,
+        403,
+        `in scope: ${names.join(", ")}`,
+      );
+    }
+
     try {
       const started = await startRun({
         title,
@@ -76,6 +113,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         // whether the developer agent puts a fake credential in the diff, so it
         // must be exactly true and never a truthy string.
         poisoned: poisoned === true,
+        repository: chosen,
       });
       // THE ISSUE NUMBER IS RETURNED because this route CREATED it -- it is a real
       // thing the caller can open, unlike the run id, which does not exist until

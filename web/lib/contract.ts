@@ -131,6 +131,18 @@ export interface RunSummary {
   blocking: number | null;
   /** The gate this run is paused at, or `""` if it is not paused. */
   awaiting_gate: Gate | "";
+  /**
+   * `owner/name` of the repository this run acted on, or `""` when it cannot be
+   * known yet.
+   *
+   * **THE RUN'S OWN RECORD DOES NOT CARRY ONE.** `agentorg/state.py` is the frozen
+   * contract and declares no repository field, so this is written onto the index
+   * row by `run_index.record_run` and, for rows written before that, recovered
+   * from the pull request's URL. `""` where neither is available -- naming the
+   * tenant's only repository would be a guess, and a guess about which repository
+   * a change was made to is the wrong thing to be confident about.
+   */
+  repository: string;
 }
 
 /** One finding, as `state.py:94` declares it. */
@@ -281,6 +293,16 @@ export interface RunDetail extends RunSummary {
    * 404 and read as the run having been deleted.
    */
   ci_run_id: string;
+  /**
+   * The issue this run came from, or `""`.
+   *
+   * The ticket id IS the issue number -- `github_ops.post_comment` refuses a
+   * non-numeric one, and every stage comment lands there. So the issue is the
+   * run's other half: the plan, the gate decisions and the outcome are written on
+   * it, while the diff, the review and the verdict are on the pull request. A
+   * screen that linked only to the pull request sent people to half the record.
+   */
+  issue_url: string;
   plan: PlanView | null;
   dev: DevView | null;
   review: ReviewView | null;

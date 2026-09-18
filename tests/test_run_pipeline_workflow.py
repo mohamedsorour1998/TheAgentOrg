@@ -686,6 +686,56 @@ def test_remote_agents_is_true_for_every_job_that_calls_an_agent():
         )
 
 
+def test_the_target_repository_is_declared_once_and_honours_the_input():
+    """WHICH REPOSITORY A RUN ACTS ON is one expression, at the top of the file.
+
+    **IT USED TO BE TEN COPIES OF `${{ vars.DEMO_REPO }}`**, one per job, which was
+    harmless only because the value could not vary: the target was a repository
+    VARIABLE, so it was a property of this WORKFLOW rather than of the run. A tenant
+    could put three repositories in scope, see all three on the repositories screen,
+    and every run still went to whichever one the variable named.
+
+    `inputs.repo` makes it vary, and ten copies of an `||` expression is ten chances
+    to fix nine of them. THE FAILURE THAT SHAPE PRODUCES IS THE WORST KIND HERE: a
+    `develop` job left on the variable would open the pull request on a DIFFERENT
+    repository from the one `plan` commented its plan onto, and every job would stay
+    green while it happened -- a run split across two repositories, reported as one.
+
+    Workflow-level `env` is inherited by every job, so one declaration reaches all
+    ten. This asserts the copies are gone AND that each job still resolves a value,
+    because deleting them without the top-level declaration would leave
+    `config.GITHUB_REPO` empty and `github_ops._use_local()` would take the OFFLINE
+    branch -- doing local git in a temp directory and opening no pull request, with
+    every job green. That is the same failure this file's header names three times.
+    """
+    doc = _doc()
+    top = (doc.get("env") or {}).get("DEMO_REPO")
+    assert top, "the workflow declares no DEMO_REPO; every job would run offline"
+    # BOTH HALVES OF THE EXPRESSION. `inputs.repo` alone would break every caller
+    # that sends none -- the ingress transformer, and every `gh workflow run`.
+    assert "inputs.repo" in top, (
+        f"DEMO_REPO is {top!r}; without `inputs.repo` the workflow ignores the "
+        f"repository a caller chose and silently uses the variable"
+    )
+    assert "vars.DEMO_REPO" in top, (
+        f"DEMO_REPO is {top!r}; without the variable fallback, every run started by "
+        f"the ingress -- which sends no `repo` -- targets an empty repository"
+    )
+
+    for name in _jobs():
+        own = (_job(name).get("env") or {})
+        assert "DEMO_REPO" not in own, (
+            f"job {name} declares its own DEMO_REPO; that is a second declaration "
+            f"of the target, and a run whose jobs disagree writes its plan to one "
+            f"repository and its pull request to another"
+        )
+        # ANTI-VACUITY: removing the copies must not have removed the value.
+        assert _effective_env(name).get("DEMO_REPO"), (
+            f"job {name} resolves no DEMO_REPO, so `github_ops._use_local()` is "
+            f"true there and it opens no pull request"
+        )
+
+
 def test_the_github_seam_is_configured_from_a_secret_and_a_repo_variable():
     """What makes `_use_local()` take its ONLINE branch and open a real PR.
 
@@ -801,7 +851,7 @@ def test_the_only_trigger_is_manual_dispatch():
     )
 
 
-def test_the_dispatch_inputs_are_exactly_the_five_the_ingress_will_send():
+def test_the_dispatch_inputs_are_exactly_the_six_this_pipeline_accepts():
     """Named and typed, because EventBridge dispatches this workflow by API.
 
     `POST /repos/{owner}/{repo}/actions/workflows/run-pipeline.yml/dispatches`
@@ -819,7 +869,7 @@ def test_the_dispatch_inputs_are_exactly_the_five_the_ingress_will_send():
     """
     inputs = _triggers()["workflow_dispatch"]["inputs"]
     assert set(inputs) == {
-        "ticket_id", "ticket_text", "poisoned", "auto_approve", "trigger",
+        "ticket_id", "ticket_text", "poisoned", "auto_approve", "trigger", "repo",
     }, f"dispatch inputs are {sorted(inputs)}"
     for name in ("ticket_id", "ticket_text"):
         assert inputs[name].get("type") == "string", (
@@ -833,6 +883,32 @@ def test_the_dispatch_inputs_are_exactly_the_five_the_ingress_will_send():
     assert inputs["auto_approve"].get("default") is False, (
         f"auto_approve defaults to {inputs['auto_approve'].get('default')!r}; the "
         f"brief requires false, so a run asks its humans unless told otherwise"
+    )
+
+    # `repo` ADDED 2026-09-18, and its default is the whole compatibility story.
+    #
+    # The target repository was a repository VARIABLE, so it was a property of this
+    # WORKFLOW rather than of the run: a tenant with three repositories in scope saw
+    # all three and every run still went to whichever one `DEMO_REPO` named.
+    #
+    # THE DEFAULT MUST BE EMPTY, not the variable's value. `env.DEMO_REPO` resolves
+    # `inputs.repo || vars.DEMO_REPO`, and an empty string is falsy to GitHub -- so
+    # the ingress transformer (which sends no `repo`), a hand `gh workflow run`, and
+    # every existing caller all land on the variable exactly as before. A default of
+    # the literal repository name here would be a SECOND declaration of the
+    # deployment's target, free to drift from the variable while both looked right.
+    assert inputs["repo"].get("type") == "string", (
+        f"input repo is type {inputs['repo'].get('type')!r}; it crosses the REST "
+        f"dispatch API as text like every other input"
+    )
+    assert inputs["repo"].get("default") == "", (
+        f"repo defaults to {inputs['repo'].get('default')!r}; it must be empty so "
+        f"`inputs.repo || vars.DEMO_REPO` falls through to the variable for every "
+        f"caller that does not name a repository"
+    )
+    assert inputs["repo"].get("required") is not True, (
+        "repo is required; the ingress sends none, so every auto-triggered run "
+        "would be rejected by GitHub before a job started"
     )
 
 

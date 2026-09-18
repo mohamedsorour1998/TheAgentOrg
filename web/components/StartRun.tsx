@@ -53,6 +53,23 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
   const [title, setTitle] = useState("");
   const [detail, setDetail] = useState("");
   const [poisoned, setPoisoned] = useState(false);
+  /**
+   * WHICH REPOSITORY, AND THE PRODUCT COULD NOT ASK BEFORE.
+   *
+   * The target was `DEMO_REPO`, a repository variable on the workflow — so a
+   * tenant could put three repositories in scope, see all three on the
+   * repositories screen, and every run still went to whichever one the variable
+   * named. Reported from the deployed app: *"when creating an issue we should be
+   * able to select which repo"*.
+   *
+   * THE OPTIONS ARE THE TENANT'S SCOPE, not everything the person can reach on
+   * GitHub. Scope is what `web/lib/authz.ts` checks before it will let anybody
+   * approve a gate, so offering a repository outside it would create a run this
+   * tenant could never then approve. The server refuses one anyway — this list
+   * exists so nobody is offered the refusal in the first place.
+   */
+  const [repositories, setRepositories] = useState<string[]>([]);
+  const [repository, setRepository] = useState("");
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Answer | null>(null);
   const [notice, setNotice] = useState("");
@@ -68,7 +85,7 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
         const response = await fetch("/api/runs", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ title, body: detail, poisoned }),
+          body: JSON.stringify({ title, body: detail, poisoned, repository }),
         });
         answer = (await response.json().catch(() => ({}))) as Answer;
         if (!response.ok) {
@@ -89,19 +106,54 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
       // person can actually open. `workflow_dispatch` answers 204 with no body; the
       // run id is minted by the `plan` job and reaches this application only when
       // `run_index.record_run` writes it.
+      // NAMES THE REPOSITORY. With a choice available, "the target repository" is
+      // the one thing the confirmation must not be vague about -- it is the only
+      // way to notice that the wrong one was selected, while the run is young
+      // enough to cancel.
       setNotice(
-        `Issue #${answer.issue} opened on the target repository. The run appears in ` +
-          `the list once the plan stage starts, which takes about a minute.`,
+        `Issue #${answer.issue} opened on ${repository || "the target repository"}. ` +
+          `The run appears in the list once the plan stage starts, which takes ` +
+          `about a minute.`,
       );
       setTitle("");
       setDetail("");
       onStarted?.();
     },
-    [title, detail, poisoned, onStarted],
+    [title, detail, poisoned, repository, onStarted],
   );
 
+  /**
+   * READ WHEN THE FORM IS OPENED, not on every render of the page.
+   *
+   * `<details>` keeps this closed until somebody means to start a run, so loading
+   * the scope on mount would be a request per visit to a list screen. The `open`
+   * event fires once per opening and the guard makes it once per mount.
+   */
+  const loadScope = useCallback(() => {
+    if (repositories.length > 0) return;
+    void (async () => {
+      try {
+        const response = await fetch("/api/repositories");
+        const answer = (await response.json()) as { repositories?: { full_name?: string }[] };
+        const names = (answer.repositories ?? [])
+          .map((r) => String(r.full_name ?? ""))
+          .filter(Boolean);
+        setRepositories(names);
+        // PRESELECTED, because a select with no value submits nothing and the
+        // server would then choose for them -- which is the behaviour this control
+        // exists to replace.
+        setRepository((current) => current || names[0] || "");
+      } catch {
+        // SILENT, and the select simply does not appear. The run still starts:
+        // an omitted repository falls back to the tenant's first, which is what
+        // every run did before this control existed. Blocking the form on a
+        // failed list would take away a capability rather than adding one.
+      }
+    })();
+  }, [repositories.length]);
+
   return (
-    <details className="card" style={{ maxWidth: "var(--measure)" }}>
+    <details className="card" style={{ maxWidth: "var(--measure)" }} onToggle={loadScope}>
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Start a run</summary>
 
       <form onSubmit={submit} style={{ display: "grid", gap: "var(--gap-3)", marginTop: "var(--gap-4)" }}>
@@ -115,6 +167,26 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
           <p role="status" className="prose" style={{ margin: 0, fontSize: "var(--step-small)" }}>
             {notice}
           </p>
+        ) : null}
+
+        {/* ONLY WHEN THERE IS A CHOICE TO MAKE. One repository in scope means the
+            select has one option and answers a question nobody asked; the run goes
+            there either way. Two or more, and it is the first thing to decide. */}
+        {repositories.length > 1 ? (
+          <label style={{ display: "grid", gap: "var(--gap-1)" }}>
+            <span className="eyebrow">Which repository?</span>
+            <select
+              className="field"
+              value={repository}
+              onChange={(e) => setRepository(e.target.value)}
+            >
+              {repositories.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
         ) : null}
 
         <label style={{ display: "grid", gap: "var(--gap-1)" }}>

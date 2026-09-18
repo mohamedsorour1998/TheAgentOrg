@@ -238,6 +238,17 @@ export default function CostsPage() {
                             fontSize: "var(--step-small)",
                             cursor: "pointer",
                             padding: 0,
+                            // UNDERLINED, BECAUSE IT SITS BESIDE A LINK. Reported
+                            // from the deployed app: "Show calls" and "Open run"
+                            // are adjacent, both cyan, and only one was underlined
+                            // -- so one of the two read as a label rather than as
+                            // something you can press. Two controls side by side
+                            // must not differ in a way that carries no meaning;
+                            // the global `a` rule sets these two properties and
+                            // this matches them rather than restating a colour.
+                            textDecoration: "underline",
+                            textDecorationThickness: "1px",
+                            textUnderlineOffset: "0.2em",
                           }}
                         >
                           {showing ? "Hide calls" : "Show calls"}

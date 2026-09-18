@@ -202,7 +202,7 @@ STATE_BYTES_LIMIT = 350_000
 
 def record_run(client, tenant_id: str, run_id: str, ticket_id: str,
                status: str, state_ref: str, state_json: str = "",
-               ci_run_id: str = "") -> None:
+               ci_run_id: str = "", repository: str = "") -> None:
     item = {
         "run_id": run_id, "tenant_id": tenant_id, "ticket_id": ticket_id,
         "status": status, "state_ref": state_ref, "created_at": _now(),
@@ -215,6 +215,13 @@ def record_run(client, tenant_id: str, run_id: str, ticket_id: str,
     # not about the run.
     if ci_run_id:
         item["ci_run_id"] = ci_run_id
+    # WHICH REPOSITORY THE RUN ACTED ON. `state.py` is frozen and declares no such
+    # field, so without this column the web application can only name the tenant's
+    # ONLY repository -- correct until a second one is in scope, and then it shows a
+    # change as having been made somewhere it was not. Skipped when blank, for
+    # `ci_run_id`'s reason: an empty string is not a fact about the run.
+    if repository:
+        item["repository"] = repository
     item.update(_state_attributes(state_json))
     store.put(client, tenant_id, _dynamo.sk(_dynamo.SK_RUN, run_id), item)
 
@@ -235,7 +242,8 @@ def _state_attributes(state_json: str) -> dict:
 
 
 def update_run_status(client, tenant_id: str, run_id: str, status: str,
-                      state_json: str = "", ci_run_id: str = "") -> None:
+                      state_json: str = "", ci_run_id: str = "",
+                      repository: str = "") -> None:
     row = get_run(client, tenant_id, run_id)
     row["status"] = status
     # CARRIED FORWARD when absent rather than blanked: only the `plan` job knows it
@@ -243,6 +251,10 @@ def update_run_status(client, tenant_id: str, run_id: str, status: str,
     # a gate.
     if ci_run_id:
         row["ci_run_id"] = ci_run_id
+    # CARRIED FORWARD when absent, exactly as `ci_run_id` is: only the jobs that hold
+    # the GitHub seam know it, and a gate job writing "" would erase it.
+    if repository:
+        row["repository"] = repository
     # REFRESHED AT EVERY STAGE, because `_emit` calls this from every stage and the
     # screen is meant to follow a run as it happens. A state written only at `plan`
     # would show the ticket and then never change.

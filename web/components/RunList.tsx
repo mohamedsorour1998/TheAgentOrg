@@ -193,8 +193,19 @@ export function RunList() {
                   >
                     {ticketLabel(run.ticket_id)}
                   </Link>
-                  {/* The uuid in full. Truncated by the column, never by the
-                      DOM, so a copy takes the whole thing. */}
+                  {/* WHICH REPOSITORY THE CHANGE WAS MADE TO, which this screen
+                      did not say anywhere. Reported from the deployed app: the
+                      list and the run page both showed a ticket, a verdict and a
+                      cost without ever naming what was being changed.
+
+                      IT REPLACED THE TRUNCATED RUN ID, which was a uuid clipped
+                      to 22 characters -- too short to identify a run and too long
+                      to ignore. The full id is on the run's own page, and the
+                      link here already carries it.
+
+                      `""` SAYS SO rather than naming the tenant's only repository:
+                      that guess is right today and becomes wrong silently when a
+                      second one is in scope. */}
                   <span
                     className="ident"
                     style={{
@@ -202,13 +213,13 @@ export function RunList() {
                       color: "var(--text-muted)",
                       fontSize: "var(--step-caption)",
                       marginTop: "var(--gap-1)",
-                      maxWidth: "22ch",
+                      maxWidth: "26ch",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {run.run_id}
+                    {run.repository || "repository not recorded"}
                   </span>
                 </td>
                 <td>

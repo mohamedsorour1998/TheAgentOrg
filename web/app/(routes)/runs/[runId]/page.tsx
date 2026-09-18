@@ -277,7 +277,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
         ) : null}
 
         {selected === "gate1" || selected === "gate2" || selected === "gate3" ? (
-          <GateStage gate={selected} run={run} />
+          <GateStage gate={selected} run={run} phase={phase} />
         ) : null}
 
         {selected === "promote" ? <PromoteStage run={run} phase={phase} /> : null}
@@ -331,6 +331,12 @@ function Facts({
     <span key="id" className="ident" title="This run's id">
       {run.run_id.slice(0, 8)}
     </span>,
+    // WHAT IS BEING CHANGED, and it was on no screen at all. A run named a ticket,
+    // a verdict and a cost without ever saying which repository the change was made
+    // to -- which is the first thing anybody approving a gate needs to know.
+    <span key="repo" className="ident" style={{ color: "var(--text)" }}>
+      {run.repository || "repository not recorded"}
+    </span>,
     <span key="trigger">
       {run.trigger === "issue"
         ? "started by an issue"
@@ -351,6 +357,17 @@ function Facts({
       <span key="poisoned" style={{ color: "var(--refused)" }}>
         ticket carries a credential on purpose
       </span>,
+    );
+  }
+  // THE ISSUE AND THE PULL REQUEST ARE TWO HALVES OF ONE RECORD, so both are
+  // offered. The plan, the gate decisions and the outcome are commented onto the
+  // ISSUE; the diff, the review and the security verdict onto the PULL REQUEST.
+  // Linking only to the second sent a reader to half of what the run wrote.
+  if (run.issue_url) {
+    bits.push(
+      <a key="issue" href={run.issue_url} target="_blank" rel="noreferrer">
+        issue ↗
+      </a>,
     );
   }
   if (run.pr_url) {
@@ -420,7 +437,7 @@ function secondsAgo(at: Date | null, now: Date): string {
  * was skipped when the run simply has not got there, which is the same
  * did-not-run-versus-passed conflation this repository refuses everywhere else.
  */
-function GateStage({ gate, run }: { gate: Gate; run: RunDetail }) {
+function GateStage({ gate, run, phase }: { gate: Gate; run: RunDetail; phase: string }) {
   const decision = run.decisions.find((d) => d.gate === gate);
   if (decision) {
     return <DecisionLog decisions={[decision]} />;
@@ -430,6 +447,35 @@ function GateStage({ gate, run }: { gate: Gate; run: RunDetail }) {
       <p className="prose" style={{ fontSize: "var(--step-small)" }}>
         This gate is holding the run. The decision controls are at the top of this
         page.
+      </p>
+    );
+  }
+  /**
+   * **APPROVED, BUT THE RECORD HAS NOT CAUGHT UP.** This branch is the one the
+   * deployed app got wrong: a gate whose job GitHub reports as `success`, with no
+   * `HumanDecision` in the stored document yet, rendered "the run has not reached
+   * this gate" directly under the word DONE. Two statements on one screen
+   * contradicting each other, and the wrong one was the sentence.
+   *
+   * It happens because a gate job holds no AWS credential, so its decision reaches
+   * the record only when the next credentialled job rewrites it — the same lag that
+   * made gate3 look like a dead button. The honest thing is to say the gate was
+   * released and that the name of whoever released it is not here YET, rather than
+   * to deny it happened.
+   */
+  if (phase === "done") {
+    return (
+      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+        This gate was approved and the run moved past it. Who decided is not in this
+        run&rsquo;s record yet — a gate job cannot write to the run index, so the
+        name arrives when the next stage does.
+      </p>
+    );
+  }
+  if (phase === "refused") {
+    return (
+      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+        The run stopped at this gate.
       </p>
     );
   }
