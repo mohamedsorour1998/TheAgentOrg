@@ -55,7 +55,10 @@ SURFACE = (11, 15, 23)  # #0b0f17 -- near-black with a hint of blue
 ACCENT = (34, 211, 238)  # #22d3ee -- cyan: the one saturated colour
 MUTED = (139, 151, 171)  # #8b97ab -- the line the pipeline runs along
 
-SIZE = 512
+# 1024, NOT 512. GitHub renders the badge preview larger than the logo box and
+# upscales what it is given, so a 512 source looked soft in the install flow.
+# Source art costs 30 KB; a soft logo is on every pull-request comment forever.
+SIZE = 1024
 SCALE = 4  # supersample; see the module docstring
 
 # THE GEOMETRY, as fractions of the canvas so the numbers survive a size change.

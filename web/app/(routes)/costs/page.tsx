@@ -28,7 +28,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 
 import { getJson } from "@/components/fetching";
@@ -52,6 +52,13 @@ export default function CostsPage() {
   const [failure, setFailure] = useState<{ error: string; fix: string; detail?: string } | null>(
     null,
   );
+
+  /**
+   * Which run's detail is open, by run id. ONE AT A TIME, deliberately: this is a
+   * comparison screen, and several open rows push the one being compared off the
+   * bottom. `""` is closed.
+   */
+  const [open, setOpen] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -194,21 +201,67 @@ export default function CostsPage() {
               <th scope="col">When</th>
               <th scope="col">Model calls</th>
               <th scope="col">Cost</th>
+              <th scope="col">
+                <span className="visually-hidden">Detail</span>
+              </th>
             </tr>
           </thead>
           <tbody>
-            {priced.map(({ run, cost }) => (
-              <tr key={run.run_id}>
-                <th scope="row">
-                  <Link href={`/runs/${run.run_id}`}>{run.ticket_id}</Link>
-                </th>
-                <td>
-                  <time dateTime={run.created_at}>{renderWhen(run.created_at)}</time>
-                </td>
-                <td>{cost ? cost.stages_priced : "—"}</td>
-                <td>{cost ? renderUsd(cost.usd) : "not read"}</td>
-              </tr>
-            ))}
+            {priced.map(({ run, cost }) => {
+              const showing = open === run.run_id;
+              return (
+                <Fragment key={run.run_id}>
+                  <tr>
+                    <th scope="row">{run.ticket_id}</th>
+                    <td>
+                      <time dateTime={run.created_at}>{renderWhen(run.created_at)}</time>
+                    </td>
+                    <td>{cost ? cost.stages_priced : "—"}</td>
+                    <td>{cost ? renderUsd(cost.usd) : "not read"}</td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {/* THE DETAIL OPENS HERE RATHER THAN ON THE RUN PAGE.
+                          Reported: "i need details of cost in summary ... not
+                          redirect me to run info". Sending somebody to a different
+                          screen to read four numbers costs them the comparison they
+                          opened this page for -- they came to see runs against each
+                          other, and a navigation ends that. */}
+                      {cost && cost.stages.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => setOpen(showing ? "" : run.run_id)}
+                          aria-expanded={showing}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            color: "var(--accent)",
+                            font: "inherit",
+                            fontSize: "var(--step-small)",
+                            cursor: "pointer",
+                            padding: 0,
+                          }}
+                        >
+                          {showing ? "Hide calls" : "Show calls"}
+                        </button>
+                      ) : null}
+                      {" "}
+                      <Link
+                        href={`/runs/${run.run_id}`}
+                        style={{ fontSize: "var(--step-small)" }}
+                      >
+                        Open run
+                      </Link>
+                    </td>
+                  </tr>
+                  {showing && cost ? (
+                    <tr>
+                      <td colSpan={5} style={{ paddingTop: 0 }}>
+                        <CallBreakdown cost={cost} />
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -226,4 +279,83 @@ export default function CostsPage() {
     </div>
   );
 }
+/**
+ * One run's model calls, opened in place under its row.
+ *
+ * **NO STAGE COLUMN**, for the reason the summary table has none: per-stage
+ * attribution needs a line in `graph.py`/`run_stage.py` that nothing has added, so
+ * every call in a run lands in a single `plan` row. Printing `plan` three times is
+ * not detail, it is the same wrong word repeated -- and repeated it reads even
+ * more like data.
+ *
+ * So the calls are NUMBERED instead. The number is true (it is the call's position
+ * in the run) and claims nothing about which agent made it.
+ *
+ * Input and output are separated rather than totalled because they are priced an
+ * order of magnitude apart -- $0.33 against $2.75 per million -- so one summed
+ * token count hides what the money went on.
+ */
+function CallBreakdown({ cost }: { cost: CostView }) {
+  const input = cost.stages.reduce((n, row) => n + row.input_tokens, 0);
+  const output = cost.stages.reduce((n, row) => n + row.output_tokens, 0);
+
+  return (
+    <div
+      style={{
+        border: "1px solid var(--border)",
+        borderLeft: "3px solid var(--border-strong)",
+        background: "var(--surface-sunken)",
+        padding: "var(--gap-4)",
+        display: "grid",
+        gap: "var(--gap-3)",
+      }}
+    >
+      <p style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--text-muted)" }}>
+        <span className="ident">{cost.stages[0]?.model ?? "unknown model"}</span>
+        {" · "}
+        {input.toLocaleString()} in
+        {" · "}
+        {output.toLocaleString()} out
+        {" · "}
+        {/* THE CACHE LINE IS IN WORDS. Nobody reads "0.0%" as an alarm, and this
+            is the largest silent cost in the design: every agent re-sends the same
+            repository snapshot at four times the cached rate. */}
+        {cost.cache_hit_rate === null ? "no caching measured" : `${(cost.cache_hit_rate * 100).toFixed(1)}% cached`}
+      </p>
+
+      <ol
+        style={{
+          margin: 0,
+          paddingLeft: "1.4rem",
+          display: "grid",
+          gap: "var(--gap-1)",
+          fontSize: "var(--step-small)",
+        }}
+      >
+        {cost.stages.map((row, index) => (
+          <li key={index}>
+            {row.input_tokens.toLocaleString()} in · {row.output_tokens.toLocaleString()} out
+            {row.cached_reported ? ` · ${row.cached_tokens.toLocaleString()} cached` : " · cache not reported"}
+          </li>
+        ))}
+      </ol>
+
+      {cost.findings.length > 0 ? (
+        <ul
+          style={{
+            margin: 0,
+            paddingLeft: "1.1rem",
+            fontSize: "var(--step-small)",
+            color: "var(--text-muted)",
+          }}
+        >
+          {cost.findings.map((finding) => (
+            <li key={finding}>{finding}</li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 

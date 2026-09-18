@@ -184,6 +184,22 @@ textarea {
 /* SKIP LINK. Visible only on focus, and it must sit above everything. Without
    one, reaching the main content by keyboard means tabbing the whole nav on
    every page. */
+/* Text only a screen reader reads. A column of buttons still needs a heading --
+   an empty `<th>` makes a table announce "blank" where every other column names
+   itself -- and `display: none` would remove it from the accessibility tree too,
+   which is the mistake this pattern exists to avoid. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .skip-link {
   position: absolute;
   left: var(--gap-4);
@@ -308,7 +324,12 @@ table.data caption {
   max-width: var(--measure);
 }
 
-table.data th {
+/* `thead th`, NOT `th`. This selector styled EVERY `th`, including a
+   `<th scope="row">` used as a row's first cell -- so a body row wore the HEADER's
+   heavier underline, and `tbody tr:last-child td` below only ever cleared `td`,
+   leaving a stray line under the last row's first column. Reported as "the 3rd
+   line beneath run 60". A row header is a row, not a heading. */
+table.data thead th {
   text-align: left;
   font-family: var(--mono);
   font-size: var(--step-caption);
@@ -321,13 +342,26 @@ table.data th {
   white-space: nowrap;
 }
 
-table.data td {
+/* BOTH, because a row's first cell may legitimately be a `th` -- that is what
+   makes a screen reader announce "run 60" when reading the cost beside it. */
+table.data td,
+table.data tbody th {
   border-bottom: 1px solid var(--border);
   padding: var(--gap-3) var(--gap-3) var(--gap-3) 0;
   vertical-align: top;
 }
 
-table.data tbody tr:last-child td {
+table.data tbody th {
+  text-align: left;
+  font-weight: 400;
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: var(--step-body);
+}
+
+table.data tbody tr:last-child td,
+table.data tbody tr:last-child th {
   border-bottom: none;
 }
 

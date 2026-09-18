@@ -32,7 +32,7 @@
  *     set, rows                  -> indexed: true, the rows.
  */
 
-import { QueryCommand, PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { QueryCommand, PutCommand, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
 
 import { scopedClient } from "./credentials";
@@ -122,11 +122,27 @@ async function listRepositories(tenantId: string) {
 }
 
 /**
- * Add repositories to this tenant's scope, then READ THE RESULT BACK.
+ * REPLACE this tenant's scope with exactly `fullNames`, then READ THE RESULT BACK.
  *
- * Echoing the request would reassure a caller that a refused write had landed. The
- * Python writer states the same rule, and it matters more here: this list is what
- * `authz.decide` consults before permitting an approval.
+ * **IT ONLY ADDED, AND THAT WAS THE BUG.** Reported: a repository was unticked,
+ * "Save scope" reported *"Scope saved."*, and it came back ticked. This function
+ * looped the wanted names, skipped the ones already present, wrote the rest -- and
+ * never removed a row for a repository that was no longer wanted. So unticking
+ * anything did nothing, for every repository, and the screen said it had worked.
+ *
+ * Every layer around it called this a REPLACE: the route is a `PUT`, the screen
+ * says "Saving replaces the set, which means unticking a repository removes it",
+ * and `RepositoryScopeRequest` carries the whole set rather than a delta. Only the
+ * write itself was an ADD, and its own docstring said so in the first line -- the
+ * one place the contradiction was visible was the place nobody re-read.
+ *
+ * **THE SCOPE IS AN AUTHORISATION BOUNDARY**, which is what makes an add-only
+ * write the dangerous direction: `authz.decide` permits an approval when the run's
+ * repository is in this list, so a repository nobody could remove is a permission
+ * nobody could revoke.
+ *
+ * Reading the result back is unchanged and still the point: echoing the request
+ * would reassure a caller that a refused write had landed.
  */
 async function setScope(tenantId: string, fullNames: string[], by: string) {
   if (!indexTableName()) return { repositories: [], indexed: false };
@@ -150,6 +166,26 @@ async function setScope(tenantId: string, fullNames: string[], by: string) {
   const existing = new Set(
     (await rowsOfType(tenantId, SK_REPO)).map((r) => String(r.full_name ?? "")),
   );
+
+  const wanted = new Set(fullNames);
+
+  // REMOVE FIRST. If a later add fails, the tenant is left with a SMALLER scope
+  // than they asked for, never a larger one -- and for a list that decides what an
+  // approval may touch, the safe direction to fail in is fewer permissions.
+  for (const row of await rowsOfType(tenantId, SK_REPO)) {
+    const name = String(row.full_name ?? "");
+    if (wanted.has(name)) continue;
+    await client.send(
+      new DeleteCommand({
+        TableName: table,
+        // The row's OWN sort key. A repository row is keyed on a random id rather
+        // than on its name, so the key cannot be rebuilt from `full_name` -- it has
+        // to come off the row that was just read.
+        Key: { pk: tenantPk(tenantId), sk: String(row.sk ?? "") },
+      }),
+    );
+    existing.delete(name);
+  }
 
   for (const fullName of fullNames) {
     if (existing.has(fullName)) continue;
