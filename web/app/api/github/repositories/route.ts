@@ -62,16 +62,16 @@ export async function GET(): Promise<NextResponse> {
     const repositories = await installationRepositories(github.accessToken);
     return respond({ repositories, linked: true });
   } catch (error) {
-    // A GITHUB OUTAGE MUST NOT BREAK THE SCREEN, because the text field beside this
-    // list still works. So this degrades to an empty list rather than a 500 -- a
-    // failure here makes an optional convenience look load-bearing.
+    // A GITHUB OUTAGE MUST NOT BREAK THE SCREEN. The scope list already in place
+    // still renders and can still be saved; only the ADD path is unavailable. So
+    // this degrades to an empty list rather than a 500.
     //
     // **`unavailable` IS A THIRD STATE AND NOT A SECOND SPELLING OF EMPTY.** The
     // three answers want three different remedies and the screen says which:
     //
     //     linked: false                 -> sign in with GitHub
     //     linked: true,  []             -> install the app on a repository
-    //     unavailable: true             -> GitHub did not answer; type the name
+    //     unavailable: true             -> GitHub did not answer; reload
     //
     // Collapsing the third into the second tells somebody to install an app they
     // have already installed. Same argument as `fixture-fallback` (a FAULT) never

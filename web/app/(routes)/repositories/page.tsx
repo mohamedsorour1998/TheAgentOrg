@@ -40,10 +40,8 @@ export default async function RepositoriesPage() {
         Repositories this tenant can run against
       </h1>
       <p className="prose" style={{ margin: "0 0 var(--gap-8)" }}>
-        Putting a repository in scope lets this pipeline open pull requests and
-        post comments on it. Runs can only start against a repository that is in
-        scope, so this list is the whole of what the tenant can reach. Saving
-        replaces the set, which means unticking a repository removes it.
+        A run can only start against a repository that is ticked here, and a run
+        opens pull requests and posts comments on it. Unticking removes it.
       </p>
 
       <RepositoryPicker />

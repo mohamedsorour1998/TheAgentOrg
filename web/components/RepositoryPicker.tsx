@@ -52,21 +52,6 @@ export function RepositoryPicker() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   /**
-   * The `owner/name` being typed. THE LIST USED TO BE UNADDABLE, and that was a
-   * real gap rather than a strict design: the checkboxes are built from what the
-   * server already holds, so an account could UNTICK a repository and never add
-   * one. It read as a picker and behaved as a remover.
-   *
-   * The original design assumed a CANDIDATE list -- every repository the linked
-   * GitHub grant could see, ticked where in scope. That list no longer exists:
-   * `github_linked` is permanently false because nothing writes an `accounts` row
-   * any more, so `server` is just the in-scope set and the intersection of "what
-   * you may add" with "what you already have" is everything you already have.
-   */
-  const [typed, setTyped] = useState("");
-  const [typoed, setTypoed] = useState("");
-
-  /**
    * THE REPOSITORIES THIS PERSON CAN PICK, from their GitHub App installation.
    *
    * Reported: *"i need dropdown i dont want to write any"*. Typing `owner/name`
@@ -79,7 +64,7 @@ export function RepositoryPicker() {
    *     null                     still loading
    *     linked === false         signed in with email -- sign in with GitHub
    *     [] with linked === true  the app is installed nowhere -- install it
-   *     unavailable === true     GitHub did not answer -- type the name instead
+   *     unavailable === true     GitHub did not answer -- reload
    */
   const [available, setAvailable] = useState<string[] | null>(null);
   const [linked, setLinked] = useState<boolean | null>(null);
@@ -139,7 +124,8 @@ export function RepositoryPicker() {
         setUnavailable(result.value.unavailable === true);
         return;
       }
-      // A refusal here is not worth a red banner: the text field still works.
+      // A refusal here is not worth a red banner: the scope list above still
+      // renders, and this is the only thing that cannot be shown.
       setAvailable([]);
       setLinked(false);
     })();
@@ -175,42 +161,22 @@ export function RepositoryPicker() {
   /**
    * Stage a repository locally; `Save scope` is still the one write.
    *
-   * VALIDATED HERE ONLY TO SAY SO IMMEDIATELY. `PUT /api/repositories` revalidates
-   * every entry server-side and is the check that matters -- this one exists so a
-   * person learns about a typo while they are looking at the field, rather than
-   * after a round trip.
+   * **THE `owner/name` VALIDATION IS GONE WITH THE TEXT FIELD.** It existed to
+   * catch a typo, and the only caller now is the dropdown, whose values come from
+   * GitHub's own API -- so the shape cannot be wrong, and a branch that can never
+   * be taken is a branch nobody will ever see fail. `PUT /api/repositories`
+   * revalidates every entry server-side regardless, which is the check that
+   * matters.
    */
-  /**
-   * ONE PATH INTO THE LIST, whether the name was PICKED or TYPED.
-   *
-   * Extracted when the dropdown arrived. Two entry points each doing their own
-   * de-duplication and ticking is how the picked path and the typed path end up
-   * disagreeing about what "already listed" means -- and only one of them would
-   * ever be exercised by hand.
-   */
-  function addName(raw: string) {
-    const name = raw.trim();
-    if (name.split("/").length !== 2 || name.split("/").some((part) => !part)) {
-      setTypoed("Use the form owner/name, as GitHub writes it.");
-      return;
+  function addName(name: string) {
+    // TICK IT RATHER THAN RE-ADDING. A repository that is listed-but-unticked is
+    // one somebody removed from scope and is now putting back; appending a second
+    // row for it would render the same repository twice.
+    if (!server?.some((r) => r.full_name === name)) {
+      setServer((was) => [...(was ?? []), { full_name: name, in_scope: false }]);
     }
-    if (server?.some((r) => r.full_name === name)) {
-      // TICK IT RATHER THAN REFUSING. Somebody typing a name that is already
-      // listed-but-unticked means to put it back in scope, and an error would
-      // make them hunt for a row they cannot see the state of.
-      setTicked((was) => new Set(was).add(name));
-      setTyped("");
-      setTypoed("");
-      return;
-    }
-    setServer((was) => [...(was ?? []), { full_name: name, in_scope: false }]);
     setTicked((was) => new Set(was).add(name));
-    setTyped("");
-    setTypoed("");
-  }
-
-  function addTyped() {
-    addName(typed);
+    setSaved(false);
   }
 
   if (failure && server === null) {
@@ -300,7 +266,7 @@ export function RepositoryPicker() {
         // somebody to install an app they have already installed, or to sign in
         // when they already are.
         const note = unavailable
-          ? "GitHub did not answer, so there is no list to choose from. Type the name instead."
+          ? "GitHub did not answer, so there is no list to choose from. Reload to try again."
           : linked === false
             ? "Sign in with GitHub to pick from a list instead of typing."
             : available.length === 0
@@ -313,53 +279,34 @@ export function RepositoryPicker() {
         );
       })()}
 
-      {/* ADD A REPOSITORY. A form so Enter submits, which is how anyone types
-          one name after another. `noValidate` is absent deliberately -- there is
-          no `pattern` here, because the message this component writes is better
-          than the browser's, and the server revalidates regardless.
+      {/* THE TEXT FIELD IS GONE, AND THE LINK IS WHAT REPLACES IT.
+          Reported: "i need only drop down and i dont want to enter repo by hand".
+          It was kept beside the dropdown on the reasoning that somebody might add
+          a repository before installing the App there -- but that is not an entry
+          path, it is a trap: a name typed here reaches the scope list and no run
+          against it can ever open a pull request or post a comment, because the
+          App holds no installation on it. **A control that accepts a value the
+          system cannot act on is worse than no control**, and the failure lands
+          later, on a run, where nothing connects it back to this screen.
 
-          KEPT BESIDE THE DROPDOWN rather than replaced by it: the list covers only
-          repositories the App is installed on, and somebody adding a repository
-          before installing there would otherwise have no way in at all. */}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          addTyped();
-        }}
-        style={{ display: "grid", gap: "var(--gap-2)" }}
+          So the only way in is the dropdown, and the honest answer to "why is
+          only one repository listed" is one click away rather than a paragraph.
+          The list IS the installation -- that is the per-repository scope a
+          GitHub App gives and an OAuth App cannot. */}
+      <p
+        className="prose"
+        style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--text-muted)" }}
       >
-        <label htmlFor="add-repository" className="eyebrow" style={{ margin: 0 }}>
-          Add a repository
-        </label>
-        <div style={{ display: "flex", gap: "var(--gap-3)", flexWrap: "wrap" }}>
-          <input
-            id="add-repository"
-            value={typed}
-            onChange={(event) => {
-              setTyped(event.target.value);
-              setTypoed("");
-            }}
-            placeholder="owner/name"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            style={{ padding: "var(--gap-2)", font: "inherit", minWidth: "22ch", flex: "1 1 22ch" }}
-          />
-          <button type="submit" className="btn" disabled={!typed.trim()}>
-            Add
-          </button>
-        </div>
-        <p role="status" style={{ margin: 0, fontSize: "var(--step-small)" }}>
-          {typoed ? (
-            <span style={{ color: "var(--refused)" }}>{typoed}</span>
-          ) : (
-            <span style={{ opacity: 0.8 }}>
-              Adding puts it in the list below, ticked. Nothing reaches the server
-              until you save.
-            </span>
-          )}
-        </p>
-      </form>
+        This list is exactly the repositories you installed The Agent Org on.{" "}
+        <a
+          href="https://github.com/settings/installations"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Add more on GitHub
+        </a>
+        , then reload.
+      </p>
 
       <fieldset style={{ border: "1px solid var(--border)", borderRadius: "4px", padding: "var(--gap-4)", margin: 0 }}>
         <legend className="eyebrow" style={{ margin: 0, padding: "0 var(--gap-2)" }}>
