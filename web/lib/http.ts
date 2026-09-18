@@ -185,6 +185,29 @@ export async function readJson(
 export function unhandled(error: unknown): NextResponse {
   const name = error instanceof Error ? error.name : typeof error;
   const message = error instanceof Error ? error.message : String(error);
+
+  /**
+   * A REFUSAL IS NOT A FAULT, AND 500 TELLS PEOPLE TO RETRY IT.
+   *
+   * Reported from the deployed app: approving a run with no GitHub run id answered
+   * `HTTP 500` beside *"Retry once. If it happens again this needs an operator, not
+   * a refresh."* Nothing had failed — `approveRun` refuses that run deliberately,
+   * with a sentence saying why — and the status turned a correct, final answer into
+   * an apparent outage.
+   *
+   * 409, not 400: the request was well formed and the run's STATE is what makes it
+   * impossible, which is also the status `components/fetching.ts` already maps to
+   * "Reload to see the current state". Duck-typed rather than `instanceof
+   * PipelineError`, because `lib/http.ts` is imported by every route and must not
+   * take a dependency on the reader to know a refusal when it sees one.
+   */
+  if (error instanceof Error && (error as { refused?: boolean }).refused === true) {
+    // NOT logged as a failure. A refused approval is already audited by the route
+    // that refused it, and logging it here as an unhandled error is how a working
+    // guard reads as an incident.
+    return refuse(message, 409, (error as { detail?: string }).detail ?? "");
+  }
+
   // Logged in full where an operator reads it; sent narrow.
   console.error("[api] unhandled failure", error);
   return refuse("that request could not be processed", 500, `${name}: ${message}`);

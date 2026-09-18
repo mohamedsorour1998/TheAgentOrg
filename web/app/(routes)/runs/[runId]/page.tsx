@@ -224,7 +224,33 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
           than a record, so it is never something a reader has to find. */}
       {openGate ? (
         <div style={{ marginBottom: "var(--gap-6)" }}>
-          <GateControls runId={run.run_id} gate={openGate} onRecorded={reload} />
+          {/* **THE CONTROLS NEED AN ACTIONS RUN, AND OFFERING THEM WITHOUT ONE IS A
+              BUTTON THAT CANNOT WORK.** A gate on this pipeline IS a GitHub
+              Environment, released by `POST .../pending_deployments` and by nothing
+              else -- so `approveRun` refuses a run carrying no `ci_run_id`, and
+              correctly. Reported from the deployed app: a stale run offered
+              "Approve gate1" and "Reject gate1" whose only possible outcome was an
+              error message. Saying why up front is the same choice `approveRun`
+              already made in its refusal text, moved to where somebody sees it
+              BEFORE clicking. */}
+          {run.ci_run_id ? (
+            <GateControls runId={run.run_id} gate={openGate} onRecorded={reload} />
+          ) : (
+            <div className="card" style={{ borderColor: "var(--border-strong)" }}>
+              <p className="eyebrow" style={{ margin: 0 }}>
+                {openGate} · waiting, and not decidable here
+              </p>
+              <p
+                className="prose"
+                style={{ margin: "var(--gap-2) 0 0", fontSize: "var(--step-small)" }}
+              >
+                This run carries no GitHub Actions run, so there is no Environment
+                for this application to release. A gate is held by GitHub itself and
+                can only be opened there. Runs started from this screen record the
+                link, so this affects older runs only.
+              </p>
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -405,15 +431,29 @@ function Facts({
       {/* WHEN THIS WAS LAST READ, rather than a spinner. A run spends most of its
           wall clock waiting, so "quiet and current" and "quiet and stuck" are the
           two states a viewer needs told apart -- and a spinner says neither.
-          `live: false` on the response means GitHub could not be asked, so the
-          stage marks above are the stored record and may be behind. */}
+
+          **THREE ANSWERS, NOT TWO, AND THE FIRST VERSION COLLAPSED THEM.** It read
+          `run.live` alone and rendered "GitHub could not be reached" for a run that
+          simply HAS no Actions run -- reported immediately, on a stale row whose
+          `ci_run_id` is empty. Nothing had failed and the screen reported a fault.
+
+          That is `scan_provenance`'s rule arriving in my own new field: a CHOICE
+          (there is nothing to ask) and a FAULT (the ask failed) must not share a
+          spelling, because they want different reactions -- one is "this run
+          predates the link", the other is "try again". */}
       {live ? (
         <span key="read" style={{ display: "inline-flex", gap: "var(--gap-3)" }}>
           <span aria-hidden="true">·</span>
-          <span style={{ color: run.live ? "var(--text-muted)" : "var(--refused)" }}>
+          <span
+            style={{
+              color: run.live || !run.ci_run_id ? "var(--text-muted)" : "var(--refused)",
+            }}
+          >
             {run.live
               ? `checked ${secondsAgo(readAt, now)}`
-              : "stored record — GitHub could not be reached"}
+              : run.ci_run_id
+                ? "stored record — GitHub could not be reached"
+                : "stored record — this run has no Actions run to follow"}
           </span>
         </span>
       ) : null}

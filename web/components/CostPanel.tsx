@@ -200,6 +200,10 @@ function Findings({ findings }: { findings: string[] }) {
 /** One row per stage that made a model call. */
 function StageTable({ stages }: { stages: CostView["stages"] }) {
   if (stages.length === 0) return null;
+  // See the stage cell below: one distinct stage across several rows means nothing
+  // attributed them, not that one stage spent everything.
+  const attributed = stages.length <= 1 || new Set(stages.map((r) => r.stage)).size > 1;
+
   return (
     <div className="table-scroll">
       <table className="data">
@@ -225,7 +229,22 @@ function StageTable({ stages }: { stages: CostView["stages"] }) {
         <tbody>
           {stages.map((row, i) => (
             <tr key={`${row.stage}-${i}`}>
-              <td className="ident">{row.stage}</td>
+              {/* **`plan` REPEATED IS NOT ATTRIBUTION, AND THE SCREEN SAYS SO.**
+                  Until `run_stage._cost_stage` existed, `build_cost_record` was
+                  called with no stage, so every usage row took the `plan` fallback
+                  and this column read `plan · plan · plan` for calls made by three
+                  different agents -- answering "which stage is expensive" with a
+                  wrong word rather than with a gap.
+                  Runs recorded since carry a real stage. Older ones cannot be
+                  fixed, so they are DETECTED: one distinct stage across several
+                  rows is the pre-fix shape, and it is named instead of repeated. */}
+              <td className="ident">
+                {attributed ? (
+                  row.stage
+                ) : (
+                  <span style={{ color: "var(--text-muted)" }}>not attributed</span>
+                )}
+              </td>
               <td className="ident">{row.model}</td>
               <td style={NUM}>{COUNT.format(row.input_tokens)}</td>
               <td style={NUM}>{COUNT.format(row.output_tokens)}</td>

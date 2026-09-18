@@ -291,24 +291,41 @@ export default function CostsPage() {
   );
 }
 /**
- * One run's model calls, opened in place under its row.
+ * One run's model calls, opened in place under its row — as a TABLE.
  *
- * **NO STAGE COLUMN**, for the reason the summary table has none: per-stage
- * attribution needs a line in `graph.py`/`run_stage.py` that nothing has added, so
- * every call in a run lands in a single `plan` row. Printing `plan` three times is
- * not detail, it is the same wrong word repeated -- and repeated it reads even
- * more like data.
+ * Asked for directly: *"cost is not fancy ... I need it like this nice smart
+ * table"*, pointing at the per-run cost panel, which has always been one. This was
+ * a bulleted list of `5,739 in · 288 out · cache not reported`, which is the same
+ * four numbers with no columns to line them up under.
  *
- * So the calls are NUMBERED instead. The number is true (it is the call's position
- * in the run) and claims nothing about which agent made it.
+ * ── THE STAGE COLUMN, AND WHY IT USED TO BE ABSENT ───────────────────────────
  *
- * Input and output are separated rather than totalled because they are priced an
- * order of magnitude apart -- $0.33 against $2.75 per million -- so one summed
- * token count hides what the money went on.
+ * It said: *"per-stage attribution needs a line in `graph.py`/`run_stage.py` that
+ * nothing has added, so every call in a run lands in a single `plan` row. Printing
+ * `plan` three times is not detail, it is the same wrong word repeated."* Correct,
+ * and the right call at the time — the numbering that replaced it claimed nothing.
+ *
+ * **THAT LINE HAS NOW BEEN ADDED.** `run_stage._cost_stage` reads the stage this
+ * process was invoked with and hands it to `build_cost_record`, so a run recorded
+ * from here on carries a real stage per row.
+ *
+ * RUNS FROM BEFORE IT STILL SAY `plan` THREE TIMES, and this cannot fix their data
+ * — so it detects them instead: when every row carries the same stage AND there is
+ * more than one row, the column says the attribution was not recorded rather than
+ * repeating a word that is true of one row and wrong about the rest. An old run and
+ * a new one are different facts, and the screen must not make them look alike.
+ *
+ * Input and output stay separate rather than totalled because they are priced an
+ * order of magnitude apart — $0.33 against $2.75 per million — so one summed token
+ * count hides what the money went on.
  */
 function CallBreakdown({ cost }: { cost: CostView }) {
   const input = cost.stages.reduce((n, row) => n + row.input_tokens, 0);
   const output = cost.stages.reduce((n, row) => n + row.output_tokens, 0);
+  // See the docstring: one distinct stage across several rows is the pre-fix shape,
+  // not a run that genuinely spent everything in one stage.
+  const attributed =
+    cost.stages.length <= 1 || new Set(cost.stages.map((r) => r.stage)).size > 1;
 
   return (
     <div
@@ -334,22 +351,39 @@ function CallBreakdown({ cost }: { cost: CostView }) {
         {cost.cache_hit_rate === null ? "no caching measured" : `${(cost.cache_hit_rate * 100).toFixed(1)}% cached`}
       </p>
 
-      <ol
-        style={{
-          margin: 0,
-          paddingLeft: "1.4rem",
-          display: "grid",
-          gap: "var(--gap-1)",
-          fontSize: "var(--step-small)",
-        }}
-      >
-        {cost.stages.map((row, index) => (
-          <li key={index}>
-            {row.input_tokens.toLocaleString()} in · {row.output_tokens.toLocaleString()} out
-            {row.cached_reported ? ` · ${row.cached_tokens.toLocaleString()} cached` : " · cache not reported"}
-          </li>
-        ))}
-      </ol>
+      <div className="table-scroll">
+        <table className="data">
+          <thead>
+            <tr>
+              <th scope="col">Stage</th>
+              <th scope="col">Input</th>
+              <th scope="col">Output</th>
+              <th scope="col">Cached</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cost.stages.map((row, index) => (
+              <tr key={index}>
+                <td className="ident">
+                  {attributed ? (
+                    row.stage
+                  ) : (
+                    <span style={{ color: "var(--text-muted)" }}>not attributed</span>
+                  )}
+                </td>
+                <td className="ident">{row.input_tokens.toLocaleString()}</td>
+                <td className="ident">{row.output_tokens.toLocaleString()}</td>
+                {/* `cached_reported` FALSE AND ZERO TOKENS ARE DIFFERENT FACTS: the
+                    provider said nothing, versus it measured zero. Both render as a
+                    rate of 0.0% and want different fixes. */}
+                <td style={{ color: "var(--text-muted)" }}>
+                  {row.cached_reported ? row.cached_tokens.toLocaleString() : "not reported"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       {cost.findings.length > 0 ? (
         <ul
@@ -368,5 +402,3 @@ function CallBreakdown({ cost }: { cost: CostView }) {
     </div>
   );
 }
-
-

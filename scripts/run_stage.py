@@ -88,7 +88,7 @@ from agentorg import gates, graph, integrations, log
 from agentorg.agents import testgen
 from agentorg.common import agent_client, config, llm
 from agentorg.cost import record as cost_record
-from agentorg.state import HumanDecision, LogEvent, RunState
+from agentorg.state import HumanDecision, LogEvent, RunState, Stage
 from agentorg.tenancy import run_index
 
 # The exact strings accepted, and nothing else. Lower-cased before lookup so
@@ -264,6 +264,38 @@ def _load(run_id: str) -> RunState:
         ) from absent
 
 
+# WHICH STAGE THIS PROCESS IS RUNNING, set once by `main`. See `_cost_stage`.
+_THIS_STAGE = ""
+
+
+def _cost_stage() -> str:
+    """The `Stage` to attribute this process's model calls to, or "" for none.
+
+    **EVERY COST ROW IN EVERY RUN SAID `plan`, AND THE SCREEN SHOWED IT.** `_emit`
+    called `build_cost_record()` with no argument, so nothing ever called
+    `llm.attribute_usage_to`, so every usage row reached `_stage_or_fallback` with a
+    blank stage and took the `plan` fallback. A run's cost table rendered three rows
+    reading `plan`, `plan`, `plan` for calls made by the planner, the developer and
+    the security agent -- which answers "which stage is expensive" with a lie rather
+    than with a gap. CLAUDE.md records this as an open item in `graph.py` and
+    `run_stage.py`, "the integrator's files"; this is that line.
+
+    READ FROM `args.stage`, WHICH IS THE ONE PLACE THAT KNOWS. On the cloud path each
+    stage is a separate PROCESS, so the argument this process was invoked with is
+    exactly the stage its model calls served. `_emit` has eleven call sites and the
+    comment beside it already warns that a per-call-site argument would be eleven
+    chances to omit one -- so it is recorded once, by `main`, and read here.
+
+    **THE REJECTION RECORDERS ARE NOT `Stage` MEMBERS, AND THAT IS WHY THIS FILTERS.**
+    `STAGES` also carries `gate1-rejected`, `gate2-rejected` and `gate3-rejected`;
+    `StageCost.stage` is a `Stage` Literal, so attributing one would make pydantic
+    RAISE inside the cost path -- and `cost/record.py` is explicit that this module
+    "must never be the thing that fails a run". Filtering to the nine leaves a
+    recorder attributing nothing, which is the behaviour every stage had until now.
+    """
+    return _THIS_STAGE if _THIS_STAGE in typing.get_args(Stage) else ""
+
+
 def _emit(state: RunState, *, pausing_for: str = "") -> None:
     """Save the state and print the two lines a human reads off the job log.
 
@@ -305,7 +337,7 @@ def _emit(state: RunState, *, pausing_for: str = "") -> None:
     # looks complete. `cost/record.py` names that shape as the rejection recorder's,
     # "just as invisible, because the surviving record would look complete."
     state.cost = cost_record.merge_cost_records(
-        state.cost, cost_record.build_cost_record()
+        state.cost, cost_record.build_cost_record(_cost_stage())
     )
     ref = gates.pause(state, pausing_for) if pausing_for else gates.save(state)
     print(f"run_id={state.run_id}")
@@ -951,6 +983,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trigger", default="manual",
                         help="how this run was started: manual, issue, ...")
     args = parser.parse_args(argv)
+
+    # ONE ASSIGNMENT, READ BY `_cost_stage`. Set before any stage function runs, so
+    # every model call this process makes is attributed to the stage that made it.
+    global _THIS_STAGE
+    _THIS_STAGE = args.stage
 
     if args.stage == "plan":
         if not args.ticket_id or not args.ticket_text:

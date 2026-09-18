@@ -169,10 +169,16 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
           </p>
         ) : null}
 
-        {/* ONLY WHEN THERE IS A CHOICE TO MAKE. One repository in scope means the
-            select has one option and answers a question nobody asked; the run goes
-            there either way. Two or more, and it is the first thing to decide. */}
-        {repositories.length > 1 ? (
+        {/* ALWAYS SHOWN WHEN THERE IS ANYTHING IN SCOPE, INCLUDING ONE REPOSITORY.
+            The first version hid it below two options, on the reasoning that a
+            select with a single choice answers a question nobody asked. Reported
+            immediately, and the reasoning was wrong: the form then never said WHERE
+            the run was going, so somebody filling it in had no way to know which
+            repository was about to receive a branch, a pull request and nine
+            comments. A control that disappears when it has one answer is
+            indistinguishable from one that is broken -- already paid for once on
+            the repositories screen, and repeated here. */}
+        {repositories.length > 0 ? (
           <label style={{ display: "grid", gap: "var(--gap-1)" }}>
             <span className="eyebrow">Which repository?</span>
             <select
@@ -186,6 +192,17 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
                 </option>
               ))}
             </select>
+            {repositories.length === 1 ? (
+              // NAMES THE CONSEQUENCE, since there is no choice to make here. The
+              // control exists to say where the change lands, not to offer options.
+              <span
+                className="prose"
+                style={{ margin: 0, fontSize: "var(--step-small)", opacity: 0.8 }}
+              >
+                The only repository in this tenant&rsquo;s scope. Add another on the
+                Repositories screen to choose.
+              </span>
+            ) : null}
           </label>
         ) : null}
 

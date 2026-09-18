@@ -184,6 +184,21 @@ export class PipelineError extends Error {
   constructor(
     message: string,
     readonly detail: string = "",
+    /**
+     * A DELIBERATE REFUSAL, not a fault — so it is a 4xx and not a 500.
+     *
+     * **REPORTED FROM THE DEPLOYED APP.** Approving a run that carries no GitHub
+     * run id answered `HTTP 500 — PipelineError: this run cannot be approved from
+     * here`, under the words *"Retry once. If it happens again this needs an
+     * operator, not a refresh."* Every part of that is wrong: nothing failed, the
+     * answer is deterministic, and retrying can only produce it again.
+     *
+     * The comment at the `ReadRefused` branch below claimed `lib/http.ts` "keeps
+     * mapping it to the same status" — it did not; `unhandled` maps everything to
+     * 500. A comment asserting a mapping that does not exist is how the wrong
+     * status survived being read.
+     */
+    readonly refused: boolean = false,
   ) {
     super(message);
     this.name = "PipelineError";
@@ -259,7 +274,10 @@ async function readPipeline<T>(
     return (await readTenancy(request as Parameters<typeof readTenancy>[0])) as T;
   } catch (error) {
     if (error instanceof ReadRefused) {
-      throw new PipelineError(error.message, error.detail);
+      // `refused: true` -- a decision, not a failure. `lib/http.ts:unhandled` turns
+      // it into a 409, so the screen stops telling somebody to retry an answer that
+      // cannot change.
+      throw new PipelineError(error.message, error.detail, true);
     }
     // A CREDENTIAL FAILURE IS NOT "no such run". `TenantCredentialError` means the
     // deployment is misconfigured -- an unset role ARN, or a session tag STS

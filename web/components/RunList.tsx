@@ -213,7 +213,12 @@ export function RunList() {
                       color: "var(--text-muted)",
                       fontSize: "var(--step-caption)",
                       marginTop: "var(--gap-1)",
-                      maxWidth: "26ch",
+                      // 34ch, NOT 26. `mohamedsorour1998/auth-service` is 30
+                      // characters and was being clipped to
+                      // `mohamedsorour1998/auth-se…` -- an owner in full and a
+                      // repository truncated, which is the half that identifies
+                      // it. The `title` carries the whole string either way.
+                      maxWidth: "34ch",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
