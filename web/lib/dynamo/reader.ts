@@ -37,6 +37,14 @@ import { randomUUID } from "node:crypto";
 
 import { scopedClient } from "./credentials";
 import { SK_REPO, SK_RUN, isSafeRunId, sk, tenantForRunState, tenantPk } from "./keys";
+// PURE, so the translation every viewer sees can be driven by a test without a
+// table or a token. `dispatch` itself is imported lazily at the call sites, because
+// it reaches Secrets Manager at module scope's expense and the read path must not
+// pay for it when there is no `ci_run_id` to ask about.
+import { gatesAwaiting, reconcileStatus, stagesFromCi } from "../ci-view";
+// TYPE ONLY, so nothing from `dispatch` is pulled in at module scope -- it opens a
+// Secrets Manager client, and this module is imported by every read.
+import type { CiProgress } from "../dispatch";
 
 /**
  * The table, read with NO DEFAULT. Blank means "this deployment does not index runs",
@@ -103,11 +111,48 @@ function summarise(row: Row) {
   };
 }
 
+/**
+ * The runs this tenant owns, newest first, with any stale `running` corrected.
+ *
+ * **THE LIST HAD THE SAME DEFECT AS THE DETAIL SCREEN AND IT LOOKS WORSE HERE.** A
+ * run that merged an hour ago sat in this list as `RUNNING` forever, because the
+ * job that ends a run (`promote`) holds no AWS credential and so cannot write its
+ * own ending — see `lib/dispatch.ts:runProgress`. Three finished runs reading as
+ * three live ones is not a cosmetic lag: it is the list telling somebody work is
+ * still going on.
+ *
+ * **ONE GITHUB CALL FOR THE WHOLE PAGE, not one per run.** `listProgress` reads the
+ * workflow's recent runs once and matches on `ci_run_id`. A per-run read would be
+ * N round trips on a screen that is polled, for a correction that is the same shape
+ * for every row — and it would make an unreachable GitHub N failures instead of one.
+ */
 async function listRuns(tenantId: string) {
   if (!indexTableName()) return { runs: [], indexed: false };
   const rows = await rowsOfType(tenantId, SK_RUN);
   rows.sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
-  return { runs: rows.map(summarise), indexed: true };
+
+  // ONLY IF SOMETHING CLAIMS TO BE RUNNING. A page of finished runs asks GitHub
+  // nothing, which is the common case once a demo is over.
+  const unfinished = rows.filter((row) => String(row.status ?? "running") === "running");
+  let conclusions: Record<string, CiProgress> = {};
+  if (unfinished.length > 0) {
+    const { listProgress } = await import("../dispatch");
+    conclusions = await listProgress(
+      unfinished.map((row) => String(row.ci_run_id ?? "")).filter(Boolean),
+    );
+  }
+
+  return {
+    runs: rows.map((row) => {
+      const summary = summarise(row);
+      const progress = conclusions[String(row.ci_run_id ?? "")] ?? null;
+      // The same reconciler the detail screen uses, so a run cannot read as ended
+      // in one place and running in the other. Two derivations of one fact is how
+      // a list and a detail page start disagreeing about the same run.
+      return { ...summary, status: reconcileStatus(summary.status, progress, stateOf(row)) };
+    }),
+    indexed: true,
+  };
 }
 
 async function listRepositories(tenantId: string) {
@@ -312,8 +357,39 @@ async function runDetail(tenantId: string, runId: string) {
   const security = (state?.security ?? null) as Record<string, unknown> | null;
   const dev = (state?.dev ?? null) as Record<string, unknown> | null;
 
+  /**
+   * THE LIVE OVERLAY. GitHub answers what is happening; the document answers what
+   * the run produced, and the two below never cross.
+   *
+   * **THE DOCUMENT CANNOT ANSWER THE FIRST QUESTION, AND THAT IS STRUCTURAL.** A
+   * gate job holds no AWS credential — by design — so a gate decision reaches this
+   * row only when the next credentialled job rewrites it. `gate3`'s next job is
+   * `promote`, which holds none either, so a run that merged stays `running` here
+   * forever. Measured on run 35057681679: every job `success`, every field on this
+   * row still saying the run waits at gate3. `lib/dispatch.ts:runProgress` carries
+   * the full table.
+   *
+   * The fallbacks below are not dead code: a run with no `ci_run_id`, and a run
+   * read while GitHub is unavailable, both still render from the document alone.
+   */
+  // THE IMPORT IS INSIDE THE BRANCH, not above it: `dispatch` opens a Secrets
+  // Manager client, and a run with no Actions page must not pay for one.
+  const ciRunId = typeof row.ci_run_id === "string" ? row.ci_run_id : "";
+  const progress = ciRunId ? await (await import("../dispatch")).runProgress(ciRunId) : null;
+
   return {
     ...summarise(row),
+    /**
+     * CORRECTED, NEVER OVERWRITTEN. `reconcileStatus` may turn a stale `running`
+     * into the ending GitHub can see, and may not replace one ending with another
+     * — a BLOCK is `develop` exiting 3, which from outside is indistinguishable
+     * from a crash, and the document is the only thing that knows the difference.
+     */
+    status: reconcileStatus(
+      String(state?.status ?? row.status ?? "running"),
+      progress,
+      state,
+    ),
     // FROM THE DOCUMENT WHERE THERE IS ONE, and the summary's honest blanks where
     // there is not -- `""` means nobody recorded it, which the UI renders as unknown.
     verdict: (security?.verdict as string) ?? null,
@@ -325,7 +401,14 @@ async function runDetail(tenantId: string, runId: string) {
     poisoned: state?.poisoned === true,
     pr_url: (dev?.pr_url as string) ?? null,
     branch: (dev?.branch as string) ?? null,
-    stages: state ? stagesFrom(state, row) : [],
+    /**
+     * FROM THE JOBS WHERE THERE ARE JOBS. `stagesFromCi` reads the run's seven
+     * jobs and the two results that have none (`review` and `security` live inside
+     * `develop`), so a stage in flight renders as running rather than as absent —
+     * which is what the spinner on the spine is driven by, and what the document
+     * structurally cannot say, since it is written only once a stage FINISHES.
+     */
+    stages: progress ? stagesFromCi(progress, state) : state ? stagesFrom(state, row) : [],
     decisions: Array.isArray(state?.decisions) ? state.decisions : [],
     security,
 
@@ -398,7 +481,26 @@ async function runDetail(tenantId: string, runId: string) {
     // what `awaitingGates` reads, and what `run_facts` already decides approvals
     // over. Deriving the screen from one source and the decision from another is how
     // a button appears for a gate the server then refuses.
-    awaiting_gates: awaitingGates(state, String(state?.status ?? row.status ?? "")),
+    //
+    // **AND NOW IT COMES FROM GITHUB WHEN GITHUB CAN BE ASKED.** The premise above
+    // — that the table can see a gate once `run_index` denormalises the state
+    // document — is true and was not sufficient: the document learns of a decision
+    // only when a CREDENTIALLED job rewrites it, so gate2 lagged by however long
+    // `sre` took and gate3 never landed at all. `pending_deployments` is the only
+    // authority on which Environment is held, and it is the same list `approveGate`
+    // releases against — so the control and the refusal now read one source.
+    awaiting_gates: progress
+      ? gatesAwaiting(progress)
+      : awaitingGates(state, String(state?.status ?? row.status ?? "")),
+    /**
+     * WHETHER THE ABOVE IS LIVE, so the screen never implies a freshness it does
+     * not have. `false` means GitHub was not reachable (or the run has no Actions
+     * page) and everything here is the stored record, which may be behind. An
+     * interface that looked identical either way would be claiming currency it
+     * could not deliver — the same reason the stream panel reports when it was
+     * last heard from rather than showing a spinner.
+     */
+    live: progress !== null,
   };
 }
 

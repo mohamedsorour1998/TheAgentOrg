@@ -36,7 +36,7 @@
 
 import { useState } from "react";
 
-import type { DevView, PlanView, ReviewView, SREView } from "@/lib/contract";
+import type { DevView, PlanView, ReviewView, SREView, Stage } from "@/lib/contract";
 
 /** A stage that has not run, said in words rather than drawn as emptiness. */
 function NotRun({ what }: { what: string }) {
@@ -91,12 +91,27 @@ function Listed({ items, empty }: { items: string[] | undefined; empty: string }
   );
 }
 
+/**
+ * ONE STAGE AT A TIME, chosen by the spine above it.
+ *
+ * **IT USED TO RENDER ALL FOUR AT ONCE**, which is most of why the run screen was
+ * reported as *"super unorganized and messy"*: the diff, the planner's two lists,
+ * the reviewer's objections and the SRE's checks were open simultaneously, above a
+ * security verdict and a cost table that were also open. Everything was visible and
+ * nothing was findable.
+ *
+ * `stage` is the whole change. A stage with no agent output of its own -- the three
+ * gates, `security`, `promote` -- gets `null` here and is rendered by the page,
+ * which owns the gate control and the security panel.
+ */
 export function AgentOutput({
+  stage,
   plan,
   dev,
   review,
   sre,
 }: {
+  stage: Stage;
   plan: PlanView | null;
   dev: DevView | null;
   review: ReviewView | null;
@@ -109,12 +124,8 @@ export function AgentOutput({
 
   const approved = review?.verdict === "approve";
 
-  return (
-    <div>
-      <h2 className="title" style={{ marginBottom: "var(--gap-4)" }}>
-        What the agents said
-      </h2>
-
+  if (stage === "plan") {
+    return (
       <Panel title="Planner" note="Reads the ticket. Chooses the files every later stage works from.">
         {plan === null ? (
           <NotRun what="planner" />
@@ -144,7 +155,11 @@ export function AgentOutput({
           </div>
         )}
       </Panel>
+    );
+  }
 
+  if (stage === "develop") {
+    return (
       <Panel title="Developer" note="Writes the change. Its diff is what the scanners and the reviewer read.">
         {dev === null ? (
           <NotRun what="developer" />
@@ -199,7 +214,11 @@ export function AgentOutput({
           </div>
         )}
       </Panel>
+    );
+  }
 
+  if (stage === "review") {
+    return (
       <Panel
         title="Reviewer"
         note="ADVISORY. A refusal here sends the change back for another pass; it does not stop the run. Only the security verdict does that."
@@ -249,7 +268,11 @@ export function AgentOutput({
           </div>
         )}
       </Panel>
+    );
+  }
 
+  if (stage === "sre") {
+    return (
       <Panel
         title="SRE"
         note="The verdict is derived from MEASURED CI, not from the model. The model contributes the advisory checks below it and cannot set a verdict."
@@ -286,6 +309,11 @@ export function AgentOutput({
           </div>
         )}
       </Panel>
-    </div>
-  );
+    );
+  }
+
+  // `security`, the three gates and `promote` have no agent output of their own.
+  // The page renders those, because they are the verdict, the decision controls and
+  // the merge -- and none of them is a model's answer.
+  return null;
 }

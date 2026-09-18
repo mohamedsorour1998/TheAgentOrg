@@ -254,6 +254,18 @@ export interface RunDetail extends RunSummary {
   security: SecurityView | null;
   /** Which gates are open for a decision RIGHT NOW. May be empty. */
   awaiting_gates: Gate[];
+  /**
+   * Whether `stages`, `awaiting_gates` and `status` were read from GitHub itself.
+   *
+   * **`false` IS A REAL ANSWER AND NOT A DEGRADED ONE.** It means the run has no
+   * Actions page, or GitHub could not be reached, and everything above came from
+   * the stored record — which may be behind, because a gate job holds no AWS
+   * credential and cannot write its own decision. The screen says which it is
+   * showing rather than implying a currency it does not have, for the same reason
+   * `scan_provenance` keeps `fixture-fallback` (a fault) apart from
+   * `fixture-stub` (a choice).
+   */
+  live: boolean;
 
   /**
    * `null` MEANS THE STAGE HAS NOT RUN, and an empty object would mean it ran and

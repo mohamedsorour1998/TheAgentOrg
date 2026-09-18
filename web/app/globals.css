@@ -216,9 +216,10 @@ textarea {
   transform: translateY(0);
 }
 
-/* The one keyframe in the app, used by the loading skeleton. The reduced-motion
-   block above already stills it -- that is why no component checks the media
-   query itself, and why adding an animation here cannot forget to. */
+/* Used by the loading skeleton, and by a gate waiting on a person. The
+   reduced-motion block above already stills it -- that is why no component checks
+   the media query itself, and why adding an animation here cannot forget to.
+   `spin`, at the end of this file, is the only other one. */
 @keyframes pulse {
   0%,
   100% {
@@ -456,4 +457,107 @@ table.data tr[data-blocking="true"] td:first-child {
     padding-left: var(--gap-4);
     padding-right: var(--gap-4);
   }
+}
+
+/* ── THE PIPELINE SPINE ───────────────────────────────────────────────────────
+ * Nine stages, laid across rather than down, and each one is a BUTTON that
+ * reveals what that stage produced.
+ *
+ * WHY THIS REVERSES AN EARLIER DECISION, AND WHAT PAID FOR THE REVERSAL
+ * ====================================================================
+ * The vertical spine argued that "on a phone nine steps either wrap into a
+ * meaningless grid or scroll out of sight, and the stage a person is waiting on
+ * is the one thing that must never be off-screen". The second half was right and
+ * is now solved somewhere else: the gate awaiting a decision has its own card
+ * ABOVE the spine, so it cannot be off-screen whatever the spine does. Freed of
+ * carrying that, the spine can be what it actually is -- a short index of the run
+ * -- instead of nine stacked rows of prose that pushed the security verdict, the
+ * agents' output and the cost below three screens of scrolling.
+ *
+ * It WRAPS, it does not scroll. A horizontally scrolling spine can still hide a
+ * stage; wrapping to two or three rows on a narrow screen never does.
+ *
+ * THE PHASE WORDS MOVED OFF THE MARKS AND INTO ONE SENTENCE. Nine words at nine
+ * marks have to be tiny, and `--step-caption` (11px, muted) is below this
+ * product's floor for a screen share -- measured, and the reason the vertical
+ * spine used `--step-small` for exactly that word. One sentence under the spine
+ * says the same thing at full size, and says it better: "Stopped at security --
+ * nothing after it ran" is the demo's central beat, and it was previously spelled
+ * out as four separate 13px "did not run" labels.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+.spine {
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.spine-step {
+  flex: 1 1 5.5rem;
+  min-width: 0;
+}
+
+.spine-btn {
+  display: block;
+  width: 100%;
+  padding: var(--gap-2) 0 var(--gap-3);
+  background: none;
+  border: 0;
+  /* The selected stage is underlined, so the selection survives greyscale --
+     `vocabulary.ts`'s rule that a distinction must differ in FORM as well as
+     colour, applied to a control rather than to a status. */
+  border-bottom: 2px solid transparent;
+  border-radius: 3px 3px 0 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: center;
+}
+
+.spine-btn:hover {
+  background: var(--surface-sunken);
+}
+
+.spine-btn[aria-current="true"] {
+  border-bottom-color: var(--accent);
+  background: var(--surface-sunken);
+}
+
+/* The rail: a line in, the mark, a line out. Rendering the lines as siblings of
+   the mark rather than as a background keeps each segment's colour a property of
+   the stage it leaves, which is what makes the rail below a block dashed. */
+.spine-rail {
+  display: flex;
+  align-items: center;
+  height: 1.5rem;
+}
+
+.spine-line {
+  flex: 1 1 auto;
+  height: 2px;
+  min-width: 0;
+}
+
+.spine-name {
+  display: block;
+  margin-top: var(--gap-2);
+  font-family: var(--mono);
+  font-size: var(--step-small);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* THE ONE THING ON THE PAGE THAT MOVES, and only while a stage is genuinely
+   executing. The global reduced-motion block above stills it, which is why no
+   component checks the media query itself. */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spine-spinner {
+  animation: spin 1.1s linear infinite;
 }

@@ -1,28 +1,39 @@
 /**
- * THE LIVE RUN VIEW. Seven stages, the current one, and output as it arrives.
- * THE SCREEN THE DEMO LIVES ON.
+ * THE RUN VIEW. One header, one spine, one open stage. THE SCREEN THE DEMO LIVES ON.
  *
- * A client component, because it holds a live stream and a decision form.
+ * ── WHY IT WAS REDESIGNED ────────────────────────────────────────────────────
  *
- * WHAT IT DOES WHILE NOTHING IS HAPPENING, which is most of the time: it shows
- * when the stream was last heard from rather than a spinner. A run spends its
- * wall clock waiting -- a stage takes tens of seconds and a gate waits for a
- * person indefinitely -- so "quiet and current" and "quiet and broken" are the two
- * states a viewer actually needs told apart, and a spinner says neither. See
- * `useRunStream.ts`.
+ * Reported from the deployed app: *"the run page is super unorganized and messy
+ * ... make it smart and elegant and shorter ... rethink the whole page in terms of
+ * UI and logic"*. It was eight stacked sections with four large ones open at once,
+ * so the security verdict -- the beat the product exists for -- sat in the middle
+ * of three screens of scrolling. And half of one column was an event list that is
+ * STRUCTURALLY EMPTY for these runs, because it reads the queue and a run on the
+ * GitHub Actions path never enters the queue.
  *
- * WHY IT RE-READS THE RUN AFTER EVERY STAGE FRAME
- * ==============================================
- * The stream carries transitions, not the run. A frame says `security -> done`; it
- * does not carry the verdict, the findings or the PR url. Rendering from frames
- * alone would leave the security panel empty on a blocked run -- the one thing
- * this screen exists to show -- so a stage frame triggers a re-fetch of
- * `/api/runs/[runId]` and the frames drive WHEN to read, never WHAT to display.
+ * A run IS a sequence of stages, each of which produced something. So the spine
+ * became the page's index: pick a stage, see what it produced, one at a time. The
+ * decision a person owes is lifted out of that sequence entirely, into its own card
+ * above -- it is the only thing on this page that is an ACTION rather than a record.
+ *
+ * ── AND WHY THE LOGIC CHANGED UNDER IT ───────────────────────────────────────
+ *
+ * Two bugs were reported together: *"when I approve gate3 nothing happened"* and
+ * *"when I approve gate 2 it works but it takes 2 min"*. **Neither approval
+ * failed.** Both are one cause, measured on run 35057681679 -- a gate job holds no
+ * AWS credential, so a gate decision reaches the stored record only when the NEXT
+ * credentialled job rewrites it, and `gate3`'s next job is `promote`, which holds
+ * none either. The full table is in `lib/dispatch.ts:runProgress`.
+ *
+ * So the spine, the gate control and the status now come from GITHUB -- the jobs
+ * and `pending_deployments`, which are what the pipeline actually is -- while the
+ * stage panels come from the stored document, which is the only thing that knows
+ * what the run produced. `run.live` says which of the two the reader is looking at.
  */
 
 "use client";
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 import { CostPanel } from "@/components/CostPanel";
@@ -30,16 +41,16 @@ import { AgentOutput } from "@/components/AgentOutput";
 import { DecisionLog, GateControls } from "@/components/GateControls";
 import { ErrorState, Mark, Skeleton } from "@/components/primitives";
 import { SecurityPanel } from "@/components/SecurityPanel";
-import { StageSpine } from "@/components/StageSpine";
-import { ago, useRunStream } from "@/components/useRunStream";
+import { PHASE_WORD, StageSpine, phases, spineSentence } from "@/components/StageSpine";
+import { useRunStream } from "@/components/useRunStream";
 import { RUN_STATUS } from "@/components/vocabulary";
 import { getJson } from "@/components/fetching";
-import type { RunDetail } from "@/lib/contract";
+import type { Gate, RunDetail, Stage } from "@/lib/contract";
 import type { CostView, ScoringResponse } from "@/lib/endpoints";
 
 type Failure = { error: string; fix: string; detail?: string };
 
-/** A run whose status can no longer change. Nothing to stream. */
+/** A run whose status can no longer change. Nothing left to poll for. */
 const ENDED = new Set(["blocked", "rejected", "promoted", "failed"]);
 
 export default function RunPage({ params }: { params: Promise<{ runId: string }> }) {
@@ -50,20 +61,25 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
   const [cost, setCost] = useState<CostView | null>(null);
   const [failure, setFailure] = useState<Failure | null>(null);
   const [loading, setLoading] = useState(true);
+  const [readAt, setReadAt] = useState<Date | null>(null);
   const [now, setNow] = useState(() => new Date());
-  // Bumped by an event -- a recorded decision, or a retry. An EVENT may set
-  // state; an effect may not, which is what shapes the reload below.
+  /**
+   * THE STAGE THE READER CHOSE, or `null` for "follow the run".
+   *
+   * Two states, not one, and collapsing them breaks one of the two behaviours: a
+   * page that always follows the run yanks the panel away while somebody is reading
+   * the diff, and a page that never follows opens on `plan` for a run that is three
+   * stages further on. `null` follows; a choice sticks.
+   */
+  const [picked, setPicked] = useState<Stage | null>(null);
   const [revision, setRevision] = useState(0);
   const reload = useCallback(() => setRevision((n) => n + 1), []);
 
   const ended = run !== null && ENDED.has(run.status);
+  // The queue's stream. It carries nothing for an Actions run -- see the header --
+  // so it is kept ONLY as a faster trigger for the poll below on the self-hosted
+  // path, and renders nothing. A frame is a dependency of the read, not a cascade.
   const stream = useRunStream(runId, run !== null && !ended);
-  // A stage transition means the run itself changed, so the frame count is a
-  // DEPENDENCY of the read rather than a trigger for one. Written as an effect
-  // that calls a loader, Next 16's `react-hooks/set-state-in-effect` refuses it
-  // -- correctly: an effect that sets state which re-runs an effect is a
-  // cascading render, and the honest form is one effect whose inputs include
-  // everything that should make it re-read.
   const frames = stream.events.length;
 
   /**
@@ -85,6 +101,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
       }
       setFailure(null);
       setRun(result.value);
+      setReadAt(new Date());
       setLoading(false);
 
       // Scoring and cost are separate reads and each may legitimately be absent
@@ -104,49 +121,48 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
     };
   }, [runId, frames, revision]);
 
-  // Ticks the "last heard" line. One second, and only while streaming -- a timer
-  // on an ended run would run forever for no reason. `setNow` fires from the
-  // timer, not from the effect body, which is why this is not a cascading render.
-  useEffect(() => {
-    if (ended || run === null) return;
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, [ended, run]);
-
   /**
    * RE-READS THE RUN WHILE IT IS LIVE, so the page moves on its own.
    *
-   * **REPORTED FROM THE DEPLOYED APP, AND IT MADE A WORKING APPROVAL LOOK
-   * BROKEN.** Approving gate1 succeeded — GitHub released the Environment,
-   * `develop` ran, the scanners ran, and the run advanced to gate2 — and this page
-   * showed none of it. The operator saw "Approval recorded", nothing move, and
-   * then a gate button again after a manual refresh, and read the whole thing as
-   * *"like I clicked on nothing"*. The click had in fact done everything it
-   * claimed.
-   *
-   * **THE SSE STREAM CANNOT COVER THIS AND IS NOT THE FIX.** `useRunStream` reads
-   * the QUEUE, and a run on the GitHub Actions path never enters the queue — so
-   * "As it happens" is structurally empty for exactly the runs this product
-   * demonstrates. That is documented in `runDetail` and it is why the fix is a
-   * poll of the run's own record rather than another stream.
-   *
    * FIVE SECONDS. A stage takes tens of seconds and a gate waits for a person, so
    * anything faster is load without information; anything slower and a stage
-   * completes, is replaced by the next, and is never seen. `revision` is what the
-   * loader depends on, so this is one `setState` per tick and not a cascade.
+   * completes, is replaced by the next, and is never seen.
    *
    * **IT STOPS WHEN THE TAB IS HIDDEN.** A run left open in a background tab
-   * overnight would otherwise be thousands of reads of a table, each one billed,
-   * for a screen nobody is looking at.
+   * overnight would otherwise be thousands of reads of a table and of GitHub, each
+   * one billed, for a screen nobody is looking at.
    */
   useEffect(() => {
     if (ended || run === null) return;
     const id = setInterval(() => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      setNow(new Date());
       reload();
     }, 5000);
     return () => clearInterval(id);
   }, [ended, run, reload]);
+
+  const rows = useMemo(() => (run ? phases(run.stages, ended) : []), [run, ended]);
+
+  /**
+   * WHICH STAGE THE PAGE OPENS ON, in the order a reader would look.
+   *
+   * A gate awaiting a decision, then whatever is running, then wherever it stopped
+   * -- the block, which is the demo's beat -- then the last stage that finished.
+   * Never `plan` by default on a run that has moved past it.
+   */
+  const following = useMemo<Stage>(() => {
+    if (!run) return "plan";
+    const open = rows.find((r) => run.awaiting_gates.includes(r.stage as Gate));
+    if (open) return open.stage;
+    const running = rows.find((r) => r.phase === "running");
+    if (running) return running.stage;
+    const stopped = rows.find((r) => r.phase === "refused");
+    if (stopped) return stopped.stage;
+    return rows.filter((r) => r.phase === "done").at(-1)?.stage ?? "plan";
+  }, [run, rows]);
+
+  const selected = picked ?? following;
 
   if (loading) {
     return (
@@ -171,6 +187,9 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
 
   if (!run) return null;
 
+  const phase = rows.find((r) => r.stage === selected)?.phase ?? "pending";
+  const openGate = run.awaiting_gates[0];
+
   return (
     <div>
       <p className="eyebrow">
@@ -180,134 +199,103 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
         / {run.ticket_id}
       </p>
 
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: "var(--gap-4)",
-          flexWrap: "wrap",
-          marginBottom: "var(--gap-2)",
-        }}
-      >
-        <h1 className="display">{run.ticket_id}</h1>
-        <Mark mark={RUN_STATUS[run.status]} />
-      </div>
+      {/* ── WHAT THIS RUN IS ─────────────────────────────────────────────── */}
+      <header style={{ marginBottom: "var(--gap-6)" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "baseline",
+            gap: "var(--gap-4)",
+            flexWrap: "wrap",
+          }}
+        >
+          <h1 className="display">{run.ticket_id}</h1>
+          <Mark mark={RUN_STATUS[run.status]} />
+        </div>
+        <p className="prose" style={{ margin: "var(--gap-2) 0 var(--gap-3)" }}>
+          {run.ticket_text}
+        </p>
+        <Facts run={run} readAt={readAt} now={now} live={!ended} />
+      </header>
 
-      <p className="prose">{run.ticket_text}</p>
-
-      <dl
-        className="grid-2"
-        style={{ margin: "var(--gap-6) 0", fontSize: "var(--step-small)" }}
-      >
-        <Pair label="Run id" value={run.run_id} mono />
-        <Pair
-          label="Started by"
-          value={run.trigger === "issue" ? "an issue being opened" : run.trigger || "unknown"}
-        />
-        <Pair
-          label="Agents answered from"
-          value={run.model_provenance || "not recorded"}
-          mono
-        />
-        {run.branch ? <Pair label="Branch" value={run.branch} mono /> : null}
-        {run.pr_url ? (
-          <div>
-            <dt className="eyebrow">Pull request</dt>
-            <dd style={{ margin: 0 }}>
-              <a href={run.pr_url}>{run.pr_url.replace(/^https:\/\/github\.com\//, "")}</a>
-            </dd>
-          </div>
-        ) : null}
-        {/* THE ACTIONS RUN. Asked for directly, and it was already on the row --
-            `approveRun` reads it to find the Environment to release. The jobs, the
-            logs and the live progress all live there, and nothing linked to it, so
-            the one page that shows the pipeline actually running was reachable
-            only by somebody who already knew the URL.
-
-            A plain <a>: it leaves this origin. */}
-        {run.ci_run_id ? (
-          <div>
-            <dt className="eyebrow">Actions run</dt>
-            <dd style={{ margin: 0 }}>
-              <a href={run.ci_run_id} target="_blank" rel="noreferrer">
-                watch it on GitHub ↗
-              </a>
-            </dd>
-          </div>
-        ) : null}
-        {run.poisoned ? (
-          <Pair label="Ticket" value="deliberately carries a credential" />
-        ) : null}
-      </dl>
-
-      {/* THE OPEN GATES. Above the spine, because a decision waiting on a person
-          is the only thing on this page that needs acting on. */}
-      {run.awaiting_gates.length > 0 ? (
-        <div style={{ marginBottom: "var(--gap-8)" }}>
-          {run.awaiting_gates.map((gate) => (
-            <div key={gate} style={{ marginBottom: "var(--gap-4)" }}>
-              <GateControls runId={run.run_id} gate={gate} onRecorded={reload} />
-            </div>
-          ))}
+      {/* ── THE DECISION, IF ONE IS OWED ─────────────────────────────────────
+          ABOVE THE SPINE, AND THAT PLACEMENT IS WHAT FREED THE SPINE TO GO
+          HORIZONTAL. It is the only thing on this page that is an action rather
+          than a record, so it is never something a reader has to find. */}
+      {openGate ? (
+        <div style={{ marginBottom: "var(--gap-6)" }}>
+          <GateControls runId={run.run_id} gate={openGate} onRecorded={reload} />
         </div>
       ) : null}
 
-      <div className="grid-2" style={{ alignItems: "start", gap: "var(--gap-8)" }}>
-        <section>
-          <h2 className="title" style={{ marginBottom: "var(--gap-4)" }}>
-            Stages
-          </h2>
-          <StageSpine
-            stages={run.stages}
-            runEnded={ended}
-            awaitingGates={run.awaiting_gates}
-          />
-        </section>
+      {/* ── THE PIPELINE, AND THE PAGE'S INDEX ───────────────────────────── */}
+      <section className="card" style={{ padding: "var(--gap-3) var(--gap-4)" }}>
+        <StageSpine
+          stages={run.stages}
+          runEnded={ended}
+          awaitingGates={run.awaiting_gates}
+          selected={selected}
+          onSelect={setPicked}
+        />
+        <p
+          className="prose"
+          aria-live="polite"
+          style={{
+            margin: "var(--gap-3) 0 0",
+            paddingTop: "var(--gap-3)",
+            borderTop: "1px solid var(--border)",
+            fontSize: "var(--step-small)",
+          }}
+        >
+          {spineSentence(rows, run.awaiting_gates, run.live)}
+        </p>
+      </section>
 
-        <section>
-          <h2 className="title" style={{ marginBottom: "var(--gap-4)" }}>
-            As it happens
-          </h2>
-          <StreamPanel stream={stream} ended={ended} now={now} />
-        </section>
-      </div>
+      {/* ── WHAT THE SELECTED STAGE PRODUCED ─────────────────────────────── */}
+      <section style={{ margin: "var(--gap-6) 0 var(--gap-8)" }}>
+        <h2
+          className="eyebrow"
+          style={{ display: "flex", gap: "var(--gap-3)", alignItems: "baseline" }}
+        >
+          <span style={{ color: "var(--text)" }}>{selected}</span>
+          <span>{openGate === selected ? "your decision" : PHASE_WORD[phase]}</span>
+        </h2>
 
-      {/* WHAT THE AGENTS PRODUCED, above the security verdict and below the spine.
-          The spine says which stages ran; this says what they did. It sits before
-          the verdict because the verdict is the CONCLUSION drawn from the diff
-          immediately above it, and a reader who meets the conclusion first has
-          nothing to weigh it against. */}
-      <div style={{ margin: "var(--gap-12) 0" }}>
-        {/* `?? null` IS NOT DEFENSIVE NOISE -- this page has already died once on
-            exactly this shape. `run.awaiting_gates.length` on an omitted key threw
-            `Cannot read properties of undefined` and the whole screen rendered as
-            "This page couldn't load", while all three APIs behind it answered 200
-            with valid JSON. An older cached response, or a reader that stops
-            projecting one of these, is `undefined` and not `null` -- and `undefined`
-            skips the "has not run" branch instead of taking it. */}
         <AgentOutput
+          stage={selected}
+          // `?? null` IS NOT DEFENSIVE NOISE -- this page has already died once on
+          // exactly this shape. An omitted key is `undefined`, not `null`, and
+          // `undefined` SKIPS the "has not run" branch instead of taking it.
           plan={run.plan ?? null}
           dev={run.dev ?? null}
           review={run.review ?? null}
           sre={run.sre ?? null}
         />
-      </div>
 
-      <div style={{ margin: "var(--gap-12) 0" }}>
-        <SecurityPanel security={run.security} scoring={scoring} />
-      </div>
+        {selected === "security" ? (
+          <SecurityPanel security={run.security} scoring={scoring} />
+        ) : null}
 
-      <section style={{ marginBottom: "var(--gap-12)" }}>
-        <h2 className="title" style={{ marginBottom: "var(--gap-4)" }}>
-          Decisions
-        </h2>
-        <DecisionLog decisions={run.decisions} />
+        {selected === "gate1" || selected === "gate2" || selected === "gate3" ? (
+          <GateStage gate={selected} run={run} />
+        ) : null}
+
+        {selected === "promote" ? <PromoteStage run={run} phase={phase} /> : null}
       </section>
 
-      <section>
-        <h2 className="title" style={{ marginBottom: "var(--gap-4)" }}>
-          Cost
-        </h2>
+      {/* ── THE RECORD ───────────────────────────────────────────────────────
+          Two things that belong to the whole run rather than to any one stage, so
+          they sit below the sequence and are closed by default. `<details>` and
+          not a tab: a reader who wants them is looking for them. */}
+      <Fold summary="Every decision on this run" count={run.decisions.length}>
+        <DecisionLog decisions={run.decisions} />
+      </Fold>
+
+      <Fold
+        summary="What this run cost"
+        count={cost?.stages?.length ?? 0}
+        note={costLine(cost)}
+      >
         {cost ? (
           <CostPanel cost={cost} />
         ) : (
@@ -315,138 +303,211 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
             No cost record for this run.
           </p>
         )}
-      </section>
-    </div>
-  );
-}
-
-function Pair({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <dt className="eyebrow">{label}</dt>
-      <dd
-        style={{
-          margin: 0,
-          fontFamily: mono ? "var(--mono)" : "inherit",
-          wordBreak: mono ? "break-all" : "normal",
-        }}
-      >
-        {value}
-      </dd>
+      </Fold>
     </div>
   );
 }
 
 /**
- * The event list, and the honest answer to "is this still live?".
+ * The run's identifying facts, on one line rather than in a six-cell grid.
  *
- * An ended run gets no stream and says so -- an idle "live" indicator on a run
- * that finished an hour ago is a claim about a connection that does not exist.
+ * A `<dl>` of six label/value pairs was a quarter of the old page for information
+ * a reader consults once. Inline, separated by middots, it is one line and the
+ * three LINKS in it -- the pull request, the branch, the Actions run -- stand out
+ * because they are the only coloured things in it.
  */
-function StreamPanel({
-  stream,
-  ended,
+function Facts({
+  run,
+  readAt,
   now,
+  live,
 }: {
-  stream: ReturnType<typeof useRunStream>;
-  ended: boolean;
+  run: RunDetail;
+  readAt: Date | null;
   now: Date;
+  live: boolean;
 }) {
-  if (ended) {
-    return (
-      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
-        This run has finished, so there is nothing left to stream. Everything it did
-        is on this page.
-      </p>
+  const bits: React.ReactNode[] = [
+    <span key="id" className="ident" title="This run's id">
+      {run.run_id.slice(0, 8)}
+    </span>,
+    <span key="trigger">
+      {run.trigger === "issue"
+        ? "started by an issue"
+        : run.trigger === "ui"
+          ? "started here"
+          : run.trigger
+            ? `started ${run.trigger}`
+            : "started unknown"}
+    </span>,
+    // `""` MEANS NOBODY RECORDED IT, which is not the same as the agents having
+    // used a fixture -- the distinction `model_provenance` exists to keep.
+    <span key="model">
+      {run.model_provenance ? `agents: ${run.model_provenance}` : "agents: not recorded"}
+    </span>,
+  ];
+  if (run.poisoned) {
+    bits.push(
+      <span key="poisoned" style={{ color: "var(--refused)" }}>
+        ticket carries a credential on purpose
+      </span>,
+    );
+  }
+  if (run.pr_url) {
+    bits.push(
+      <a key="pr" href={run.pr_url} target="_blank" rel="noreferrer">
+        pull request ↗
+      </a>,
+    );
+  }
+  if (run.ci_run_id) {
+    bits.push(
+      <a key="ci" href={run.ci_run_id} target="_blank" rel="noreferrer">
+        Actions run ↗
+      </a>,
     );
   }
 
   return (
-    <div>
-      <p
+    <p
+      style={{
+        margin: 0,
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "var(--gap-1) var(--gap-3)",
+        fontSize: "var(--step-small)",
+        color: "var(--text-muted)",
+      }}
+    >
+      {bits.map((bit, i) => (
+        <span key={i} style={{ display: "inline-flex", gap: "var(--gap-3)" }}>
+          {i > 0 ? <span aria-hidden="true">·</span> : null}
+          {bit}
+        </span>
+      ))}
+      {/* WHEN THIS WAS LAST READ, rather than a spinner. A run spends most of its
+          wall clock waiting, so "quiet and current" and "quiet and stuck" are the
+          two states a viewer needs told apart -- and a spinner says neither.
+          `live: false` on the response means GitHub could not be asked, so the
+          stage marks above are the stored record and may be behind. */}
+      {live ? (
+        <span key="read" style={{ display: "inline-flex", gap: "var(--gap-3)" }}>
+          <span aria-hidden="true">·</span>
+          <span style={{ color: run.live ? "var(--text-muted)" : "var(--refused)" }}>
+            {run.live
+              ? `checked ${secondsAgo(readAt, now)}`
+              : "stored record — GitHub could not be reached"}
+          </span>
+        </span>
+      ) : null}
+    </p>
+  );
+}
+
+function secondsAgo(at: Date | null, now: Date): string {
+  if (!at) return "just now";
+  const seconds = Math.max(0, Math.round((now.getTime() - at.getTime()) / 1000));
+  if (seconds < 5) return "just now";
+  if (seconds < 60) return `${seconds}s ago`;
+  return `${Math.round(seconds / 60)}m ago`;
+}
+
+/**
+ * A gate, as a stage: the decision made there, or why there is not one.
+ *
+ * **THE THREE ANSWERS ARE KEPT APART.** Decided, waiting, and never reached want
+ * different words -- rendering "no decision" for all three tells somebody a gate
+ * was skipped when the run simply has not got there, which is the same
+ * did-not-run-versus-passed conflation this repository refuses everywhere else.
+ */
+function GateStage({ gate, run }: { gate: Gate; run: RunDetail }) {
+  const decision = run.decisions.find((d) => d.gate === gate);
+  if (decision) {
+    return <DecisionLog decisions={[decision]} />;
+  }
+  if (run.awaiting_gates.includes(gate)) {
+    return (
+      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+        This gate is holding the run. The decision controls are at the top of this
+        page.
+      </p>
+    );
+  }
+  return (
+    <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+      No decision is recorded here. The run has not reached this gate — that is not
+      the same as it having been skipped.
+    </p>
+  );
+}
+
+/** The last stage: what merged, or why nothing did. */
+function PromoteStage({ run, phase }: { run: RunDetail; phase: string }) {
+  if (phase === "done") {
+    return (
+      <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+        The change was merged.{" "}
+        {run.pr_url ? (
+          <a href={run.pr_url} target="_blank" rel="noreferrer">
+            Open the pull request ↗
+          </a>
+        ) : null}
+      </p>
+    );
+  }
+  return (
+    <p className="prose" style={{ fontSize: "var(--step-small)" }}>
+      Nothing has been merged. `promote` is the only stage that writes to the
+      default branch, and it runs after all three gates.
+    </p>
+  );
+}
+
+/** Cost as one sentence, so the fold says something without being opened. */
+function costLine(cost: CostView | null): string {
+  if (!cost) return "not recorded";
+  // `stages_priced`, NEVER `usd`. Lane E measured that an unwired run has ZERO
+  // rows with `usd: null`, while a run whose container fell back to a fixture has
+  // a row per stage with `usd: 0.0` -- so a zero total cannot tell the two apart
+  // and the row count can.
+  const priced = cost.stages_priced ?? 0;
+  if (priced === 0) return "no model calls recorded";
+  // `usd: null` IS "NOT PRICED", NOT ZERO. An unknown model or a stale price table
+  // answers null, and rendering it as $0.0000 would make a missing price table read
+  // as a free run -- the distinction `CostView.usd` is declared to keep.
+  return typeof cost.usd === "number"
+    ? `$${cost.usd.toFixed(4)} over ${priced} priced ${priced === 1 ? "stage" : "stages"}`
+    : `${priced} stages recorded, none priced`;
+}
+
+/** A closed section that still states what is inside it. */
+function Fold({
+  summary,
+  count,
+  note,
+  children,
+}: {
+  summary: string;
+  count: number;
+  note?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <details style={{ borderTop: "1px solid var(--border)", padding: "var(--gap-4) 0" }}>
+      <summary
         style={{
-          margin: `0 0 var(--gap-4)`,
+          cursor: "pointer",
           fontFamily: "var(--mono)",
-          fontSize: "var(--step-caption)",
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
-          color: stream.phase === "dropped" ? "var(--refused)" : "var(--accent)",
+          fontSize: "var(--step-small)",
+          display: "flex",
+          gap: "var(--gap-3)",
+          flexWrap: "wrap",
         }}
       >
-        {stream.phase === "connecting" ? "Watching for updates" : null}
-        {stream.phase === "live"
-          ? stream.lastHeard
-            ? `Watching · last update ${ago(stream.lastHeard, now)}`
-            : "Watching · nothing yet"
-          : null}
-        {stream.phase === "dropped" ? "Not receiving updates" : null}
-      </p>
-
-      {stream.phase === "dropped" ? (
-        <p
-          className="prose"
-          style={{ margin: `0 0 var(--gap-4)`, fontSize: "var(--step-small)" }}
-        >
-          Updates are not coming through. The run is unaffected — it carries on
-          without this page, and everything above is still what it has done.{" "}
-          <button
-            type="button"
-            onClick={stream.reconnect}
-            style={{
-              background: "none",
-              border: 0,
-              padding: 0,
-              font: "inherit",
-              color: "var(--accent)",
-              textDecoration: "underline",
-              cursor: "pointer",
-            }}
-          >
-            Try again
-          </button>
-        </p>
-      ) : null}
-
-      {stream.events.length === 0 ? (
-        <p className="prose" style={{ fontSize: "var(--step-small)" }}>
-          Nothing has moved since this page opened. A stage takes tens of seconds,
-          and a gate waits until somebody decides.
-        </p>
-      ) : (
-        <ol
-          style={{
-            listStyle: "none",
-            margin: 0,
-            padding: 0,
-            maxHeight: "24rem",
-            overflowY: "auto",
-          }}
-          aria-live="polite"
-        >
-          {[...stream.events].reverse().map((frame) => (
-            <li
-              key={`${frame.cursor}-${frame.stage}-${frame.status}`}
-              style={{
-                borderBottom: "1px solid var(--border)",
-                padding: "var(--gap-2) 0",
-                fontSize: "var(--step-small)",
-              }}
-            >
-              <span style={{ fontFamily: "var(--mono)", color: "var(--accent)" }}>
-                {frame.stage}
-              </span>{" "}
-              <span style={{ fontFamily: "var(--mono)", color: "var(--text-muted)" }}>
-                {frame.status}
-              </span>
-              {frame.summary ? (
-                <span style={{ display: "block", color: "var(--text-muted)" }}>
-                  {frame.summary}
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
+        <span>{summary}</span>
+        <span style={{ color: "var(--text-muted)" }}>{note ?? count}</span>
+      </summary>
+      <div style={{ marginTop: "var(--gap-4)" }}>{children}</div>
+    </details>
   );
 }

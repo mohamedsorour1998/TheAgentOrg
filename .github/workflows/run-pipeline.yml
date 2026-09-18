@@ -629,10 +629,31 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      # AND NOW AWS, WHICH IS A SECOND REVERSAL OF THE SAME ORIGINAL REASONING.
+      #
+      # "Past gate3 there is no agent left to invoke" is still true; the credential
+      # is not for an agent. `_emit` calls `run_index.update_status` at EVERY stage,
+      # and that write needs a credential -- so the one job that records how a run
+      # ENDED could not record it. `record_run` swallows the failure and never
+      # raises, by design, which is why nothing said so for as long as it was wrong.
+      #
+      # MEASURED on run 35057681679: every job `success`, `promote` merged the pull
+      # request, and the index row still read `status: running` with `gate3` shown
+      # as waiting for a decision. Reported from the deployed app as *"when I
+      # approve gate3 nothing happened"* -- the approval had in fact done
+      # everything it claimed, and this job could not write it down.
+      #
+      # The workflow-level comment on `TENANCY_TABLE` already listed `promote` among
+      # "FOUR jobs that index or revise a run". It was right about the intent and the
+      # job had no way to act on it.
+      #
+      # THE GATES STAY CREDENTIAL-FREE. Their decisions reach the index through the
+      # next job, and `test_no_gate_job_can_reach_aws_or_run_an_agent` is the pin on
+      # that -- a pause needs no credentials. `promote` is not a gate.
+      id-token: write
     # THE GITHUB SEAM, WHICH THIS JOB DID NOT HAVE UNTIL IT STARTED MERGING.
     #
-    # No AWS credentials -- past gate3 there is no agent left to invoke, and that
-    # part of the original reasoning still holds. But `promote` now calls
+    # But `promote` now calls
     # `github_ops.merge_pr`, and `github_ops._use_local()` returns
     # `OFFLINE or not (GITHUB_TOKEN and GITHUB_REPO)`. Without these two it takes
     # the OFFLINE branch, and `merge_pr`'s offline path returns `local://<branch>`
@@ -656,6 +677,12 @@ jobs:
 
       - name: Install
         run: pip install -e "."
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: run-pipeline-promote-${{ github.run_id }}
 
       - uses: actions/download-artifact@v4
         with:

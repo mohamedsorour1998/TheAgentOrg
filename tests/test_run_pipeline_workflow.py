@@ -111,10 +111,29 @@ GATE_JOBS = ["gate1", "gate2", "gate3"]
 # exactly these names and no others.
 REJECTION_RECORDER_JOBS = ["gate1-rejected", "gate2-rejected", "gate3-rejected"]
 
-# The jobs that reach AWS, because they invoke an AgentCore runtime through
-# `agent_client.call_agent`. Everything else -- the three gates and promote --
-# does local file I/O only and must hold no credential at all.
+# The jobs that invoke an AgentCore runtime through `agent_client.call_agent`, and
+# therefore the jobs that must set REMOTE_AGENTS.
 AGENT_JOBS = ["plan", "develop", "sre"]
+
+# The jobs that assume the role, WHICH IS A LONGER LIST AND WAS NOT ALWAYS.
+#
+# **TWO FACTS, TWO CONSTANTS, AND THEY WERE ONE UNTIL 2026-09-18.** "Invokes an
+# agent" and "reaches AWS" were the same set, so one list served both -- and a
+# shared expected-value constant that stops being true of one of its two meanings
+# is a named hazard in this repository: `_PROMOTED_RUN_COMMENTS` was a real control
+# and a structural blind spot in the same line.
+#
+# `promote` reaches AWS and invokes NO agent. `run_stage._emit` calls
+# `run_index.update_status` at every stage, so the job that records how a run ENDED
+# needs a credential to record it -- and `record_run` swallows the failure and never
+# raises, by design, so nothing said the write was not happening. MEASURED on run
+# 35057681679: seven jobs green, the pull request merged, and the index row still
+# reading `status: running` with gate3 shown as awaiting a decision.
+#
+# THE THREE GATES ARE STILL EXCLUDED and that is a different decision, pinned
+# separately by `test_no_gate_job_can_reach_aws_or_run_an_agent`: a pause needs no
+# credentials, and their decisions reach the index through the next job.
+AWS_JOBS = [*AGENT_JOBS, "promote"]
 
 STATIC_KEY_INPUTS = ("aws-access-key-id", "aws-secret-access-key", "aws-session-token")
 KEY_ENV_NAMES = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN")
@@ -605,8 +624,8 @@ def test_the_jobs_holding_id_token_write_are_exactly_the_jobs_that_assume_a_role
         f"jobs with id-token: write are {sorted(with_token)}, jobs assuming a role "
         f"are {sorted(with_creds)}; these must match"
     )
-    assert with_token == set(AGENT_JOBS), (
-        f"the AWS-reaching jobs are {sorted(with_token)}, expected {sorted(AGENT_JOBS)}"
+    assert with_token == set(AWS_JOBS), (
+        f"the AWS-reaching jobs are {sorted(with_token)}, expected {sorted(AWS_JOBS)}"
     )
 
 

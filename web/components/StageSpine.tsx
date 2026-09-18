@@ -6,42 +6,46 @@
  * ==================================
  * The nine stages are a REAL sequence -- `plan gate1 develop review security
  * gate2 sre gate3 promote` -- so an ordered structural device encodes something
- * true rather than decorating. That is the test a numbered or sequential device
- * has to pass, and a horizontal stepper fails a different one: on a phone nine
- * steps either wrap into a meaningless grid or scroll out of sight, and the stage
- * a person is waiting on is the one thing that must never be off-screen.
+ * true rather than decorating.
  *
  * A GATE IS NOT A STAGE, AND THE MARK SAYS SO
  * ===========================================
  * Five of the nine are agents doing work; three are humans deciding; one merges.
- * A gate STOPS -- it holds the pipeline until a person clicks -- so it gets a
- * square, larger, drawn in the accent, while an agent stage gets a small dot.
- * Rendering all nine identically would make the three places a human is required
- * look like six places nobody is.
+ * A gate STOPS -- it holds the pipeline until a person clicks -- so it is drawn as
+ * a hollow RING, larger, while an agent stage gets a filled dot. Rendering all
+ * nine identically would make the three places a human is required look like six
+ * places nobody is. The GitHub App's logo is the same mark for the same reason.
  *
  * WHEN A RUN BLOCKS THE SPINE TERMINATES, and that is deliberate. `develop` exits
  * 3 and `gate2` never starts -- no `if:` expresses that, the dependency graph
  * does. So the rail below a block is drawn as ended rather than pending: the
  * stages after it are not "waiting", they will never run.
+ *
+ * ── IT IS ALSO THE PAGE'S NAVIGATION, AND THAT IS THE REDESIGN ───────────────
+ *
+ * Reported from the deployed app: *"the run page is super unorganized and messy
+ * ... make it smart and elegant and shorter"*. It was eight stacked sections, and
+ * the four largest -- what the agents produced, the security verdict, the
+ * decisions and the cost -- were all open at once, so the page was three screens
+ * of scrolling whose most important beat sat in the middle of it.
+ *
+ * A run IS a sequence of stages, each of which produced something. So the spine
+ * became the index: selecting a stage reveals what that stage produced, and
+ * exactly one is open. That is a structural device encoding something true rather
+ * than a tab strip bolted on -- the test this repository applies to any numbered
+ * or sequential ornament, passed rather than assumed.
+ *
+ * **HORIZONTAL NOW, WHICH REVERSES THE EARLIER ARGUMENT.** The vertical version
+ * said a horizontal stepper risks putting "the stage a person is waiting on" off
+ * screen. True, and now answered elsewhere: the gate awaiting a decision has its
+ * own card ABOVE this, so it is never the spine's job to keep it visible. The
+ * spine wraps rather than scrolling, so no stage can be hidden either way.
  */
 
+"use client";
+
+import { GATES, STAGE_ORDER } from "@/lib/ci-view";
 import type { Gate, Stage, StageView } from "@/lib/contract";
-
-/** The nine stages in order. `contract.ts`'s `Stage` union, sequenced. */
-export const STAGE_ORDER: readonly Stage[] = [
-  "plan",
-  "gate1",
-  "develop",
-  "review",
-  "security",
-  "gate2",
-  "sre",
-  "gate3",
-  "promote",
-];
-
-/** The three that hold for a human. Nothing else is a gate. */
-const GATES: ReadonlySet<string> = new Set<Gate>(["gate1", "gate2", "gate3"]);
 
 /** What each stage is, in the words a person would use. */
 const WHAT: Readonly<Record<Stage, string>> = {
@@ -49,7 +53,7 @@ const WHAT: Readonly<Record<Stage, string>> = {
   gate1: "A person approves the plan",
   develop: "Writes the change, then the scanners run",
   review: "A model reads the diff — advisory",
-  security: "Three scanners and five lines of Python — binding",
+  security: "Three scanners and a fixed rule — binding",
   gate2: "A person approves the change",
   sre: "Measures CI and adds advice",
   gate3: "A person approves the release",
@@ -60,7 +64,7 @@ const WHAT: Readonly<Record<Stage, string>> = {
  * How a stage is drawn. Derived from the job's status, not from its position:
  * position tells you what SHOULD have happened and the row tells you what did.
  */
-type Phase = "done" | "running" | "waiting" | "refused" | "pending" | "never";
+export type Phase = "done" | "running" | "waiting" | "refused" | "pending" | "never";
 
 function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
   if (!view) return runEnded ? "never" : "pending";
@@ -125,8 +129,8 @@ const PHASE_TEXT: Readonly<Record<Phase, string>> = {
   never: "var(--text-muted)",
 };
 
-/** The word beside a stage. `never` says why, rather than staying blank. */
-const PHASE_WORD: Readonly<Record<Phase, string>> = {
+/** The word for a phase, said in full. Used in the sentence, not on the mark. */
+export const PHASE_WORD: Readonly<Record<Phase, string>> = {
   done: "done",
   running: "running now",
   waiting: "waiting for a person",
@@ -135,21 +139,16 @@ const PHASE_WORD: Readonly<Record<Phase, string>> = {
   never: "did not run",
 };
 
-export function StageSpine({
-  stages,
-  runEnded,
-  awaitingGates,
-}: {
-  stages: StageView[];
-  runEnded: boolean;
-  awaitingGates: readonly Gate[];
-}) {
-  // Index by stage name. A reclaimed job can appear more than once, so the LAST
-  // row wins -- it is the most recent transition.
+/** Every stage's phase, in order, with a block ending the run for those after it. */
+export function phases(
+  stages: StageView[],
+  runEnded: boolean,
+): { stage: Stage; phase: Phase; view: StageView | undefined }[] {
   const byStage = new Map<string, StageView>();
+  // A reclaimed job can appear more than once, so the LAST row wins -- it is the
+  // most recent transition.
   for (const s of stages) byStage.set(s.stage, s);
 
-  // Where the run stopped, if it did. Everything after is `never`, not pending.
   const refusedAt = STAGE_ORDER.findIndex((name) => {
     const v = byStage.get(name);
     return (
@@ -158,139 +157,156 @@ export function StageSpine({
     );
   });
 
+  return STAGE_ORDER.map((stage, i) => {
+    const view = byStage.get(stage);
+    const stopped = refusedAt >= 0 && i > refusedAt;
+    return { stage, view, phase: stopped ? "never" : phaseOf(view, runEnded) };
+  });
+}
+
+/**
+ * ONE SENTENCE FOR THE WHOLE RUN, under the spine.
+ *
+ * **THIS REPLACED NINE TINY LABELS AND IS BETTER, NOT MERELY SHORTER.** Nine phase
+ * words across nine marks have to be set at `--step-caption` -- 11px, muted, below
+ * this product's floor for a screen share, and precisely the size the vertical
+ * spine refused to use for this exact word. Said once, at full size, it is legible
+ * and it can say something the labels could not: that nothing after a block ran.
+ */
+export function spineSentence(
+  rows: { stage: Stage; phase: Phase }[],
+  awaiting: readonly Gate[],
+  live: boolean,
+): string {
+  const open = rows.find((r) => awaiting.includes(r.stage as Gate));
+  if (open) return `Waiting for your decision at ${open.stage}.`;
+
+  const running = rows.find((r) => r.phase === "running");
+  if (running) return `${running.stage} is running now. ${WHAT[running.stage]}.`;
+
+  const stopped = rows.find((r) => r.phase === "refused");
+  if (stopped) {
+    return `Stopped at ${stopped.stage}. Nothing after it ran — the stages below are not waiting, they will never start.`;
+  }
+
+  const promoted = rows.find((r) => r.stage === "promote" && r.phase === "done");
+  if (promoted) return "Every stage finished and the change was merged.";
+
+  const done = rows.filter((r) => r.phase === "done").length;
+  // `live: false` MEANS THE PAGE IS SHOWING THE STORED RECORD, which may be behind
+  // -- see `RunDetail.live`. Saying "nothing is running" from a record that cannot
+  // see a running job would be a claim this page has already made wrongly once.
+  return live
+    ? `${done} of ${STAGE_ORDER.length} stages done. Nothing is running.`
+    : `${done} of ${STAGE_ORDER.length} stages recorded. This is the stored record, not a live reading.`;
+}
+
+export function StageSpine({
+  stages,
+  runEnded,
+  awaitingGates,
+  selected,
+  onSelect,
+}: {
+  stages: StageView[];
+  runEnded: boolean;
+  awaitingGates: readonly Gate[];
+  selected: Stage;
+  onSelect: (stage: Stage) => void;
+}) {
+  const rows = phases(stages, runEnded);
+
   return (
-    <ol
-      style={{
-        listStyle: "none",
-        margin: 0,
-        padding: 0,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      {STAGE_ORDER.map((name, i) => {
-        const view = byStage.get(name);
-        const stopped = refusedAt >= 0 && i > refusedAt;
-        const phase: Phase = stopped ? "never" : phaseOf(view, runEnded);
-        const isGate = GATES.has(name);
-        const open = isGate && awaitingGates.includes(name as Gate);
+    <ol className="spine">
+      {rows.map(({ stage, phase }, i) => {
+        const isGate = (GATES as readonly string[]).includes(stage);
+        const open = isGate && awaitingGates.includes(stage as Gate);
         const colour = PHASE_COLOUR[phase];
-        const last = i === STAGE_ORDER.length - 1;
+        const stopped = phase === "never";
 
         return (
-          <li
-            key={name}
-            style={{ display: "flex", gap: "var(--gap-4)", minHeight: "3.25rem" }}
-          >
-            {/* The rail: mark plus the line down to the next stage. */}
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                flexShrink: 0,
-                width: "1rem",
-              }}
-              aria-hidden="true"
+          <li key={stage} className="spine-step">
+            <button
+              type="button"
+              className="spine-btn"
+              aria-current={selected === stage}
+              onClick={() => onSelect(stage)}
+              // The accessible name carries what the mark says in colour, because
+              // colour is not available to every reader -- and the phase word is
+              // no longer rendered beside the mark for anyone.
+              aria-label={`${stage}: ${open ? "waiting for your decision" : PHASE_WORD[phase]}. ${WHAT[stage]}`}
+              title={WHAT[stage]}
             >
-              <span
-                style={{
-                  width: isGate ? "0.85rem" : "0.5rem",
-                  height: isGate ? "0.85rem" : "0.5rem",
-                  marginTop: "0.4rem",
-                  // A gate is a square, an agent stage a dot.
-                  borderRadius: isGate ? "2px" : "50%",
-                  border: `2px solid ${colour}`,
-                  // Filled once it has happened; hollow while it has not.
-                  background:
-                    phase === "done" || phase === "refused" ? colour : "transparent",
-                  // An open gate is the only thing on the page that moves.
-                  animation: open ? "pulse 1.8s ease-in-out infinite" : undefined,
-                }}
-              />
-              {last ? null : (
+              <span className="spine-rail" aria-hidden="true">
                 <span
+                  className="spine-line"
                   style={{
-                    flex: 1,
-                    width: "2px",
-                    marginTop: "0.25rem",
-                    background: stopped ? "var(--border)" : colour,
-                    // Below a block the rail is dashed: those stages will never
-                    // run, which is different from not having run yet.
-                    backgroundImage: stopped
-                      ? "repeating-linear-gradient(var(--border) 0 3px, transparent 3px 6px)"
-                      : undefined,
+                    background: i === 0 ? "transparent" : rail(rows[i - 1]?.phase ?? "pending", stopped),
                   }}
                 />
-              )}
-            </div>
-
-            <div style={{ paddingBottom: "var(--gap-4)", minWidth: 0 }}>
-              <p
-                style={{
-                  margin: 0,
-                  fontFamily: "var(--mono)",
-                  fontSize: "var(--step-body)",
-                  color: phase === "pending" || phase === "never" ? "var(--text-muted)" : "var(--text)",
-                }}
-              >
-                {name}
                 <span
                   style={{
-                    marginLeft: "var(--gap-3)",
-                    // --step-small, not --step-caption. 11px muted secondary
-                    // prose is below the floor for a screen share, and this word
-                    // is the only thing saying what happened to the stage.
-                    fontSize: "var(--step-small)",
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                    // PHASE_TEXT, never PHASE_COLOUR -- the latter holds border
-                    // tokens that measure 1.31:1 as text.
-                    color: PHASE_TEXT[phase],
+                    flexShrink: 0,
+                    width: isGate ? "0.95rem" : "0.6rem",
+                    height: isGate ? "0.95rem" : "0.6rem",
+                    borderRadius: "50%",
+                    border: `2px solid ${colour}`,
+                    // A GATE IS HOLLOW AND AN AGENT STAGE IS FILLED. A decision a
+                    // person makes is a different kind of thing from a step that
+                    // merely ran, and the ring is the product's own mark for it.
+                    background:
+                      !isGate && (phase === "done" || phase === "refused")
+                        ? colour
+                        : "transparent",
+                    // THE ONLY TWO THINGS THAT MOVE: a stage genuinely executing,
+                    // and a gate genuinely waiting on the person looking at it.
+                    borderTopColor: phase === "running" ? "transparent" : undefined,
+                    animation: open ? "pulse 1.8s ease-in-out infinite" : undefined,
                   }}
-                >
-                  {open ? "your decision" : PHASE_WORD[phase]}
-                </span>
-              </p>
-              <p
+                  className={phase === "running" ? "spine-spinner" : undefined}
+                />
+                <span
+                  className="spine-line"
+                  style={{
+                    background:
+                      i === rows.length - 1 ? "transparent" : rail(phase, rows[i + 1]?.phase === "never"),
+                  }}
+                />
+              </span>
+              <span
+                className="spine-name"
                 style={{
-                  margin: "var(--gap-1) 0 0",
-                  fontSize: "var(--step-small)",
-                  color: "var(--text-muted)",
+                  // PHASE_TEXT, never PHASE_COLOUR -- the latter holds border
+                  // tokens that measure 1.31:1 as text. And never a conditional
+                  // beside it either: a special case here is a SECOND place the
+                  // word's colour is decided, which is the drift the two tables
+                  // exist to stop. `refusals.test.ts` caught exactly that.
+                  color: PHASE_TEXT[phase],
+                  fontWeight: selected === stage ? 600 : 400,
                 }}
               >
-                {WHAT[name]}
-              </p>
-              {/* AT-LEAST-ONCE DELIVERY MADE VISIBLE. `reclaimed_from` is the
-                  only trace that a stage may have run twice; hiding it would
-                  leave a duplicate PR comment unexplained. */}
-              {view?.reclaimed_from ? (
-                <p
-                  style={{
-                    margin: "var(--gap-2) 0 0",
-                    fontSize: "var(--step-small)",
-                    color: "var(--refused)",
-                  }}
-                >
-                  Reclaimed from a worker that stopped responding, so this stage
-                  may have run twice.
-                </p>
-              ) : null}
-              {view && view.attempt > 1 ? (
-                <p
-                  style={{
-                    margin: "var(--gap-1) 0 0",
-                    fontSize: "var(--step-caption)",
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  Attempt {view.attempt}
-                </p>
-              ) : null}
-            </div>
+                {stage}
+              </span>
+            </button>
           </li>
         );
       })}
     </ol>
   );
+}
+
+/**
+ * The rail leaving a stage. Dashed past a block, because those stages will never
+ * run -- which is different from not having run yet, and is the distinction the
+ * whole spine exists to draw.
+ */
+function rail(phase: Phase, dead: boolean): string {
+  if (dead || phase === "never") {
+    return "repeating-linear-gradient(90deg, var(--border) 0 3px, transparent 3px 6px)";
+  }
+  // A stage not started yet gets the plain hairline rather than the mark's ring
+  // token: the rail is a connector, and `--border-strong` between two dim marks
+  // reads as a drawn relationship where there is not one yet.
+  if (phase === "pending") return "var(--border)";
+  return PHASE_COLOUR[phase];
 }

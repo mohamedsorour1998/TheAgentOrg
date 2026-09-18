@@ -295,6 +295,152 @@ export function resetDispatchTokenCache(): void {
 }
 
 /**
+ * The same read for several runs at once, for the list screen.
+ *
+ * **CAPPED, AND THE CAP IS STATED RATHER THAN HIDDEN.** Each run costs two GitHub
+ * calls, so an unbounded list would make one page load a burst against the API and
+ * turn a rate limit into a screen that fails to load. Past the cap a run keeps its
+ * STORED status, which is the honest degradation: `running` on a finished run is
+ * stale, and a fabricated ending would be wrong.
+ *
+ * Reconciling only the newest few is not arbitrary — rows arrive newest first, and
+ * a run old enough to be past the cap is one nobody is watching.
+ */
+const RECONCILE_AT_MOST = 8;
+
+export async function listProgress(ciRunIds: string[]): Promise<Record<string, CiProgress>> {
+  const wanted = ciRunIds.filter(Boolean).slice(0, RECONCILE_AT_MOST);
+  const answers = await Promise.all(wanted.map((id) => runProgress(id)));
+  const out: Record<string, CiProgress> = {};
+  wanted.forEach((id, i) => {
+    const progress = answers[i];
+    // An unreachable run is ABSENT from the map, not present-and-empty: the
+    // reconciler reads a missing entry as "GitHub could not be asked" and leaves
+    // the stored status alone, where an empty `jobs` record would read as a run
+    // whose every job is missing and resolve to `failed`.
+    if (progress) out[id] = progress;
+  });
+  return out;
+}
+
+/** What GitHub says about one job of a pipeline run. Its own words, unmapped. */
+export type CiJob = {
+  /** `queued` · `waiting` (held by an Environment) · `in_progress` · `completed`. */
+  status: string;
+  /** `success` · `failure` · `skipped` · `cancelled`, and `""` until it completes. */
+  conclusion: string;
+};
+
+/** GitHub's own view of a run: what is moving, and what waits for a person. */
+export type CiProgress = {
+  status: string;
+  conclusion: string;
+  jobs: Record<string, CiJob>;
+  /** Environment names with a deployment waiting for a reviewer, right now. */
+  awaiting: string[];
+};
+
+/**
+ * READ THE PIPELINE FROM GITHUB, because GitHub is what the pipeline IS.
+ *
+ * ── THE DEFECT THIS EXISTS TO CLOSE ──────────────────────────────────────────
+ *
+ * **A GATE JOB HAS NO AWS CREDENTIALS, SO A GATE DECISION CANNOT REACH THE INDEX
+ * WHEN IT IS MADE.** `run_stage._emit` calls `run_index.update_status` at every
+ * stage, and that write needs a credential the gate jobs deliberately do not hold
+ * (`test_no_gate_job_can_reach_aws_or_run_an_agent` pins it: "a pause needs no
+ * credentials"). `record_run` swallows the failure and never raises — correct, an
+ * index is not the run's record — so the decision lands in the index only when the
+ * NEXT credentialled job rewrites the whole state document.
+ *
+ * MEASURED on run 35057681679, every job `success` and the run `completed`:
+ *
+ *     stored index row     status running, decisions [gate1, gate2]
+ *     GitHub               gate3 success, promote success, run completed
+ *
+ * | decision | recorded by | reaches the index via | lag      |
+ * |----------|-------------|-----------------------|----------|
+ * | gate1    | `gate1`     | `develop`             | seconds  |
+ * | gate2    | `gate2`     | `sre`                 | ~2 min   |
+ * | gate3    | `gate3`     | `promote` — no AWS    | NEVER    |
+ *
+ * Both symptoms reported from the deployed app are that one table: *"when I
+ * approve gate 2 it works but it takes 2 min"* is the middle row, and *"when I
+ * approve gate3 nothing happened"* is the last. **Neither approval failed.** The
+ * screen was reading a record that had not been told.
+ *
+ * ── WHY THE FIX IS A READ AND NOT A RETRY ────────────────────────────────────
+ *
+ * The index is a DERIVED copy; the Environment and the jobs are the thing itself.
+ * A gate is released by `POST .../pending_deployments` and by nothing else, so the
+ * question "is this run waiting on a person" has exactly one authority. Deriving
+ * the screen from the copy and the decision from the original is what let a button
+ * appear for a gate the server then refused — recorded in `runDetail`, and this is
+ * the same mistake from the other end.
+ *
+ * **NULL ON ANY FAILURE, NEVER A THROW.** A GitHub outage must leave the run
+ * readable: the stored document is still a true record of everything the run did,
+ * and losing the whole screen because the live overlay is unavailable would be
+ * worse than showing it without the overlay. The caller falls back to the document
+ * and the page says which it is showing.
+ */
+export async function runProgress(ciRunId: string): Promise<CiProgress | null> {
+  if (!/^[0-9]{1,20}$/.test(ciRunId)) return null;
+  try {
+    const token = await dispatchToken();
+    const head = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "theagentorg-web",
+    };
+    const at = `https://api.github.com/repos/${PIPELINE_REPO}/actions/runs/${ciRunId}`;
+
+    // TWO CALLS FOR AN ENDED RUN, THREE FOR A LIVE ONE. `pending_deployments` is
+    // only asked when something could still be waiting — a completed run has no
+    // pending deployment by definition, and this page polls every five seconds.
+    const [runRes, jobsRes] = await Promise.all([
+      fetch(at, { headers: head, cache: "no-store" }),
+      fetch(`${at}/jobs?per_page=50`, { headers: head, cache: "no-store" }),
+    ]);
+    if (!runRes.ok || !jobsRes.ok) return null;
+
+    const run = (await runRes.json()) as { status?: string; conclusion?: string | null };
+    const { jobs = [] } = (await jobsRes.json()) as {
+      jobs?: { name?: string; status?: string; conclusion?: string | null }[];
+    };
+
+    const byName: Record<string, CiJob> = {};
+    for (const job of jobs) {
+      if (!job.name) continue;
+      byName[job.name] = {
+        status: String(job.status ?? ""),
+        conclusion: String(job.conclusion ?? ""),
+      };
+    }
+
+    const status = String(run.status ?? "");
+    let awaiting: string[] = [];
+    if (status !== "completed") {
+      const pending = await fetch(`${at}/pending_deployments`, {
+        headers: head,
+        cache: "no-store",
+      });
+      if (pending.ok) {
+        const waiting = (await pending.json()) as { environment?: { name?: string } }[];
+        awaiting = waiting.map((w) => String(w.environment?.name ?? "")).filter(Boolean);
+      }
+    }
+
+    return { status, conclusion: String(run.conclusion ?? ""), jobs: byName, awaiting };
+  } catch {
+    // Deliberately blind, and deliberately silent about which failure it was: the
+    // caller's only decision is overlay-or-document, and three causes (no token, a
+    // 404, a network fault) all answer it the same way.
+    return null;
+  }
+}
+
+/**
  * Release a GitHub Environment gate, which is what a gate on this pipeline IS.
  *
  * **THE APPROVAL BUTTON WROTE TO THE WRONG PLACE.** `web/lib/reader/approve.py` calls
