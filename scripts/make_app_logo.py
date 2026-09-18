@@ -61,8 +61,13 @@ SCALE = 4  # supersample; see the module docstring
 # THE GEOMETRY, as fractions of the canvas so the numbers survive a size change.
 RING_RADIUS = 0.215  # outer radius of the gate
 RING_STROKE = 0.062  # thick enough to read at 20px
-LINE_WIDTH = 0.034
-LINE_INSET = 0.135  # where the pipeline enters and leaves the frame
+LINE_WIDTH = 0.046
+# RUNS TO THE EDGE. The first version inset the line by 0.135, which left two
+# 76px stubs that read as DASHES beside a ring rather than as a pipeline the ring
+# interrupts -- and at 20px they disappear entirely, leaving a bare circle that
+# says nothing about what this product does. A line crossing the whole frame is
+# read as continuous even where a circular mask clips its ends.
+LINE_INSET = 0.0
 GAP = 0.052  # clear space between the line and the ring
 
 
