@@ -60,6 +60,19 @@ const NUM = {
 const COUNT = new Intl.NumberFormat("en-US");
 
 /** One run's cost, rendered from a record the caller already holds. */
+/**
+ * A model id as a person would say it: `us.amazon.nova-2-lite-v1:0` -> `Nova 2 Lite`.
+ *
+ * Unrecognised ids are returned unchanged -- guessing a pretty name for a model this
+ * table has never seen would print something no AWS console agrees with.
+ */
+function modelLabel(id: string): string {
+  const match = /^(?:[a-z]{2}\.)?amazon\.nova-(\d+)-(\w+)-v/.exec(id);
+  if (!match) return id;
+  const [, generation, size] = match;
+  return `Nova ${generation} ${size!.charAt(0).toUpperCase()}${size!.slice(1)}`;
+}
+
 export function CostPanel({ cost }: { cost: CostView }) {
   const recorded = costIsRecorded(cost.stages_priced);
 
@@ -213,7 +226,11 @@ function StageTable({ stages }: { stages: CostView["stages"] }) {
         </caption>
         <thead>
           <tr>
-            <th scope="col">Stage</th>
+            {/* THE HEADER FOLLOWS THE DATA. A run whose calls were never
+                attributed gets a column of call NUMBERS, which are true and claim
+                nothing -- rather than one label repeated down every row, which is
+                what `plan · plan · plan` was and reads even more like data. */}
+            <th scope="col">{attributed ? "Stage" : "Call"}</th>
             <th scope="col">Model</th>
             <th scope="col" style={NUM}>
               Input
@@ -238,14 +255,14 @@ function StageTable({ stages }: { stages: CostView["stages"] }) {
                   Runs recorded since carry a real stage. Older ones cannot be
                   fixed, so they are DETECTED: one distinct stage across several
                   rows is the pre-fix shape, and it is named instead of repeated. */}
-              <td className="ident">
-                {attributed ? (
-                  row.stage
-                ) : (
-                  <span style={{ color: "var(--text-muted)" }}>not attributed</span>
-                )}
+              <td className="ident">{attributed ? row.stage : i + 1}</td>
+              {/* NAMED AS A PERSON WOULD, with the exact id one hover away. The
+                  `us.` prefix is what makes it a cross-region inference profile
+                  rather than a foundation model -- a distinction that cost this
+                  project a week -- so it is kept, not discarded. */}
+              <td className="ident" title={row.model}>
+                {modelLabel(row.model)}
               </td>
-              <td className="ident">{row.model}</td>
               <td style={NUM}>{COUNT.format(row.input_tokens)}</td>
               <td style={NUM}>{COUNT.format(row.output_tokens)}</td>
               {/* `cached_reported: false` means the provider said NOTHING about

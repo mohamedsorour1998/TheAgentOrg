@@ -132,6 +132,20 @@ export interface RunSummary {
   /** The gate this run is paused at, or `""` if it is not paused. */
   awaiting_gate: Gate | "";
   /**
+   * Whether this run is linked to a GitHub Actions run.
+   *
+   * **A GATE ON AN UNLINKED RUN CANNOT BE DECIDED FROM HERE**, and that is not a
+   * shade of "waiting": a gate IS a GitHub Environment, released by
+   * `pending_deployments` and by nothing else, so `approveRun` refuses a run with
+   * no `ci_run_id`. A list counting such a run under "waiting for a decision" asks
+   * somebody for a decision they cannot make, and lifts it above the runs that
+   * genuinely need one.
+   *
+   * `false` on rows written before `ci_run_id` was recorded, and on any run whose
+   * dispatch never produced an Actions run.
+   */
+  ci_linked: boolean;
+  /**
    * `owner/name` of the repository this run acted on, or `""` when it cannot be
    * known yet.
    *

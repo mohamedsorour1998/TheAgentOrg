@@ -49,9 +49,41 @@ import {
 import type { RunSummary } from "@/lib/contract";
 import type { RunListResponse } from "@/lib/endpoints";
 
-/** Waiting for a human right now. `""` means the run is not paused. */
+/**
+ * The event `StartRun` fires when a dispatch is accepted. One spelling, exported,
+ * so the two components cannot disagree about the name -- a listener on a string
+ * nobody emits is silent, which is the failure this whole mechanism exists to fix.
+ */
+export const RUN_STARTED = "agentorg:run-started";
+
+/** A run whose status can no longer change, so there is nothing to poll for. */
+const ENDED = new Set(["blocked", "rejected", "promoted", "failed"]);
+
+/**
+ * How long to keep polling after a run is started, before anything is live.
+ *
+ * THREE MINUTES, because the run does not exist yet: `workflow_dispatch` answers
+ * 204 with no body and the id is minted by the `plan` job, so the row appears only
+ * once `run_index.record_run` writes it -- about a minute on a good day, and the
+ * queue can make it longer.
+ */
+const START_POLL_MS = 3 * 60 * 1000;
+
+/**
+ * Waiting for a human WHO CAN ACT. `""` means the run is not paused.
+ *
+ * **`ci_linked` IS PART OF THE QUESTION, NOT A DETAIL.** A run with no Actions run
+ * has no Environment for this application to release, so `approveRun` refuses it --
+ * counting it under "waiting for a decision" asks somebody for a decision they
+ * cannot make, and lifts it above the runs that genuinely need one. Reported from
+ * the deployed app, where a stalled row from two days earlier sat at the top of the
+ * list and held the counter at 1.
+ *
+ * The row still SAYS it is paused; it is the count and the ordering that change.
+ * Hiding the pause would be the opposite error.
+ */
 function isAwaiting(run: RunSummary): boolean {
-  return run.awaiting_gate !== "";
+  return run.awaiting_gate !== "" && run.ci_linked;
 }
 
 /**
@@ -99,6 +131,56 @@ export function RunList() {
     setAttempt((n) => n + 1);
   }, []);
 
+  /**
+   * THE LIST DID NOT MOVE ON ITS OWN, AND STARTING A RUN LOOKED LIKE NOTHING.
+   *
+   * Reported from the deployed app: *"I started new run but nothing happened ...
+   * then I refreshed to see it. This is not right, I should see it without
+   * refreshing"*. Two separate causes, and both are here:
+   *
+   *   1. `StartRun` accepts an `onStarted` callback and `app/(routes)/runs/page.tsx`
+   *      NEVER PASSED ONE. The two are siblings under a server component, so there
+   *      was no shared state to reload through -- a prop that exists, is optional,
+   *      and is wired by nobody. This repository's second named pattern, in a
+   *      callback: correct code reached by nothing.
+   *   2. Nothing polled. A run takes about a minute to appear at all, because the
+   *      `plan` job has to start and write the index row before it exists.
+   *
+   * **THE SIGNAL IS A DOM EVENT, NOT LIFTED STATE.** Lifting would mean making the
+   * runs page a client component, shipping its static explanation as JavaScript for
+   * the sake of one callback. `StartRun` announces on `window` and this listens --
+   * the two stay independent, and a page that renders only one of them still works.
+   */
+  // A DEADLINE, NOT A TIMESTAMP TO COMPARE DURING RENDER. `Date.now()` in a render
+  // body is impure and `react-hooks/purity` refuses it -- correctly, since it makes
+  // the same props render differently. It is computed in the EVENT and read in the
+  // timer, both of which are allowed to see a clock.
+  const [pollUntil, setPollUntil] = useState(0);
+  useEffect(() => {
+    const onStarted = () => setPollUntil(Date.now() + START_POLL_MS);
+    window.addEventListener(RUN_STARTED, onStarted);
+    return () => window.removeEventListener(RUN_STARTED, onStarted);
+  }, []);
+
+  const runs = result?.ok ? result.value.runs : [];
+  // A run that can still change. `promoted`/`blocked`/`rejected`/`failed` cannot.
+  const anyLive = runs.some((r) => !ENDED.has(r.status));
+
+  useEffect(() => {
+    if (!anyLive && pollUntil === 0) return;
+    const id = setInterval(() => {
+      // STOPS WHEN THE TAB IS HIDDEN. A list left open overnight is otherwise
+      // thousands of billed reads of a table nobody is looking at.
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      // AND STOPS once the window after a start has passed with nothing live. A run
+      // that never appears means the dispatch failed, and polling for ever would
+      // hide that behind a list that looks merely slow.
+      if (!anyLive && Date.now() > pollUntil) return;
+      setAttempt((n) => n + 1);
+    }, 5000);
+    return () => clearInterval(id);
+  }, [anyLive, pollUntil]);
+
   if (result === null) return <Skeleton label="Loading runs" rows={5} />;
 
   if (!result.ok) {
@@ -120,8 +202,6 @@ export function RunList() {
       </div>
     );
   }
-
-  const runs = result.value.runs;
 
   if (runs.length === 0) {
     return (
@@ -231,6 +311,22 @@ export function RunList() {
                   {run.awaiting_gate === "" ? (
                     <span style={{ color: "var(--text-muted)" }}>
                       Not paused
+                    </span>
+                  ) : !run.ci_linked ? (
+                    // PAUSED, AND NOBODY HERE CAN RELEASE IT. Muted rather than
+                    // accent: the accent is reserved for things a person acts on,
+                    // and offering this one as actionable is how a stalled run
+                    // reads as work waiting for you.
+                    <span style={{ color: "var(--text-muted)" }}>
+                      Paused at {run.awaiting_gate}
+                      <span
+                        style={{
+                          display: "block",
+                          fontSize: "var(--step-caption)",
+                        }}
+                      >
+                        not linked to Actions
+                      </span>
                     </span>
                   ) : (
                     <span style={{ color: "var(--accent)" }}>

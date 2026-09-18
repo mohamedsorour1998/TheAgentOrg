@@ -319,6 +319,25 @@ export default function CostsPage() {
  * order of magnitude apart — $0.33 against $2.75 per million — so one summed token
  * count hides what the money went on.
  */
+/**
+ * A model id as a person would say it: `us.amazon.nova-2-lite-v1:0` -> `Nova 2 Lite`.
+ *
+ * **THE FULL ID IS KEPT IN `title`, NEVER DISCARDED.** It is the exact string
+ * `config.BEDROCK_MODEL` names, and CLAUDE.md records that the `us.` prefix is what
+ * makes it a cross-region INFERENCE PROFILE rather than a foundation model -- a
+ * distinction that cost this project a week of every agent silently serving
+ * fixtures. So it stays one hover away, and only the display is shortened.
+ *
+ * UNRECOGNISED IDS ARE RETURNED AS THEY ARE. Guessing a pretty name for a model
+ * this table has never seen would print something no AWS console agrees with.
+ */
+function modelLabel(id: string): string {
+  const match = /^(?:[a-z]{2}\.)?amazon\.nova-(\d+)-(\w+)-v/.exec(id);
+  if (!match) return id;
+  const [, generation, size] = match;
+  return `Nova ${generation} ${size!.charAt(0).toUpperCase()}${size!.slice(1)}`;
+}
+
 function CallBreakdown({ cost }: { cost: CostView }) {
   const input = cost.stages.reduce((n, row) => n + row.input_tokens, 0);
   const output = cost.stages.reduce((n, row) => n + row.output_tokens, 0);
@@ -339,23 +358,33 @@ function CallBreakdown({ cost }: { cost: CostView }) {
       }}
     >
       <p style={{ margin: 0, fontSize: "var(--step-small)", color: "var(--text-muted)" }}>
-        <span className="ident">{cost.stages[0]?.model ?? "unknown model"}</span>
+        {/* THE MODEL, NAMED AS A PERSON WOULD. The full id is one hover away. */}
+        <span className="ident" title={cost.stages[0]?.model ?? ""}>
+          {cost.stages[0]?.model ? modelLabel(cost.stages[0].model) : "unknown model"}
+        </span>
         {" · "}
-        {input.toLocaleString()} in
+        {input.toLocaleString()} tokens in
         {" · "}
         {output.toLocaleString()} out
         {" · "}
         {/* THE CACHE LINE IS IN WORDS. Nobody reads "0.0%" as an alarm, and this
             is the largest silent cost in the design: every agent re-sends the same
             repository snapshot at four times the cached rate. */}
-        {cost.cache_hit_rate === null ? "no caching measured" : `${(cost.cache_hit_rate * 100).toFixed(1)}% cached`}
+        {cost.cache_hit_rate === null
+          ? "nothing cached"
+          : `${(cost.cache_hit_rate * 100).toFixed(1)}% cached`}
       </p>
 
       <div className="table-scroll">
         <table className="data">
           <thead>
             <tr>
-              <th scope="col">Stage</th>
+              {/* THE HEADER CHANGES WITH THE DATA, which is the honest way to show a
+                  run whose calls were never attributed: the column becomes what it
+                  can actually say. Repeating "not attributed" down three rows is the
+                  same noise as repeating `plan` down three rows -- the defect this
+                  replaced. A call's POSITION is true and claims nothing. */}
+              <th scope="col">{attributed ? "Stage" : "Call"}</th>
               <th scope="col">Input</th>
               <th scope="col">Output</th>
               <th scope="col">Cached</th>
@@ -365,19 +394,26 @@ function CallBreakdown({ cost }: { cost: CostView }) {
             {cost.stages.map((row, index) => (
               <tr key={index}>
                 <td className="ident">
-                  {attributed ? (
-                    row.stage
-                  ) : (
-                    <span style={{ color: "var(--text-muted)" }}>not attributed</span>
-                  )}
+                  {attributed ? row.stage : index + 1}
                 </td>
                 <td className="ident">{row.input_tokens.toLocaleString()}</td>
                 <td className="ident">{row.output_tokens.toLocaleString()}</td>
                 {/* `cached_reported` FALSE AND ZERO TOKENS ARE DIFFERENT FACTS: the
                     provider said nothing, versus it measured zero. Both render as a
                     rate of 0.0% and want different fixes. */}
-                <td style={{ color: "var(--text-muted)" }}>
-                  {row.cached_reported ? row.cached_tokens.toLocaleString() : "not reported"}
+                {/* `cached_reported` FALSE AND A REAL ZERO ARE DIFFERENT FACTS --
+                    the provider said nothing, versus it measured zero -- and both
+                    render as 0.0%. The dash keeps them apart without spelling a
+                    sentence in every row; the title says which. */}
+                <td
+                  style={{ color: "var(--text-muted)" }}
+                  title={
+                    row.cached_reported
+                      ? "the provider reported this many cached tokens"
+                      : "the provider reported no cache field at all"
+                  }
+                >
+                  {row.cached_reported ? row.cached_tokens.toLocaleString() : "—"}
                 </td>
               </tr>
             ))}

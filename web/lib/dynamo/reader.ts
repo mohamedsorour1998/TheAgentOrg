@@ -166,6 +166,10 @@ function summarise(row: Row, progress: CiProgress | null = null) {
     // waiting in the list and not waiting when it is opened.
     awaiting_gate: (progress ? gatesAwaiting(progress) : awaitingGates(state, status))[0] ?? "",
     repository: repositoryOf(row, state),
+    // WHETHER A GATE ON THIS RUN CAN BE OPENED AT ALL. See `RunSummary.ci_linked`:
+    // with no Actions run there is no Environment to release, so "waiting" and
+    // "decidable" are different facts and the list must not merge them.
+    ci_linked: Boolean(typeof row.ci_run_id === "string" && row.ci_run_id),
   };
 }
 

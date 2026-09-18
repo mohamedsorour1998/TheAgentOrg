@@ -47,6 +47,8 @@
 
 import { useCallback, useState } from "react";
 
+import { RUN_STARTED } from "@/components/RunList";
+
 type Answer = { error?: string; detail?: string; issue?: string };
 
 export function StartRun({ onStarted }: { onStarted?: () => void }) {
@@ -118,6 +120,12 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
       setTitle("");
       setDetail("");
       onStarted?.();
+      // ANNOUNCED ON `window`, because `onStarted` is optional and the runs page
+      // never passed one -- the list and this form are siblings under a server
+      // component, so there was no shared state to reload through. `RunList`
+      // listens and starts polling; a page rendering only one of the two is
+      // unaffected. See `RunList`'s note for why this is not lifted state.
+      window.dispatchEvent(new Event(RUN_STARTED));
     },
     [title, detail, poisoned, repository, onStarted],
   );
