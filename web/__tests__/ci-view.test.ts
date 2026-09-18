@@ -39,18 +39,36 @@ const ALL_GREEN: CiProgress = {
   awaiting: [],
 };
 
-/** Held at gate2: `develop` done, the gate `waiting`, everything after queued. */
+/**
+ * Held at a gate: the gate `waiting`, and EVERYTHING AFTER IT SIMPLY ABSENT.
+ *
+ * **THE ABSENCE IS TRANSCRIBED, NOT ASSUMED — I had written `queued` and was
+ * wrong.** Read live off run 35354213738 while it was held at gate1, GitHub listed
+ * exactly two jobs:
+ *
+ *     run              status "waiting"   conclusion null
+ *     plan             completed          success
+ *     gate1            waiting            (null)
+ *     pending_deployments -> environment "gate1", current_user_can_approve true
+ *
+ * A job GitHub has not created yet is not in the response at all. Both shapes end
+ * up omitted from the spine, so the code was right either way — but a fixture that
+ * disagrees with the API is a test asserting over a world that does not exist, and
+ * the next person reading it would take `queued` for the documented behaviour.
+ *
+ * Note the RUN's own status is `waiting` too, not `in_progress`. `reconcileStatus`
+ * treats anything that is not `completed` as running, which is why that distinction
+ * costs nothing here — and it is the reason the check is written against
+ * `completed` rather than against a list of in-flight spellings.
+ */
 const AT_GATE2: CiProgress = {
-  status: "in_progress",
+  status: "waiting",
   conclusion: "",
   jobs: {
     plan: { status: "completed", conclusion: "success" },
     gate1: { status: "completed", conclusion: "success" },
     develop: { status: "completed", conclusion: "success" },
     gate2: { status: "waiting", conclusion: "" },
-    sre: { status: "queued", conclusion: "" },
-    gate3: { status: "queued", conclusion: "" },
-    promote: { status: "queued", conclusion: "" },
   },
   awaiting: ["gate2"],
 };
@@ -98,10 +116,23 @@ describe("a run held at a gate", () => {
 
   it("is still running, and the stages after the gate have not started", () => {
     expect(reconcileStatus("running", AT_GATE2, PRODUCED)).toBe("running");
-    // OMITTED, NOT `ready`. A queued job is a stage the run has not reached, and
-    // inventing a row for it means inventing the attempt and exit code it carries.
+    // OMITTED, NOT `ready`. Inventing a row for an unreached stage means inventing
+    // the attempt and exit code it carries -- and those are QUEUE facts an Actions
+    // run does not have.
     expect(phaseOf(AT_GATE2, PRODUCED, "sre")).toBeNull();
     expect(phaseOf(AT_GATE2, PRODUCED, "promote")).toBeNull();
+  });
+
+  it("treats a job GitHub HAS created but not started the same way", () => {
+    // Both shapes occur: absent before GitHub creates the job, `queued` in the
+    // window between creation and start. Neither is a stage that has run, and a
+    // spine that drew them differently would be reporting an API detail as though
+    // it were something about the pipeline.
+    const queued: CiProgress = {
+      ...AT_GATE2,
+      jobs: { ...AT_GATE2.jobs, sre: { status: "queued", conclusion: "" } },
+    };
+    expect(phaseOf(queued, PRODUCED, "sre")).toBeNull();
   });
 
   it("shows a stage in flight as running, which is what the spinner reads", () => {
