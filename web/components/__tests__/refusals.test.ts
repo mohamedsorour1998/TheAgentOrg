@@ -188,8 +188,13 @@ describe("every screen", () => {
     ["components", "StageSpine.tsx"],
     ["components", "AccountPanel.tsx"],
     ["components", "RepositoryPicker.tsx"],
-    ["components", "SignInPanel.tsx"],
     ["components", "primitives.tsx"],
+    // THE AUTH SCREENS, added when they became real pages. `SignInPanel.tsx` was
+    // REMOVED from this list because the component was deleted: `/signin` is a
+    // page now and nothing imported the panel any more, which is this
+    // repository's second named pattern -- code reached by nothing.
+    ["app/(auth)/signin", "page.tsx"],
+    ["app/(auth)/signup", "page.tsx"],
   ];
 
   it("declares no colour of its own -- the palette lives in globals.css", () => {

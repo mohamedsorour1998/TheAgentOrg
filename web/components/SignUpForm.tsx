@@ -133,12 +133,12 @@ export function SignUpForm() {
   }
 
   return (
-    <div className="card" style={{ maxWidth: "var(--measure)" }}>
-      <p className="eyebrow">New here</p>
-      <p className="title" style={{ marginBottom: "var(--gap-4)" }}>
-        Create an account
-      </p>
-
+    // NO CARD AND NO HEADING OF ITS OWN. This form used to be a boxed panel
+    // captioned "New here / Create an account", because it sat at the bottom of
+    // the sign-in screen as a secondary offer. It now HAS a page -- `/signup` --
+    // which supplies the wordmark and the heading, so keeping them here would
+    // print "Create an account" twice and draw a box inside a box.
+    <div style={{ display: "grid", gap: 0 }}>
       {problem ? (
         <p
           className="prose"

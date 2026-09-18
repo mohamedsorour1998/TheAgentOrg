@@ -82,6 +82,11 @@ export const config = {
    * infinite loop.
    */
   matcher: [
-    "/((?!signin$|signin/|api/|_next/static/|_next/image/|favicon\\.ico$).*)",
+    // `signup` JOINED THE LIST when register became its own page. Without it a
+    // person with no account is redirected to `/signin` the instant they click
+    // "Create an account" -- the one screen they cannot use bouncing them off the
+    // one screen they need. Anchored like `signin`: `signup$|signup/`, never bare,
+    // or `/signupx` slips past as a prefix match.
+    "/((?!signin$|signin/|signup$|signup/|api/|_next/static/|_next/image/|favicon\\.ico$).*)",
   ],
 };

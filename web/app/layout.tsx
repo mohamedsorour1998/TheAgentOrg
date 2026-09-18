@@ -13,8 +13,6 @@
 
 import type { Metadata } from "next";
 
-import { Shell } from "@/components/Shell";
-
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -25,25 +23,34 @@ export const metadata: Metadata = {
 };
 
 /**
- * LANE J EXTENDS BELOW. Nothing structural above is changed -- the `lang`
- * attribute, the metadata and the stylesheet import are Lane I's and stay as
- * they are. The only addition is the shell around `children`, which is the
- * header, navigation and footer every screen shares.
+ * **THE SHELL MOVED OUT OF HERE, AND THAT WAS A REPORTED BUG.** This layout used
+ * to wrap every page in `<Shell>` — header, wordmark and the four-item nav — so
+ * `/signin` rendered with Runs · Repositories · Costs · Account across the top and
+ * read as another tab of a product the visitor had not entered yet. Reported as
+ * wanting "a real login page" rather than being dropped into the app chrome.
  *
- * `colorScheme: "dark"` is on the html element rather than in CSS because it
- * changes what the BROWSER draws, not what this app draws: scrollbars, the
- * caret, and the default styling of a form control before any rule applies. On
- * a dark surface without it a native `<select>` renders as a light rectangle,
- * and the browser's own scrollbar stays white down the side of the page.
+ * The reference deployment (`~/sorour/AgentsforHumansHackathon`) has the identical
+ * structure and never hit this, for one reason: its `/login` is a `redirect()` to
+ * the hosted UI, so the shell never renders. Ours is a page people actually look
+ * at, so the shell has to be scoped rather than global.
+ *
+ * Two groups now own their own chrome:
+ *
+ *     app/(routes)/layout.tsx   the dashboard — Shell, nav, sign out
+ *     app/(auth)/layout.tsx     sign in and register — no nav, nothing to leave to
+ *
+ * `colorScheme: "dark"` stays on the html element rather than in CSS because it
+ * changes what the BROWSER draws, not what this app draws: scrollbars, the caret,
+ * and the default styling of a form control before any rule applies. On a dark
+ * surface without it a native `<select>` renders as a light rectangle, and the
+ * browser's own scrollbar stays white down the side of the page.
  */
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" style={{ colorScheme: "dark" }}>
-      <body>
-        <Shell>{children}</Shell>
-      </body>
+      <body>{children}</body>
     </html>
   );
 }

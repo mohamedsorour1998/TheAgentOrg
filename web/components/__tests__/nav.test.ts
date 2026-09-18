@@ -20,6 +20,7 @@ import { describe, expect, it } from "vitest";
 import { NAV } from "@/components/nav";
 
 const ROUTES_DIR = join(process.cwd(), "app", "(routes)");
+const AUTH_DIR = join(process.cwd(), "app", "(auth)");
 
 /**
  * Route directories on disk. A directory counts only if it holds a `page.tsx` --
@@ -55,22 +56,35 @@ describe("navigation", () => {
 
   it("leaves no screen reachable only by typing its URL", () => {
     const navigable = new Set(NAV.map((item) => item.href.replace(/^\//, "")));
-    // `signin` is deliberately absent from the nav: a person who is signed in has
-    // no use for it, and a person who is not gets sent there. Every OTHER screen
-    // must be in the nav.
-    const exempt = new Set(["signin"]);
 
+    // **THERE IS NO EXEMPTION LIST ANY MORE, AND THAT IS THE IMPROVEMENT.** This
+    // used to carry `exempt = new Set(["signin"])`, because the sign-in screen
+    // lived in this group and deliberately had no nav entry. Auth now lives in
+    // `app/(auth)/`, which renders no nav at all -- so the rule became absolute:
+    // every screen in THIS group is in the nav, with nothing to except.
+    //
+    // An exemption removed by construction beats an exemption guarded by a test.
     for (const dir of routeDirectories()) {
-      if (exempt.has(dir)) continue;
       expect(navigable.has(dir), `app/(routes)/${dir}/ has a page but no nav entry`)
         .toBe(true);
     }
   });
 
-  it("keeps the signin exemption honest", () => {
-    // The exemption above is only defensible while that screen exists and is
-    // linked from somewhere else. If it is ever deleted, the exemption becomes a
-    // name for nothing and this test says so.
-    expect(existsSync(join(ROUTES_DIR, "signin", "page.tsx"))).toBe(true);
+  it("keeps the auth screens OUT of the navigated group", () => {
+    // What makes the absolute rule above true, asserted rather than assumed. If
+    // either screen is moved back under `(routes)` it gains the dashboard's
+    // header and nav -- which is the reported bug: `/signin` wearing Runs ·
+    // Repositories · Costs · Account, four links whose only outcome is a
+    // redirect back to the page you are already on.
+    for (const screen of ["signin", "signup"]) {
+      expect(
+        existsSync(join(AUTH_DIR, screen, "page.tsx")),
+        `app/(auth)/${screen}/page.tsx is missing`,
+      ).toBe(true);
+      expect(
+        existsSync(join(ROUTES_DIR, screen, "page.tsx")),
+        `app/(routes)/${screen}/ is back, so that screen renders the dashboard nav`,
+      ).toBe(false);
+    }
   });
 });
