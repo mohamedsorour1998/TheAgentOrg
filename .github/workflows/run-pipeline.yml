@@ -108,6 +108,33 @@
 
 name: run-pipeline
 
+# WHAT THIS RUN IS, IN THE ACTIONS LIST AND IN THE REST API.
+#
+# **OPENING AN ISSUE IS ITSELF A TRIGGER, SO THE APPLICATION'S "Start a run" MAKES
+# TWO RUNS.** It creates the issue (every stage comment needs somewhere to land),
+# the webhook fires on `issues`/`opened`, and the rule dispatches this workflow --
+# while the application dispatches it too, with the `poisoned` and `repo` the
+# webhook cannot know. `lib/dispatch.ts:cancelWebhookDuplicate` exists to cancel the
+# webhook's copy, and it had no way to tell them apart: `display_title` was
+# `run-pipeline` for both, and `GET /actions/runs` does not return a run's inputs.
+#
+# MEASURED on issue #61 -- two runs, three seconds apart, indistinguishable:
+#
+#     35363401644  created 15:35:57  title run-pipeline   <- trigger ui
+#     35363407186  created 15:36:00  title run-pipeline   <- trigger issue
+#
+# So it fell back to "cancel everything but the newest", and its own comment
+# asserted ours would be the newest. **OURS WAS THE OLDER ONE** -- a direct POST
+# beats a delivery through Lambda, EventBridge and an API destination -- so the
+# heuristic, when it did fire, would cancel the APPLICATION's run and keep the
+# webhook's, which hardcodes `poisoned: "false"` and sends no `repo`. A poisoned
+# demo would have run clean, with every job green.
+#
+# `run-name` puts the two inputs that distinguish them into `display_title`, which
+# the list API does return. The ticket is there too, because a list of thirty runs
+# all called `run-pipeline` is unreadable for a human as well as for a script.
+run-name: "#${{ inputs.ticket_id }} (${{ inputs.trigger }})"
+
 # Manual dispatch ONLY. A `push:` trigger here would invoke five runtimes and
 # open a pull request on somebody else's repository on every commit to this one.
 # The EventBridge target dispatches this same event through the REST API.

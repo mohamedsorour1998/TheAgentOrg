@@ -149,56 +149,85 @@ async function createIssue(title: string, body: string, repo: string): Promise<s
  * **OPENING AN ISSUE ALREADY STARTS A RUN**, and that is the architecture working:
  * the Lambda verifies the HMAC, EventBridge matches `issues`/`opened`, and the rule
  * dispatches this same workflow. So creating an issue here and then dispatching
- * produces TWO runs against one issue — which CLAUDE.md records happening during
- * rehearsal, leaving three plan comments on one issue and reading as a loop.
+ * produces TWO runs against one issue.
  *
- * **OURS IS THE NEWER ONE, WHICH IS WHAT MAKES THIS DETERMINISTIC.** The issue is
- * created first, the webhook fires within seconds, and our dispatch happens after —
- * so any `run-pipeline.yml` run created between the issue and our dispatch is the
- * auto-run. Nothing else distinguishes them: EventBridge dispatches through the same
- * REST API `gh workflow run` uses, so both report `event: workflow_dispatch`, which
- * is the whole reason `RunState.trigger` exists.
+ * ── THE FIRST VERSION GUESSED, AND IT GUESSED THE WRONG WAY ──────────────────
  *
- * BEST EFFORT, AND IT NEVER THROWS. A duplicate run is untidy; a sign-up-style
- * failure here would turn a started run into an error message for a run that IS
- * running. `cancel-in-progress` is false on the workflow's concurrency group, so the
- * duplicate would otherwise sit queued behind ours rather than racing it.
+ * It cancelled "everything but the newest", asserting that ours would be the newest
+ * because the issue is created first and our dispatch happens after. MEASURED on
+ * issue #61, which produced two runs three seconds apart:
+ *
+ *     35363401644  created 15:35:57  trigger ui      <- OURS, and the OLDER one
+ *     35363407186  created 15:36:00  trigger issue   <- the webhook's
+ *
+ * A direct POST beats a delivery through a Lambda, an event bus and an API
+ * destination. So the rule was inverted: when it fired at all it would cancel the
+ * APPLICATION's run and keep the webhook's — which hardcodes `poisoned: "false"`
+ * and sends no `repo`, so a poisoned demo would have run clean with every job green.
+ *
+ * On #61 it cancelled nothing instead, because it looked once, immediately, and the
+ * webhook's run did not exist yet. Both ran; the duplicate queued behind the first
+ * on the concurrency group and started an hour later, which is why two rows for one
+ * ticket appeared with timestamps an hour apart.
+ *
+ * ── WHAT IT DOES NOW ─────────────────────────────────────────────────────────
+ *
+ * `run-name` on the workflow puts the ticket and the trigger into `display_title`,
+ * which `GET /actions/runs` DOES return — a run's inputs are not in that response,
+ * which is why there was nothing to match on before. So this cancels the run titled
+ * `#<ticket> (issue)` and nothing else: not by age, not by position, by name.
+ *
+ * **IT WAITS, BECAUSE THE RUN IT IS LOOKING FOR DOES NOT EXIST YET.** One look
+ * immediately after dispatching is a look before the webhook has been delivered.
+ *
+ * BEST EFFORT, AND IT NEVER THROWS. A duplicate run is untidy; a failure here would
+ * turn a started run into an error message for a run that IS running. Anything it
+ * cannot cancel simply runs — `cancel-in-progress` is false on the concurrency
+ * group, so the duplicate queues behind ours rather than racing it.
  */
-async function cancelWebhookDuplicate(since: string, ours: string): Promise<void> {
+const DUPLICATE_ATTEMPTS = 6;
+const DUPLICATE_WAIT_MS = 4000;
+
+async function cancelWebhookDuplicate(ticketId: string): Promise<void> {
+  // EXACTLY WHAT THE WEBHOOK'S RUN IS CALLED. `modules/ingress`'s input transformer
+  // sends `"trigger": "issue"`; this application sends `"ui"`. `tests/
+  // test_trigger_provenance.py` asserts those two values DIFFER, because identical
+  // ones would make the field prove nothing — and this is the first thing that
+  // depends on the difference rather than merely recording it.
+  const target = `#${ticketId} (issue)`;
   try {
     const token = await dispatchToken();
-    const listed = await fetch(
-      `https://api.github.com/repos/${PIPELINE_REPO}/actions/workflows/${WORKFLOW}/runs?per_page=10`,
-      {
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "user-agent": "theagentorg-web",
-        },
-      },
-    );
-    if (!listed.ok) return;
-    const { workflow_runs: runs = [] } = (await listed.json()) as {
-      workflow_runs?: { id: number; created_at: string; status: string }[];
+    const head = {
+      authorization: `Bearer ${token}`,
+      accept: "application/vnd.github+json",
+      "user-agent": "theagentorg-web",
     };
-    const candidates = runs
-      .filter((r) => r.created_at >= since && r.status !== "completed")
-      .sort((a, b) => a.created_at.localeCompare(b.created_at));
-    // Everything but the newest: the newest is the dispatch this request made.
-    for (const run of candidates.slice(0, -1)) {
-      await fetch(`https://api.github.com/repos/${PIPELINE_REPO}/actions/runs/${run.id}/cancel`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          accept: "application/vnd.github+json",
-          "user-agent": "theagentorg-web",
-        },
-      });
+
+    for (let attempt = 0; attempt < DUPLICATE_ATTEMPTS; attempt += 1) {
+      const listed = await fetch(
+        `https://api.github.com/repos/${PIPELINE_REPO}/actions/workflows/${WORKFLOW}/runs?per_page=20`,
+        { headers: head, cache: "no-store" },
+      );
+      if (listed.ok) {
+        const { workflow_runs: runs = [] } = (await listed.json()) as {
+          workflow_runs?: { id: number; display_title?: string; status?: string }[];
+        };
+        const duplicate = runs.find(
+          (r) => r.display_title === target && r.status !== "completed",
+        );
+        if (duplicate) {
+          await fetch(
+            `https://api.github.com/repos/${PIPELINE_REPO}/actions/runs/${duplicate.id}/cancel`,
+            { method: "POST", headers: head },
+          );
+          return;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, DUPLICATE_WAIT_MS));
     }
   } catch {
     // Swallowed on purpose. See the docstring.
   }
-  void ours;
 }
 
 /** Everything the workflow refuses, checked here so the message is ours. */
@@ -237,7 +266,6 @@ export async function startRun(request: RunRequest): Promise<{ issue: string }> 
   // THE ISSUE FIRST, because its number is the ticket id and every stage comment
   // lands on it. Creating it here is what removed the "issue number" field the
   // operator rightly objected to.
-  const since = new Date(Date.now() - 5_000).toISOString();
   // THE ISSUE AND THE WORKFLOW MUST NAME THE SAME REPOSITORY. Resolved once, here,
   // and passed to both: the issue is where every stage comment lands, and the
   // workflow input is what the agents change. Two resolutions would let a run
@@ -305,7 +333,12 @@ export async function startRun(request: RunRequest): Promise<{ issue: string }> 
   }
 
   // The webhook fired its own run when the issue opened. See the docstring.
-  await cancelWebhookDuplicate(since, ticketId);
+  //
+  // **NOT AWAITED, AND THAT IS THE POINT OF THE WAIT INSIDE IT.** It polls for up to
+  // twenty seconds for a run that does not exist yet; blocking the response on that
+  // would make "Start a run" feel broken for the whole window. The caller has what
+  // it needs -- the issue number -- the moment the dispatch is accepted.
+  void cancelWebhookDuplicate(ticketId);
   return { issue: ticketId };
 }
 

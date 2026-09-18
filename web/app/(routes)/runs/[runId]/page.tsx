@@ -342,10 +342,25 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
         {selected === "promote" ? <PromoteStage run={run} phase={phase} /> : null}
       </section>
 
-      {/* ── THE RECORD ───────────────────────────────────────────────────────
-          Two things that belong to the whole run rather than to any one stage, so
-          they sit below the sequence and are closed by default. `<details>` and
-          not a tab: a reader who wants them is looking for them. */}
+      {/* ── THE WHOLE RUN ────────────────────────────────────────────────────
+          **THESE TWO ARE NOT PART OF THE STAGE ABOVE, AND THEY READ AS IF THEY
+          WERE.** Asked directly: *"why are these fixed at each stage"*. They sit
+          under the stage panel and do not change when the stage selection does, so
+          the only honest reading is that they belong to the whole run -- and
+          nothing said so. A heading costs one line and removes the question.
+
+          `<details>` and not a tab: a reader who wants them is looking for them,
+          and the summary states what is inside without opening it. */}
+      <h2
+        className="eyebrow"
+        style={{
+          marginTop: "var(--gap-12)",
+          marginBottom: 0,
+          paddingBottom: "var(--gap-2)",
+        }}
+      >
+        The whole run
+      </h2>
       <Fold summary="Every decision on this run" count={run.decisions.length}>
         <DecisionLog decisions={run.decisions} />
       </Fold>
@@ -395,10 +410,43 @@ function Facts({ run, live }: { run: RunDetail; live: boolean }) {
             ? `started ${run.trigger}`
             : "started unknown"}
     </span>,
-    // `""` MEANS NOBODY RECORDED IT, which is not the same as the agents having
-    // used a fixture -- the distinction `model_provenance` exists to keep.
-    <span key="model">
-      {run.model_provenance ? `agents: ${run.model_provenance}` : "agents: not recorded"}
+    /**
+     * WHERE THE AGENTS' ANSWERS CAME FROM, said in words rather than as the field's
+     * value.
+     *
+     * Asked directly: *"why do I have `agents: fixture` — what does this mean?"*.
+     * It meant the run rendered `model_provenance` raw, and `fixture` is an
+     * internal word for something a reader of this screen very much needs to
+     * understand: **the agents fell back to a canned answer and did not call the
+     * model at all.**
+     *
+     * THAT IS NOT A FAILURE AND IT IS NOT NOTHING. Every agent degrades to a
+     * fixture rather than erroring — deliberate, and the reason `scan_provenance`
+     * exists — so a fixture run is a working run whose output was not generated.
+     * This project spent about a week with every deployed agent silently serving
+     * fixtures while every job stayed green, so the word gets a colour and a
+     * sentence rather than being left to be inferred.
+     *
+     * **IT IS THE LAST STAGE'S ANSWER, NOT THE RUN'S.** `run_stage._emit` overwrites
+     * it per stage and a fixture overwrites a model, which is the honest direction:
+     * the field says "something in this run fell back", never "all of it did".
+     */
+    <span
+      key="model"
+      style={{ color: run.model_provenance === "fixture" ? "var(--refused)" : undefined }}
+      title={
+        run.model_provenance === "fixture"
+          ? "At least one stage fell back to a canned fixture instead of calling the model. The run is valid; its wording was not generated."
+          : run.model_provenance === "model"
+            ? "The agents called the model."
+            : "Nobody recorded where the answers came from."
+      }
+    >
+      {run.model_provenance === "fixture"
+        ? "a stage used a canned answer"
+        : run.model_provenance === "model"
+          ? "agents: the model"
+          : "agents: not recorded"}
     </span>,
   ];
   if (run.poisoned) {

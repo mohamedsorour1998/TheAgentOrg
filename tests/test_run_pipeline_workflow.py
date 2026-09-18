@@ -686,6 +686,57 @@ def test_remote_agents_is_true_for_every_job_that_calls_an_agent():
         )
 
 
+def test_the_run_name_is_what_the_web_app_matches_on_to_cancel_a_duplicate():
+    """A CROSS-FILE COUPLING BETWEEN THIS YAML AND TYPESCRIPT, pinned in one place.
+
+    **OPENING AN ISSUE IS ITSELF A TRIGGER**, so the application's "Start a run"
+    makes TWO runs: it creates the issue, the webhook dispatches this workflow, and
+    the application dispatches it too with the `poisoned` and `repo` the webhook
+    cannot know. `web/lib/dispatch.ts:cancelWebhookDuplicate` cancels the webhook's
+    copy -- and until `run-name` existed it had nothing to match on, because
+    `GET /actions/runs` does not return a run's inputs and `display_title` read
+    `run-pipeline` for both.
+
+    MEASURED on issue #61: two runs three seconds apart, indistinguishable, and the
+    fallback heuristic ("cancel all but the newest") was INVERTED -- ours was the
+    OLDER one, since a direct POST beats a delivery through Lambda, EventBridge and
+    an API destination. Had it fired it would have cancelled the application's run
+    and kept the webhook's, which hardcodes `poisoned: "false"`: a poisoned demo
+    running clean, with every job green.
+
+    So the two files must agree on one string, and neither can see the other. This
+    renders the workflow's template and compares it to the literal the TypeScript
+    builds -- the same shape as `web/__tests__/dynamo-keys.test.ts`, which compares
+    the key builder against `agentorg/db/_dynamo.py` for the same reason: drift
+    produces a matcher that finds nothing, silently, and a silent matcher here means
+    the duplicate simply runs.
+    """
+    run_name = _doc().get("run-name")
+    assert run_name, "the workflow declares no run-name; every run is titled the same"
+    for field in ("inputs.ticket_id", "inputs.trigger"):
+        assert field in run_name, (
+            f"run-name is {run_name!r} and omits {field}; without BOTH, the web "
+            f"application cannot tell the webhook's run from its own"
+        )
+
+    # RENDERED, then compared to what the TypeScript looks for.
+    rendered = run_name
+    for expression, value in (("inputs.ticket_id", "61"), ("inputs.trigger", "issue")):
+        rendered = re.sub(
+            r"\$\{\{\s*" + re.escape(expression) + r"\s*\}\}", value, rendered
+        )
+    assert "${{" not in rendered, f"run-name has an unrendered expression: {rendered!r}"
+
+    dispatch = (REPO_ROOT / "web" / "lib" / "dispatch.ts").read_text()
+    target = re.search(r"const target = `([^`]+)`", dispatch)
+    assert target, "cancelWebhookDuplicate has no `target` literal; this pins nothing"
+    expected = target.group(1).replace("${ticketId}", "61")
+    assert expected == rendered, (
+        f"the workflow names a run {rendered!r} and the web application looks for "
+        f"{expected!r}; the duplicate webhook run would never be cancelled"
+    )
+
+
 def test_the_target_repository_is_declared_once_and_honours_the_input():
     """WHICH REPOSITORY A RUN ACTS ON is one expression, at the top of the file.
 
