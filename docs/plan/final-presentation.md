@@ -89,36 +89,80 @@ This is the strongest thing we have to say, and it needs one slide rather than t
 | 9 | **Full Next.js UI** — sign up/in, link account, live pipeline, status, cost | **Finished this week.** Cognito + GitHub App sign-in, live run view, cost screen |
 | 10 | Restructure as SaaS | `agentorg/tenancy/` + `agentorg/api/`, DynamoDB single-table, `dynamodb:LeadingKeys` against an IAM session tag |
 
-### Note 7 is the one to state carefully
+### Note 7 — ATTEMPTED, MEASURED, AND NOT CLOSED. Here is exactly why
 
-**AI-generated tests and Selenium are two mechanisms that never meet, and the slide
-must not imply otherwise.**
+The gap was: does the AI generate a test AND does Selenium verify it? Closing it
+was attempted on 2026-09-22 and abandoned on evidence. **The evidence is worth more
+to the presentation than the feature would have been.**
 
-| | What happens | Where |
-|---|---|---|
-| AI generates tests | `testgen.run(state)` writes **pytest** from `plan.acceptance_criteria`, executes them, reports `passed`/`failed`/`binding` | the **pipeline** — `run_stage.py:705`, `graph.py:606` |
-| Selenium runs | 4 **hand-written, committed** browser tests against the target app's login form | **CI** — the `browser` job, added 2026-09-22 |
+**FIRST CORRECTION — the pipeline does not run the tests it writes.** Both call
+sites pass `workdir=None`, which `testgen` documents as "generate but do not
+execute":
 
-Measured: `testgen.py` contains no mention of `selenium`, `browser` or `webdriver`.
-The browser job runs `target_repo/tests/e2e`, which nothing generated.
+```
+scripts/run_stage.py:705   testgen.run(state)
+agentorg/graph.py:606      testgen.run(state)
+```
 
-**WIRING THE e2e SUITE INTO `develop` WOULD BE THEATRE.** The pipeline changes
-`mohamedsorour1998/auth-service`; the Selenium tests drive a local Flask wrapper in
-*this* repository. One pipeline run would then do both and the browser still would
-not be exercising the agent's change — and "so the browser tested what the AI
-wrote?" gets a no.
+So `binding` is structurally always False today. A test is generated per run, from
+that run's acceptance criteria, and never executed.
 
-**Say it as two layers, in the Roadmap slide, before being asked.** The AI writes and
-runs tests *about the change*; Selenium proves the app works *through a real
-browser*. Both real, both automated, different levels of the pyramid. Closing the
-gap properly means teaching `testgen` to emit a browser test for a UI acceptance
-criterion and running it against the deployed app — real work, and a half-built
-version is worse than the honest story.
+**THE ATTEMPT.** A `testbed` module that copies the subject app, applies
+`state.dev.diff`, and hands `testgen` a real workdir — with a `conftest.py`
+exposing `client`, `live_server` and `browser` fixtures so a generated test could
+drive a real browser against the agent's own change. The separation of authority
+would have been preserved and sharpened: *the generator never sees the diff; the
+diff is what its test runs against.*
 
-**What DID change on 2026-09-22:** Selenium now runs in CI at all. It previously ran
-once, by hand, on a laptop; every CI run reported `1 passed, 4 skipped`. The new
-`browser` job sets `SELENIUM_REQUIRED=true`, so an absent browser FAILS rather than
-skipping. Verified on ci run 35682698805:
+**WHY IT DIED — two measurements.**
+
+1. **Model-produced diffs do not apply.** Tested against both fixtures and a real
+   clean run's diff from ticket 61:
+
+   ```
+   dev_result_clean       error: corrupt patch at line 24
+   dev_result_poisoned    error: patch failed: app/auth.py:1
+   ticket 61 (real, model-written)   error: corrupt patch at line 28
+   ```
+
+   The context lines do not match the file (`from flask import request, jsonify`
+   against the real `from flask import Flask, request, jsonify`), and the hunks are
+   malformed. Applying with fuzz would let a diff that does **not** describe the
+   code apply anyway, and a test running against code the agent did not write is
+   worse than no test.
+
+2. **THERE IS NO APPLIED-CODE ARTIFACT ANYWHERE, and this one matters on its own.**
+   `github_ops.open_pr` does not apply the diff — it writes the raw unified diff as
+   a FILE and commits that. Verified on the real merged PR:
+
+   ```
+   gh api repos/mohamedsorour1998/auth-service/pulls/60/files
+   added  changes/59.diff  +57/-0
+   ```
+
+   `app/auth.py` was never modified. It is deliberate — *"write the raw unified diff
+   so the PR carries the change the scanners will read"* — and defensible: an agent
+   writing arbitrary code into a real repository is the larger risk. But it means
+   **"merged" does not mean "the application changed"**, and there is no branch a
+   test could run against.
+
+**WHAT THAT LEAVES, AND HOW TO SAY IT.** Closing this properly means changing what
+the developer agent EMITS — full file contents rather than a diff — which is the
+deepest and most demo-critical agent in the pipeline. Four days out, that is the
+change most likely to break the poisoned demo, whose safety net depends on
+substituting the reference diff. **Not attempted.**
+
+**HAVE THIS ANSWER READY, because a judge may ask "so did the code actually
+change?"** The honest answer is the strong one: the pipeline's subject is the
+CHANGE, and every gate reads it — the scanners read the diff, the reviewer reads the
+diff, the human gates approve the diff. What merges is the reviewed artifact. Applying
+it to the source is one step further and is on the roadmap, named, not hidden.
+
+**WHAT DID CLOSE on 2026-09-22:** Selenium now runs in automation at all. It
+previously ran once, by hand, on a laptop; every CI run reported `1 passed, 4
+skipped`. The new `browser` job sets `SELENIUM_REQUIRED=true`, so an absent browser
+FAILS rather than skipping — the same ABSENT-versus-FAULT rule the scanners use.
+Verified on ci run 35682698805:
 
 ```
 Google Chrome 152.0.7977.82 · ChromeDriver 152.0.7977.82
@@ -128,6 +172,10 @@ Google Chrome 152.0.7977.82 · ChromeDriver 152.0.7977.82
 Its first run went red and found a real defect: all three submit tests called
 `find_element` immediately after clicking, so the lookup could run against the page
 still on screen. Two passed by winning a race. All three now wait.
+
+**THE SLIDE SAYS TWO LAYERS.** The AI writes and runs tests *about the change*;
+Selenium proves the app works *through a real browser*. Both real, both automated,
+different levels of the pyramid — and the roadmap names the join.
 
 **Note 6 deserves the strongest framing.** A judge doubted the determinism claim and
 was right to: it was exactly true for trivy and semgrep and *vacuously* true for
