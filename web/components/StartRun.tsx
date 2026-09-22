@@ -45,7 +45,7 @@
 
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { RUN_STARTED } from "@/components/RunList";
 
@@ -75,6 +75,23 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<Answer | null>(null);
   const [notice, setNotice] = useState("");
+  /**
+   * THE FORM ITSELF, so a successful start can close it.
+   *
+   * **A FORM THAT STAYS OPEN AFTER IT SUCCEEDS IS ASKING TO BE SUBMITTED AGAIN.**
+   * Reported from the deployed app. It is a `<details>`, so after a dispatch the
+   * filled-in ticket, the repository picker and a live `Start run` button all sat
+   * between the person and the list where their run was about to appear -- and this
+   * form's one hazard is a second press, which opens a second issue and starts a
+   * second run against it.
+   *
+   * A REF RATHER THAN A CONTROLLED `open`, deliberately: `<details>` toggles itself
+   * natively, and making React own that state means re-implementing the disclosure
+   * -- keyboard, the summary's own click, and the `onToggle` that loads the
+   * repository scope. This changes it at the one moment the component has an
+   * opinion and leaves the element in charge the rest of the time.
+   */
+  const panel = useRef<HTMLDetailsElement>(null);
 
   const submit = useCallback(
     async (event: React.FormEvent) => {
@@ -119,6 +136,10 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
       );
       setTitle("");
       setDetail("");
+      // COLLAPSED ONLY ON SUCCESS. A refusal leaves it open with the text still in
+      // it: closing the form over an error message would hide both the reason and
+      // the thing that has to be corrected.
+      if (panel.current) panel.current.open = false;
       onStarted?.();
       // ANNOUNCED ON `window`, because `onStarted` is optional and the runs page
       // never passed one -- the list and this form are siblings under a server
@@ -165,7 +186,7 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
   }, [repositories.length]);
 
   return (
-    <details className="card" style={{ maxWidth: "var(--measure)" }} onToggle={loadScope}>
+    <details ref={panel} className="card" style={{ maxWidth: "var(--measure)" }} onToggle={loadScope}>
       <summary style={{ cursor: "pointer", fontWeight: 600 }}>Start a run</summary>
 
       <form onSubmit={submit} style={{ display: "grid", gap: "var(--gap-3)", marginTop: "var(--gap-4)" }}>
