@@ -158,6 +158,46 @@ CHANGE, and every gate reads it — the scanners read the diff, the reviewer rea
 diff, the human gates approve the diff. What merges is the reviewed artifact. Applying
 it to the source is one step further and is on the roadmap, named, not hidden.
 
+**ATTEMPTED PROPERLY ON 2026-09-22, MEASURED, AND REVERTED. The measurement is the
+answer, and it belongs on the roadmap slide.**
+
+The design was right and the implementation worked: `DevResult.applied` carries the
+complete file content, `agents/testbed.py` writes it over a copy of the subject app,
+and `testgen` runs its generated tests against it — with `client`, `live_server` and
+`browser` fixtures, so a criterion about what a person sees could become a Selenium
+test. Eleven tests, every refusal path covered, and a smoke check that proves the bed
+can collect the app's own tests before it is allowed to judge a generated one.
+
+**IT WAS REVERTED BECAUSE IT BROKE THE DEVELOPER AGENT.** Asking for the diff AND the
+full file doubles the output, and Nova runs out of tokens. Same ticket, same model,
+six calls:
+
+```
+prompt: diff only        3 / 3   source=model
+prompt: diff + applied   0 / 3   MaxTokensReachedException -> fell back to fixture
+```
+
+Every single call with the new instruction truncated mid-JSON, failed to parse, and
+the agent served its fixture. That is a hard regression on the most demo-critical
+agent in the pipeline — four days out.
+
+**TWO OTHER FACTS THE ATTEMPT UNCOVERED, both worth having ready:**
+
+1. **`testgen` only answers about a quarter of the time.** Across eight stored runs,
+   two produced a test file and six recorded `source: fixture` — "no model
+   answered". Almost certainly the same token ceiling: it is asked for complete test
+   files. So even with a working testbed, most runs would have had nothing to run.
+2. **The deployed runtimes are v52 and predate any prompt change.** The agents run in
+   containers, so a prompt edit does nothing until `deploy.yml` rebuilds the image.
+   Any claim about agent behaviour on the deployed path needs a redeploy first.
+
+**THE RIGHT DESIGN, FOR AFTER THE DEMO.** Ask the developer for the FULL FILE
+INSTEAD OF the diff, not in addition, and compute the unified diff locally with
+`difflib`. That halves the output rather than doubling it, and the computed diff
+would be more accurate than the model's — which does not reliably apply. It touches
+the safety net, `_key_is_in_the_change` and `open_pr`, so it is a change that
+deserves its own pass with a runtime redeploy to verify.
+
 **WHAT DID CLOSE on 2026-09-22:** Selenium now runs in automation at all. It
 previously ran once, by hand, on a laptop; every CI run reported `1 passed, 4
 skipped`. The new `browser` job sets `SELENIUM_REQUIRED=true`, so an absent browser
