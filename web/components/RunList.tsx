@@ -156,8 +156,33 @@ export function RunList() {
   // the same props render differently. It is computed in the EVENT and read in the
   // timer, both of which are allowed to see a clock.
   const [pollUntil, setPollUntil] = useState(0);
+  /**
+   * THE RUN THAT HAS BEEN ASKED FOR AND DOES NOT EXIST YET.
+   *
+   * **THE LIST WAS CORRECT AND THE SCREEN WAS SILENT.** Reported from the deployed
+   * app: *"when I click Start run, nothing happens; after a minute I refresh and
+   * see it running"*. Polling was already in place and working -- there was simply
+   * nothing to poll FOR. `workflow_dispatch` answers 204 with no body, the run id
+   * is minted by the `plan` job, and the row appears only once
+   * `run_index.record_run` writes it, about a minute later. So the honest render of
+   * those sixty seconds was an unchanged list, and an unchanged list after a click
+   * is indistinguishable from a button that did nothing.
+   *
+   * **WHAT IS KNOWN AT THAT MOMENT IS THE ISSUE NUMBER, AND ONLY THAT.** So the row
+   * below claims only that: an issue was opened and a dispatch was accepted. It is
+   * NOT drawn as a run -- no status mark, no verdict, no security columns -- because
+   * inventing a `RUNNING` badge for something with no record would be this
+   * repository's signature defect on the first screen anybody sees.
+   */
+  const [pending, setPending] = useState<{ issue: string; until: number } | null>(null);
+
   useEffect(() => {
-    const onStarted = () => setPollUntil(Date.now() + START_POLL_MS);
+    const onStarted = (event: Event) => {
+      const issue = String((event as CustomEvent<{ issue?: string }>).detail?.issue ?? "");
+      const until = Date.now() + START_POLL_MS;
+      setPollUntil(until);
+      if (issue) setPending({ issue, until });
+    };
     window.addEventListener(RUN_STARTED, onStarted);
     return () => window.removeEventListener(RUN_STARTED, onStarted);
   }, []);
@@ -165,6 +190,15 @@ export function RunList() {
   const runs = result?.ok ? result.value.runs : [];
   // A run that can still change. `promoted`/`blocked`/`rejected`/`failed` cannot.
   const anyLive = runs.some((r) => !ENDED.has(r.status));
+  // ARRIVED. The placeholder is dropped the moment the real row exists, so the two
+  // are never on screen together -- which would read as the duplicate this product
+  // spent a commit eliminating.
+  // **DERIVED, NOT CLEARED IN AN EFFECT.** `react-hooks/set-state-in-effect` refuses
+  // a `setState` in an effect body -- correctly, and this file already records
+  // paying for that once. The placeholder is not "removed" when the run arrives; it
+  // simply stops being shown, which needs no second source of truth to go stale.
+  const showPending =
+    pending !== null && !runs.some((r) => r.ticket_id === pending.issue);
 
   useEffect(() => {
     if (!anyLive && pollUntil === 0) return;
@@ -180,6 +214,7 @@ export function RunList() {
     }, 5000);
     return () => clearInterval(id);
   }, [anyLive, pollUntil]);
+
 
   if (result === null) return <Skeleton label="Loading runs" rows={5} />;
 
@@ -203,8 +238,19 @@ export function RunList() {
     );
   }
 
+  /**
+   * NO RUNS YET -- AND THE FIRST ONE MUST NOT LAND IN THIS BRANCH SILENTLY.
+   *
+   * **A NEW TENANT'S FIRST RUN IS EXACTLY THE CASE THE PLACEHOLDER EXISTS FOR**, and
+   * the empty state short-circuited before the table, so pressing Start on an empty
+   * list showed "No runs yet" for a full minute. That is worse than the original
+   * silence: it is the screen actively asserting nothing has happened, immediately
+   * after somebody made something happen.
+   */
   if (runs.length === 0) {
-    return (
+    return showPending && pending ? (
+      <PendingOnly issue={pending.issue} until={pending.until} />
+    ) : (
       <EmptyState
         headline="No runs yet"
         action={
@@ -263,6 +309,20 @@ export function RunList() {
             </tr>
           </thead>
           <tbody>
+            {/* THE RUN THAT HAS BEEN ASKED FOR AND DOES NOT EXIST YET.
+
+                It is drawn in the ticket column and NOWHERE ELSE: no status mark,
+                no verdict, no scan provenance. Every one of those is a measurement,
+                and there is nothing to measure yet -- a `RUNNING` badge here would
+                be a fabricated status on the first screen anybody sees, which is
+                the defect this whole product is about.
+
+                The issue number IS real, though: the issue was created before the
+                dispatch, so `#62` is a link somebody can open on GitHub right now
+                even while the pipeline has not started. */}
+            {showPending && pending ? (
+              <PendingRow issue={pending.issue} until={pending.until} />
+            ) : null}
             {ordered.map((run) => (
               <tr key={run.run_id} data-blocking={run.verdict === "block"}>
                 <td>
@@ -381,6 +441,103 @@ export function RunList() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One row for a run that has been dispatched and has not appeared.
+ *
+ * **THE SPINNER IS THE POINT, AND SO IS THE SENTENCE BESIDE IT.** A spinner alone
+ * says "something is happening" and says nothing about what or for how long -- and
+ * the run screen already refuses a bare spinner for that reason, showing when it
+ * last heard from the run instead. Here there is nothing to have heard from yet, so
+ * the honest pairing is motion plus the reason the wait exists.
+ *
+ * **IT GIVES UP, AND SAYING SO IS THE WHOLE VALUE OF THE STATE.** A placeholder
+ * that spun for ever would turn a failed dispatch into a permanent "nearly there",
+ * which is worse than the silence it replaced: silence at least ends when somebody
+ * reloads. Past the window it becomes a refusal naming what to check.
+ */
+function PendingRow({ issue, until }: { issue: string; until: number }) {
+  // A CLOCK IN AN INTERVAL, NEVER IN THE RENDER BODY. `react-hooks/purity` refuses
+  // `Date.now()` during render, correctly: it makes identical props render
+  // differently. The tick is the only thing that may see it.
+  const [expired, setExpired] = useState(false);
+  useEffect(() => {
+    const id = setInterval(() => setExpired(Date.now() > until), 2000);
+    return () => clearInterval(id);
+  }, [until]);
+
+  return (
+    <tr>
+      <td colSpan={7}>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "var(--gap-3)",
+            fontSize: "var(--step-small)",
+          }}
+        >
+          {expired ? (
+            <>
+              <span className="ident" style={{ color: "var(--refused)" }}>
+                #{issue}
+              </span>
+              <span style={{ color: "var(--refused)" }}>
+                the issue was opened, and no run has appeared for it. The dispatch was
+                accepted — check the workflow on GitHub.
+              </span>
+            </>
+          ) : (
+            <>
+              {/* THE SAME MARK THE SPINE USES for a stage in flight: a ring with a
+                  gap, turning. One spelling of "this is moving" across the product,
+                  so a reader learns it once. */}
+              <span
+                className="spine-spinner"
+                aria-hidden="true"
+                style={{
+                  width: "0.7rem",
+                  height: "0.7rem",
+                  borderRadius: "50%",
+                  border: "2px solid var(--accent)",
+                  borderTopColor: "transparent",
+                  flexShrink: 0,
+                }}
+              />
+              <span className="ident" style={{ color: "var(--accent)" }}>
+                #{issue}
+              </span>
+              <span style={{ color: "var(--text-muted)" }}>
+                issue opened, pipeline starting — the run appears here once the plan
+                stage records it, usually within a minute
+              </span>
+            </>
+          )}
+        </span>
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * The placeholder with no table under it: a tenant's FIRST run, mid-dispatch.
+ *
+ * A one-row table with no data rows would render a header for columns that have
+ * nothing beneath them, so this is the same content in a card. It shares
+ * `PendingRow`'s wording by construction rather than by copy -- one sentence, one
+ * spelling, and the give-up state comes with it.
+ */
+function PendingOnly({ issue, until }: { issue: string; until: number }) {
+  return (
+    <div className="card">
+      <table className="data" style={{ margin: 0 }}>
+        <tbody>
+          <PendingRow issue={issue} until={until} />
+        </tbody>
+      </table>
     </div>
   );
 }

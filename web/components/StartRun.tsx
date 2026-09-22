@@ -125,7 +125,11 @@ export function StartRun({ onStarted }: { onStarted?: () => void }) {
       // component, so there was no shared state to reload through. `RunList`
       // listens and starts polling; a page rendering only one of the two is
       // unaffected. See `RunList`'s note for why this is not lifted state.
-      window.dispatchEvent(new Event(RUN_STARTED));
+      // THE ISSUE NUMBER TRAVELS WITH THE EVENT, so the list can show the run
+      // BEFORE the run exists. It is the only identifier that exists at this
+      // moment: `workflow_dispatch` answers 204 with no body and the run id is
+      // minted by the `plan` job a minute later.
+      window.dispatchEvent(new CustomEvent(RUN_STARTED, { detail: { issue: answer.issue } }));
     },
     [title, detail, poisoned, repository, onStarted],
   );

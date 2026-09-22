@@ -272,3 +272,55 @@ describe("every screen", () => {
     }
   });
 });
+
+/**
+ * THE PLACEHOLDER FOR A RUN THAT DOES NOT EXIST YET.
+ *
+ * Reported from the deployed app: *"when I click Start run nothing happens; after a
+ * minute I refresh and see it running"*. The list was correct -- `workflow_dispatch`
+ * answers 204 with no body, the run id is minted by the `plan` job, and the row
+ * appears only when `run_index.record_run` writes it -- so the honest render of that
+ * minute was an unchanged list, which after a click is indistinguishable from a
+ * button that did nothing.
+ *
+ * The fix is a placeholder row, and a placeholder is exactly the shape that tempts
+ * somebody to fill in a plausible status. These assert the two ways it must not.
+ */
+describe("the pending-run row", () => {
+  const source = read("components", "RunList.tsx");
+
+  it("is not empty after stripping", () => {
+    // ANTI-VACUITY: every assertion below is an ABSENCE, and an absence is
+    // trivially true of an empty string.
+    expect(source).toContain("PendingRow");
+    expect(source).toContain("PendingOnly");
+  });
+
+  /**
+   * **IT MUST NOT INVENT A STATUS.** `RUN_STATUS`, `VERDICT` and `PROVENANCE` are
+   * measurements; a dispatched run has none of them yet. A `RUNNING` badge here
+   * would be a fabricated measurement on the first screen anybody sees -- the
+   * did-not-run-versus-passed conflation this product exists to refuse, in the one
+   * place a judge looks first.
+   */
+  it("renders no status, verdict or provenance mark", () => {
+    const body = source.slice(source.indexOf("function PendingRow"));
+    expect(body, "PendingRow not found; this test would pin nothing").toBeTruthy();
+    for (const table of ["RUN_STATUS", "VERDICT", "PROVENANCE", "<Mark"]) {
+      expect(body, `the pending row reaches for ${table}; it has nothing to measure`)
+        .not.toContain(table);
+    }
+  });
+
+  /**
+   * **IT MUST GIVE UP.** A placeholder that spun for ever turns a failed dispatch
+   * into a permanent "nearly there", which is worse than the silence it replaced:
+   * silence at least ends when somebody reloads. The expiry branch is what makes
+   * this an honest state rather than a nicer-looking hang.
+   */
+  it("stops spinning and says so when the run never appears", () => {
+    const body = source.slice(source.indexOf("function PendingRow"));
+    expect(body).toContain("expired");
+    expect(body).toMatch(/no run has appeared/i);
+  });
+});
