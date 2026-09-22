@@ -84,10 +84,50 @@ This is the strongest thing we have to say, and it needs one slide rather than t
 | 4 | Self-hosted? | `infra/selfhost/docker-compose.yml` — postgres + api + web, verified end to end |
 | 5 | Competitive advantage | `docs/final/evidence/competitors.md` — commissioned research; the seam distinction |
 | 6 | **gitleaks/trivy scoring → go/no-go** | `agentorg/security/scoring.py` — ONE table, three scanners, threshold floor. **Built because of this note** |
-| 7 | Test generation + Selenium in the pipeline | `agentorg/agents/testgen.py`, **wired** at `graph.py:606` and `run_stage.py:705`; Selenium closed by Lane T |
+| 7 | Test generation + Selenium in the pipeline | **PARTIAL — two layers, and they do not meet.** See below |
 | 8 | RAG / knowledge lake | `agentorg/retrieval/` — three corpora, wired into all four agent prompts |
 | 9 | **Full Next.js UI** — sign up/in, link account, live pipeline, status, cost | **Finished this week.** Cognito + GitHub App sign-in, live run view, cost screen |
 | 10 | Restructure as SaaS | `agentorg/tenancy/` + `agentorg/api/`, DynamoDB single-table, `dynamodb:LeadingKeys` against an IAM session tag |
+
+### Note 7 is the one to state carefully
+
+**AI-generated tests and Selenium are two mechanisms that never meet, and the slide
+must not imply otherwise.**
+
+| | What happens | Where |
+|---|---|---|
+| AI generates tests | `testgen.run(state)` writes **pytest** from `plan.acceptance_criteria`, executes them, reports `passed`/`failed`/`binding` | the **pipeline** — `run_stage.py:705`, `graph.py:606` |
+| Selenium runs | 4 **hand-written, committed** browser tests against the target app's login form | **CI** — the `browser` job, added 2026-09-22 |
+
+Measured: `testgen.py` contains no mention of `selenium`, `browser` or `webdriver`.
+The browser job runs `target_repo/tests/e2e`, which nothing generated.
+
+**WIRING THE e2e SUITE INTO `develop` WOULD BE THEATRE.** The pipeline changes
+`mohamedsorour1998/auth-service`; the Selenium tests drive a local Flask wrapper in
+*this* repository. One pipeline run would then do both and the browser still would
+not be exercising the agent's change — and "so the browser tested what the AI
+wrote?" gets a no.
+
+**Say it as two layers, in the Roadmap slide, before being asked.** The AI writes and
+runs tests *about the change*; Selenium proves the app works *through a real
+browser*. Both real, both automated, different levels of the pyramid. Closing the
+gap properly means teaching `testgen` to emit a browser test for a UI acceptance
+criterion and running it against the deployed app — real work, and a half-built
+version is worse than the honest story.
+
+**What DID change on 2026-09-22:** Selenium now runs in CI at all. It previously ran
+once, by hand, on a laptop; every CI run reported `1 passed, 4 skipped`. The new
+`browser` job sets `SELENIUM_REQUIRED=true`, so an absent browser FAILS rather than
+skipping. Verified on ci run 35682698805:
+
+```
+Google Chrome 152.0.7977.82 · ChromeDriver 152.0.7977.82
+5 passed in 194.63s
+```
+
+Its first run went red and found a real defect: all three submit tests called
+`find_element` immediately after clicking, so the lookup could run against the page
+still on screen. Two passed by winning a race. All three now wait.
 
 **Note 6 deserves the strongest framing.** A judge doubted the determinism claim and
 was right to: it was exactly true for trivy and semgrep and *vacuously* true for
@@ -267,10 +307,13 @@ ours guards a pipeline stage *between agents*, and three human gates sit on it.
 
 ## Open questions
 
-1. **Is Selenium run inside the pipeline, or only locally?** Note 7 asks for it *in the
-   pipeline*. `testgen` is wired; the Selenium half needs checking before we claim it.
+1. ~~Is Selenium run inside the pipeline?~~ **ANSWERED 2026-09-22.** It was not — no
+   workflow mentioned it. It now runs in CI and fails when no browser is present. The
+   remaining gap is that Selenium does not verify the AI-GENERATED tests; see note 7
+   above for why joining them would be theatre.
 2. **Stale run rows.** #60 has no Actions run and #61 has a duplicate. Decide whether to
    leave them (honest) or start a clean tenant for the demo (tidier, and the isolation
    story then has nothing to show).
-3. **Team slide photographs** — five needed, pre-cropped square. `deckkit/crop_photo.py`
-   does the crop; the sources are the missing input.
+3. ~~Team slide photographs~~ **ANSWERED.** Reuse the pre-final deck's:
+   `docs/pitch/photos/square/` holds five at **640x640** — aya, habiba, mariam, reem,
+   sorour. Copy into the new talk directory; no re-cropping needed.
