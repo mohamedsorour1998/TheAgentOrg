@@ -234,6 +234,130 @@ ours guards a pipeline stage *between agents*, and three human gates sit on it.
 
 ---
 
+## The three slides that carry the argument
+
+Asked for explicitly: why we beat a competitor like Claude Code, how a deterministic
+gate sits on top of non-deterministic models, and what the scoring algorithm is.
+These are the intellectual core — slides 4, 7 and one backup — and each is written
+below in the form it must survive a follow-up question in.
+
+### Slide 4 · A deterministic gate on top of non-deterministic models
+
+**The apparent contradiction IS the design, and naming it first is what makes it
+land.** Five agents are language models: they are non-deterministic, they can be
+persuaded, distracted and prompt-injected. The thing that stops a change is not one
+of them.
+
+| | reviewer | security |
+|---|---|---|
+| what it is | a model reading the diff | three scanners + five lines of Python |
+| catches | intent, logic, plan mismatch, taste | credentials, known CVEs, injectable patterns |
+| authority | **advisory** — the graph loops, it does not stop | **binding** — `compute_security_verdict` |
+| can be wrong | yes, both directions | deterministic: same input, same answer |
+| can be talked out of it | yes, it is a prompt | **no — no model is involved** |
+
+**The block is a DEPENDENCY EDGE, not a status check.** `develop` exits 3 and
+`gate2` declares `needs: develop`, so no `if:` expresses the block — the graph does.
+Nothing to misconfigure, and no status check to mark non-required by accident.
+
+**The line to say out loud:** *the demo would still block with the reviewer removed
+entirely; it would not block with the scanners removed.* The reviewer catching the
+key first is a bonus, not the mechanism.
+
+**Prepared answer — "what if the scanners miss something?"** Then the reviewer is
+the only thing that saw it, its verdict is advisory, and the change can reach `main`
+past three human gates. That is an accepted limit, not a defended one, and the gates
+are why it is acceptable.
+
+### Slide 7 · Differentiation — the seam, not "we are the only deterministic one"
+
+**Do not claim we are the only deterministic gate. It is false and a judge will find
+the counter-example in a minute.** `docs/final/evidence/competitors.md` §6 records
+five of my own claims being disproved by the research I commissioned, four of them
+wrong in the flattering direction. The narrower claim is the one that survives.
+
+**Open with their own words** — every major vendor's LLM review is advisory, and each
+says so in its own documentation:
+
+| Product | Their words |
+|---|---|
+| Copilot code review | *"will not block merging changes"* |
+| **Anthropic managed Code Review** | *"the check run **always** completes with a neutral conclusion so it never blocks merging"* |
+| OpenAI Codex | review rules *"don't replace tests, branch protections, or required approvals"* |
+| Cursor Bugbot | findings *"default to `neutral`"* — requiring the status does not block |
+
+And **Snyk's own platform page argues this thesis verbatim: "The generator cannot be
+the validator."**
+
+**Then concede what is real**, because the category is not empty: Claude Code's
+permission deny rules are *"enforced by Claude Code, not by the model"* and hold even
+under `bypassPermissions`. Factory's Droid Shield hard-blocks `git commit`. OpenHands
+ships deterministic analyzers. Jules has two clean human gates.
+
+**Then the distinction that survives:**
+
+> Every gate they ship guards a **tool call inside one agent's session**. Ours guards
+> a **pipeline stage between agents**, with a named human reviewer, and the block is
+> a dependency edge rather than a status check.
+>
+> No product ships multi-agent generation, a deterministic non-LLM block on stage
+> output, and human approval gates between stages **as one pipeline**.
+
+**The closing beat, and it is the strongest thing on the slide:** three shipped
+products carry our own signature defect. Cursor hooks are *"fail-open by default"* on
+any exit code but 2. **Claude Code's exit 1 does not block, and "a mistyped path
+silently disables the gate."** Semgrep returns **exit 0 on an internal crash**. That
+is a check that did not run reading as a check that passed — in products people pay
+for — and it is the direct argument for `SCANNERS_REQUIRED` and for
+`unrunnable_findings` raising rather than returning `[]`.
+
+### Backup slide · The scoring algorithm, exactly
+
+Shown when a judge asks note 6 — and the note that produced it was right.
+
+**The rule is five lines and there is no model in it:**
+
+```
+SEVERITY_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+cutoff   = SEVERITY_ORDER[threshold]
+blocking = [f for f in findings if SEVERITY_ORDER[f.severity] >= cutoff]
+verdict  = "block" if blocking else "pass"
+```
+
+**One table, three scanners, native → ours** (`agentorg/security/scoring.py`):
+
+| Scanner | How its severity is decided |
+|---|---|
+| **semgrep** | **MAPPED.** Emits both `INFO/WARNING/ERROR` and `LOW/MEDIUM/HIGH/CRITICAL` — seven keys, four severities. `ERROR` is its top level and means `high` |
+| **trivy** | **MAPPED.** Its `UNKNOWN` is a real answer about a real CVE whose sources carry no severity, so it is a mapped key and not a fall-through |
+| **gitleaks** | **ASSIGNED BY POLICY — `critical`.** It reports no severity field at all, so there is nothing to map. Any finding from a secret scanner is critical by rule: a committed credential has no lesser grade |
+
+`ScannerScoring.__post_init__` refuses anything that sets **both** a table and a
+constant — two answers would exist and nothing would record which the verdict used.
+
+**Three properties worth stating, because they are what make it a gate:**
+
+- **`FAIL_CLOSED_SEVERITY = high`** — an unrecognised severity lands at the block
+  threshold. Refused **at import** if it ever drops below it.
+- **`THRESHOLD_FLOOR` is DERIVED, not written** — computed from the policy that
+  carries `protects_core_guarantee`, so it equals `critical` today. A literal would
+  be a second declaration of gitleaks' severity, and two copies agree until one moves.
+- **`resolve_threshold` REFUSES, it never CLAMPS.** Clamping would run the gate at a
+  threshold the operator did not ask for and report success.
+
+**The honest consequence, stated rather than papered over:** the threshold does not
+*discriminate* among gitleaks findings — they all sit at the top of the scale, so the
+arithmetic is `critical >= threshold`, true at every threshold this project accepts.
+It still runs; it has one input to compare.
+
+**And the answer to "how do I know the scanners really ran?"** — the line numbers.
+Real scanners report `app/auth.py:3` and `:4`; the fixture reports `:4` and `:5`.
+That pair is the only field that separates the two, which is why `preflight.py`
+check 3 asserts it and why the block slide shows it.
+
+---
+
 ## Work plan — four days
 
 **Day 1 (22nd) — the diagram and the numbers**
