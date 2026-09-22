@@ -222,6 +222,43 @@ def test_the_login_form_renders_in_a_real_browser(driver, server):
     assert driver.find_element(By.ID, "submit")
 
 
+def _submitted_result(driver, timeout: float = 10.0):
+    """The `#result` panel, once the browser has finished submitting the form.
+
+    **THE THREE SUBMIT TESTS DID NOT WAIT, AND CI CAUGHT IT THE FIRST TIME THEY RAN
+    ON A RUNNER.** Each clicked `#submit` and immediately called `find_element`, so
+    the lookup could execute against the page that was still on screen. Measured on
+    ci run 35682179661, the first time these tests met a machine that was not the
+    laptop they were written on:
+
+        ..F.
+        test_invalid_credentials_are_refused_through_the_browser
+        no such element: Unable to locate element: {"id":"result"}
+
+    **ALL THREE ARE FIXED, NOT THE ONE THAT FAILED.** Two of them passed on that same
+    run, and they passed because the navigation happened to win a race -- not because
+    they were written correctly. Repairing only the red one would leave two tests
+    whose green means nothing, which is this repository's signature defect wearing a
+    passing result.
+
+    `presence_of_element_located` IS AN EXACT SIGNAL HERE, not an approximation. The
+    panel is server-rendered inside `{% if message %}`, so it does not exist on the
+    page the form was submitted from -- it appears only on the page the POST
+    produced. Waiting for it therefore waits for the navigation itself, with no
+    ambiguity about which page answered.
+
+    A poll, not a sleep. A fixed sleep long enough for a slow runner is dead time on
+    every fast one, and short enough for a fast one is this failure again.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+
+    return WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.ID, "result"))
+    )
+
+
 def test_valid_credentials_signed_in_through_the_browser(driver, server):
     """The happy path, typed into a real form and submitted by a real click."""
     from selenium.webdriver.common.by import By
@@ -231,7 +268,7 @@ def test_valid_credentials_signed_in_through_the_browser(driver, server):
     driver.find_element(By.ID, "password").send_keys("wonderland")
     driver.find_element(By.ID, "submit").click()
 
-    result = driver.find_element(By.ID, "result")
+    result = _submitted_result(driver)
     assert result.get_attribute("data-status") == "200", (
         f"the browser was told {result.get_attribute('data-status')} for valid "
         f"credentials; the page said {result.text!r}"
@@ -252,7 +289,7 @@ def test_invalid_credentials_are_refused_through_the_browser(driver, server):
     driver.find_element(By.ID, "password").send_keys("definitely-wrong")
     driver.find_element(By.ID, "submit").click()
 
-    result = driver.find_element(By.ID, "result")
+    result = _submitted_result(driver)
     assert result.get_attribute("data-status") == "401"
     assert "invalid credentials" in result.text.lower()
 
@@ -264,7 +301,7 @@ def test_an_empty_submission_is_refused_through_the_browser(driver, server):
     driver.get(f"{server.url}/web/login")
     driver.find_element(By.ID, "submit").click()
 
-    assert driver.find_element(By.ID, "result").get_attribute("data-status") == "401"
+    assert _submitted_result(driver).get_attribute("data-status") == "401"
 
 
 # ── the skip is not silent ─────────────────────────────────────────────────────
