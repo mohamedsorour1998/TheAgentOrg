@@ -78,8 +78,28 @@ change; if you read it you would test what it does instead of what was asked for
 and the test would pass whether or not the change is correct. Write the test the
 acceptance criteria demand, against the interface the repository already exposes.
 
-THE TARGET IS A PYTHON 3.12 FLASK APPLICATION tested with pytest. The app factory
-is `create_app()` and tests drive it through `app.test_client()`.
+THE TARGET IS A PYTHON 3.12 FLASK APPLICATION tested with pytest. Three fixtures
+are already available to your test file; do not define them and do not import the
+application yourself:
+
+  * `client`       -- Flask's test client. Use this for anything about a status
+                      code, a response body or a header. Most criteria want this.
+  * `live_server`  -- a real HTTP server; `live_server.url` is its base address.
+                      Only needed by a browser test.
+  * `browser`      -- headless Chrome (Selenium). Use it ONLY for a criterion
+                      about what a person sees or does in a page: a form, a
+                      rendered message, a link. It SKIPS when no browser is
+                      present, which is not a failure.
+
+A BROWSER TEST MUST ASSERT ON MORE THAN TEXT. The page at `/web/login` renders a
+`#result` element carrying a `data-status` attribute with the HTTP status the
+handler chose, because a page that reads "invalid credentials" while returning 200
+is a page that reports success. Assert the status, not only the words.
+
+WAIT FOR THE PAGE. A form submission is a navigation: use
+`WebDriverWait(browser, 10).until(...)` before reading an element that appears
+only after it. Calling `find_element` straight after `click()` is a race, and it
+is a race that passes on a fast machine and fails in CI.
 
 Respond with ONE JSON object and nothing else. Shape:
 {
@@ -361,6 +381,7 @@ def run(
     state: RunState,
     workdir: Path | None = None,
     runner=_pytest_runner,
+    bed_note: str = "",
 ) -> GeneratedTests:
     """Generate tests from the acceptance criteria, run them, and report honestly.
 
@@ -369,6 +390,13 @@ def run(
     stage has criteria long before there is a checkout to run against, and a
     generation with nothing executed must not report `passed=0, failed=0` as
     though a green run had happened. It reports it in `notes` instead.
+
+    `bed_note` IS WHY, AND IT IS NOT DECORATION. `agents/testbed.prepare` returns
+    a sentence with every outcome -- "no complete file contents", "the changed code
+    could not be collected by pytest", "ran against 2 changed file(s)". Without it
+    a reader sees NOT EXECUTED and cannot tell an older run from a broken one from
+    a poisoned run whose safety net cleared the files on purpose. Three different
+    facts that a bare absence would render identically.
 
     NO try/except AROUND `llm.structured`. It already absorbs unavailable, raised,
     chatty and unparseable and returns None, which is the one signal this function
@@ -406,8 +434,9 @@ def run(
             source=SOURCE_ACCEPTANCE,
             notes=(
                 f"{len(plan.files)} test file(s) generated from the acceptance "
-                f"criteria and NOT EXECUTED (no work directory was given), so the "
-                f"counts below are not measurements. {plan.notes} "
+                f"criteria and NOT EXECUTED"
+                + (f" -- {bed_note}" if bed_note else " (no work directory was given)")
+                + f", so the counts below are not measurements. {plan.notes} "
                 + _quarantine_note([])
             ),
         )
@@ -436,6 +465,10 @@ def run(
             f"{failed} failed."
         )
     ]
+    # WHAT THEY RAN AGAINST. A count with no subject is not a measurement -- the
+    # same reason `scan_provenance` rides beside a verdict.
+    if bed_note:
+        notes.append(f"Executed against the developer's own changed files: {bed_note}.")
     if refused:
         notes.append(f"{refused} generated file(s) refused for an unsafe path.")
     if failed:

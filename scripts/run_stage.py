@@ -81,11 +81,13 @@ loud error, not a quiet clean run.
 from __future__ import annotations
 
 import argparse
+import pathlib
 import sys
+import tempfile
 import typing
 
 from agentorg import gates, graph, integrations, log
-from agentorg.agents import testgen
+from agentorg.agents import testbed, testgen
 from agentorg.common import agent_client, config, llm
 from agentorg.cost import record as cost_record
 from agentorg.state import HumanDecision, LogEvent, RunState, Stage
@@ -697,12 +699,21 @@ def _stage_develop(args: argparse.Namespace) -> int:
     # would put the pipeline's one binding verdict ahead of evidence that might explain
     # it.
     #
-    # `workdir=None`: the pipeline has no checkout to run against here, and testgen
-    # reports that honestly in `notes` rather than as `passed=0 failed=0`, which is the
-    # same tuple a green zero-test run produces. So this generates and does not execute
-    # -- G5's binding half needs a workdir, and wiring that needs the target repo
-    # checked out beside the run, which is not this change.
-    state.generated_tests = testgen.run(state)
+    # THE GENERATED TESTS NOW RUN, AGAINST THE CHANGE ITSELF.
+    #
+    # `workdir=None` meant "generate but do not execute", so until 2026-09-22 every
+    # run wrote tests nothing ran and `binding` was structurally always False. The
+    # comment here used to say "the pipeline has no checkout to run against"; it has
+    # one now -- `testbed.prepare` writes `dev.applied` over a copy of the subject
+    # app. It never raises, and when it cannot build a bed it returns the reason,
+    # which `testgen` records instead of a green zero.
+    #
+    # THE GENERATOR STILL NEVER SEES THE CHANGE. The bed is what its test RUNS
+    # AGAINST, not an input to it -- `tests/test_testgen_authority.py` still fails
+    # by name if `state.dev` reaches the prompt.
+    with tempfile.TemporaryDirectory(prefix="agentorg-testbed-") as _tmp:
+        _bed, _why = testbed.prepare(state, pathlib.Path(_tmp))
+        state.generated_tests = testgen.run(state, workdir=_bed, bed_note=_why)
     # `passed`, not a new action word. `LogEvent.action` is a closed Literal in the
     # FROZEN contract, and widening it for a log label would be a contract change to
     # describe one stage's side work -- the exact thing the Phase 0 batch exists to

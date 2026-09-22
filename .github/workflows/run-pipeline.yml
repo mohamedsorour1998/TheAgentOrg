@@ -484,8 +484,25 @@ jobs:
         with:
           python-version: "3.12"
 
+      # THE GENERATED TESTS RUN IN THIS JOB, so this is the one place that needs
+      # what they need. `pytest` to run them, `flask` because the subject app is a
+      # Flask application, and `selenium` because a generated test may drive a
+      # browser -- `ubuntu-latest` ships Chrome and chromedriver, verified on ci
+      # run 35682698805 (Chrome 152.0.7977.82).
+      #
+      # NONE OF THESE GO IN `agents/requirements.txt`.
+      # `test_agentcore_deploy_assets.py` AST-walks `agentorg/` and turns every
+      # third-party import there into a pinned dependency of all five arm64 agent
+      # images -- declaring selenium would ship a browser automation library to
+      # five containers that will never open one.
+      #
+      # IF THEY ARE MISSING THE RUN IS UNAFFECTED. `testbed.prepare` proves it can
+      # collect the app's own tests before handing over a work directory, and
+      # reports "the changed code could not be collected" otherwise. That is the
+      # absent-versus-broken split: an inadequate environment must not block a
+      # change.
       - name: Install
-        run: pip install -e "."
+        run: pip install -e "." pytest flask selenium
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
