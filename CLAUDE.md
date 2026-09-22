@@ -3996,6 +3996,54 @@ the error scrolled above it. Redone through a file whose script **asserts its ow
 substitution applied and re-reads the file to confirm**. `assert s.count(old) == 1` before
 writing is the cheap form of that check.
 
+#### THE TESTBED WAS BUILT, MEASURED AND REVERTED — 2026-09-22
+
+Closing G's real gap means the generated tests running **against the developer's
+change** rather than against the unmodified subject app. That needs the changed files,
+and the model's diff **does not apply** — measured on real developer output, `git apply`
+answered `corrupt patch at line 28`. So `DevResult.applied` was added to carry complete
+file content, `agents/testbed.py` wrote it over a copy of `target_repo/`, and `testgen`
+ran there with `client` / `live_server` / `browser` fixtures. Eleven tests, all green.
+
+**It broke the developer agent, and the A/B is the whole finding.** Asking for the diff
+AND the full file doubles the output, and Nova runs out of tokens. Same ticket, same
+model, six calls:
+
+```
+prompt: diff only        3 / 3   source=model
+prompt: diff + applied   0 / 3   MaxTokensReachedException -> fell back to fixture
+```
+
+Every call with the new instruction truncated mid-JSON and the agent served its fixture
+— a hard regression on the most demo-critical agent, with all 2164 tests green, because
+no test in this suite makes a model call. Reverted in `01e8b0b`.
+
+**Three facts from the attempt that outlive it:**
+
+- **`testgen` ITSELF only answers about a quarter of the time.** Across eight stored
+  runs, two produced a test file and six recorded `source: fixture` / "no model
+  answered" — almost certainly the same ceiling, since it is asked for complete test
+  files. So even with a working bed, most runs would have had nothing to run.
+- **The deployed runtimes were at v52 and predate any prompt change.** A prompt edit does
+  nothing on the deployed path until `deploy.yml` rebuilds the image, so the feature was
+  inert in the cloud while reading as shipped in the tree. **Any claim about agent
+  behaviour in the cloud needs a redeploy first.**
+- **`open_pr` COMMITS THE DIFF AS A FILE.** Measured on PR #60: `added changes/59.diff
+  +57/-0`, with `app/auth.py` untouched. So **"merged" does not mean the application
+  changed** — say it plainly rather than letting a merged PR imply it.
+
+**The right design, for after the demo:** ask the developer for the full file **INSTEAD
+OF** the diff, not in addition, and compute the unified diff locally with `difflib`. That
+halves the output rather than doubling it, and a computed diff is more accurate than the
+model's. It touches the safety net, `_key_is_in_the_change` and `open_pr`, so it deserves
+its own pass with a redeploy to verify.
+
+**What DID land and is green: Selenium runs in CI.** `.github/workflows/ci.yml` has a
+`browser` job with `SELENIUM_REQUIRED: "true"`, so the skip is a **fault** there and a
+skip locally — Chrome 152.0.7977.82, `5 passed in 194.63s`. It immediately found a real
+race: all three submit tests called `find_element` straight after `click()`, now behind
+`WebDriverWait(...).until(EC.presence_of_element_located(...))`.
+
 ### The web application (Lane I) — the first surface that can open a gate remotely
 
 `web/` is Next.js 16 / React 19 / Auth.js 5, and it is the surface that retires
