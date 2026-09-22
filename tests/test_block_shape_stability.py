@@ -52,22 +52,7 @@ def test_shapes_match_the_declared_types():
     # Presence + type sanity against the frozen contract.
     state = _populate(_fresh_state())
     assert set(_shape(state.plan)) == {"tasks", "acceptance_criteria", "target_files", "notes"}
-    # `applied` added 2026-09-22: the changed files IN FULL, path -> content.
-    #
-    # ADDITIVE AND DEFAULTING EMPTY, so every stored run and every fixture stays
-    # valid -- the frozen contract permits adding an optional field and forbids
-    # renaming or removing one. It exists because a diff is not runnable: a model's
-    # unified diff does not reliably apply (measured: `corrupt patch` against both
-    # fixtures and a real clean diff), and `github_ops.open_pr` commits the diff as
-    # a FILE rather than applying it, so there was no form of the change a generated
-    # test could execute against. See `agentorg/agents/testbed.py`.
-    #
-    # THIS ASSERTION IS THE DECLARATION. It failed when the field was added, which
-    # is the point: a contract change has to be written down somewhere a reader
-    # will find it, and a fingerprint that quietly widened would record nothing.
-    assert set(_shape(state.dev)) == {
-        "branch", "diff", "summary", "files_changed", "pr_url", "applied",
-    }
+    assert set(_shape(state.dev)) == {"branch", "diff", "summary", "files_changed", "pr_url"}
     assert set(_shape(state.review)) == {"verdict", "comments", "must_fix"}
     # scan_provenance added in week 3 for the timeline UI: "blocked" proves two
     # different things depending on whether real scanners ran, and this is the

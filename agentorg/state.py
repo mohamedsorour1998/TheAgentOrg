@@ -77,28 +77,6 @@ class DevResult(BaseModel):
     summary: str
     files_changed: list[str]
     pr_url: str | None = None       # filled in by github_ops, not the agent
-    # THE CHANGED FILES IN FULL, path -> content. ADDITIVE and defaulting empty,
-    # so every existing fixture, stored run and agent response stays valid.
-    #
-    # WHY A DIFF IS NOT ENOUGH, MEASURED. A generated test has to run against the
-    # change, and the diff is the only description of it the pipeline had -- but a
-    # model's unified diff does not reliably apply. Tested 2026-09-22 against both
-    # fixtures and a real clean diff from ticket 61:
-    #
-    #     git apply  ->  error: corrupt patch at line 28
-    #     git apply  ->  error: patch failed: app/auth.py:1
-    #
-    # and `github_ops.open_pr` never applies it either -- it commits the diff AS A
-    # FILE, so the merged pull request carries `changes/<ticket>.diff` and the
-    # application source is untouched. There was no runnable form of the change
-    # anywhere, which is why `testgen` was called with no workdir and its tests
-    # were generated and never executed.
-    #
-    # The diff remains what the SCANNERS and the REVIEWER read; this is what the
-    # generated tests RUN AGAINST. Two views of one change, and
-    # `agents/developer.py` keeps them consistent -- read the safety net there
-    # before changing either.
-    applied: dict[str, str] = Field(default_factory=dict)
 
 
 class ReviewComment(BaseModel):
