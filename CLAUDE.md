@@ -1456,9 +1456,29 @@ the PR url — is the most important artifact the workflow produces.
 
 ### The three rejection recorders
 
-A rejected Environment makes GitHub **skip** its job, not run it with a verdict.
-So nothing inside a gate job executes on a refusal, and a branch in there could
-never record one. Hence three separate recorder jobs.
+A rejected Environment does not run its job with a verdict. So nothing inside a
+gate job executes on a refusal, and a branch in there could never record one.
+Hence three separate recorder jobs.
+
+**HOW IT IS REFUSED DECIDES WHAT THE JOB'S RESULT IS, AND THIS FILE SAID ONLY HALF
+OF IT.** A reviewer clicking Reject in the Actions UI makes the job `skipped`.
+Rejecting through `POST .../pending_deployments` with a comment — which is what
+`web/lib/dispatch.ts` does, and therefore what EVERY refusal made in the product
+looks like — makes it **`failure`**. MEASURED 2026-09-22 on runs 35678602890 and
+35676065361:
+
+```
+approvals -> gate1: rejected by mohamedsorour1998 -- "stop"
+jobs      -> gate1: completed/failure        <- NOT skipped
+```
+
+The recorders are unaffected, and the reason is worth copying: their `if:` is
+`result != 'success' && result != 'cancelled'`, which never enumerates the passing
+spellings. **The web application DID enumerate** — `ci-view.ts` tested
+`conclusion === "skipped"` — so every refusal made through the product rendered as
+a run that FAILED rather than one a person REFUSED. That is this repository's
+central distinction inverted, on the list a judge reads first. Fixed by adopting
+the recorders' rule verbatim; `tests/../ci-view.test.ts` carries both real runs.
 
 ```yaml
 gate1-rejected:  if: always() && needs.plan.result    == 'success'
@@ -3614,8 +3634,12 @@ do not "clean up" `logging.getLogger(__name__)` into a module-level `_log`.
   "file not on ref" and for an unauthenticated dispatch — two causes, one symptom.
 - **`workflow_dispatch` inputs arrive as STRINGS**, booleans included, and the REST
   dispatch API rejects real JSON booleans inside `inputs`.
-- **A rejected GitHub Environment SKIPS its job**, it does not run it with a
-  verdict. Hence the three `gate*-rejected` recorder jobs.
+- **A rejected GitHub Environment does not run its job with a verdict.** Hence the
+  three `gate*-rejected` recorder jobs. **The RESULT depends on HOW it was
+  refused**: the Actions UI gives `skipped`, and a REST rejection through
+  `pending_deployments` — every refusal this product makes — gives **`failure`**.
+  Measured 2026-09-22; see the recorders section. Never test for one spelling: the
+  recorders' `!= 'success' && != 'cancelled'` is the rule that survives both.
 - **An Environment with no required reviewer does not pause — it runs.**
 - **`python -m pytest` and bare `pytest` are not interchangeable** in
   `target_repo/`: `python -m` prepends cwd to `sys.path`, the console script does
@@ -4426,6 +4450,108 @@ $0.0825/1M, verified arithmetic). **Any cost optimisation that is not a cache po
 noise.**
 
 ---
+
+### A GATE JOB HOLDS NO AWS CREDENTIAL, AND FOUR REPORTED BUGS WERE THAT ONE FACT
+
+Measured 2026-09-18 on run 35057681679 — every job `success`, the pull request
+merged — while the index row read `status: running` with `decisions: [gate1, gate2]`.
+
+`run_stage._emit` calls `run_index.update_status` at EVERY stage, and that write
+needs a credential the gate jobs deliberately do not hold
+(`test_no_gate_job_can_reach_aws_or_run_an_agent`: "a pause needs no credentials").
+`record_run` swallows the failure and never raises — correct, an index is not the
+run's record — so a gate decision reaches the index only when the NEXT credentialled
+job rewrites the whole state document:
+
+| decision | recorded by | reaches the index via | lag |
+|---|---|---|---|
+| gate1 | `gate1` | `develop` | seconds |
+| gate2 | `gate2` | `sre` | **~2 min** |
+| gate3 | `gate3` | `promote` — **which held none either** | **never** |
+
+*"When I approve gate3 nothing happened"* is the last row. *"Gate2 takes 2 minutes"*
+is the middle one. **Neither approval ever failed.**
+
+**TWO FIXES, AND THE SECOND IS THE ONE THAT GENERALISES.** `promote` now assumes the
+role (so a run's ENDING is written down at all — `AGENT_JOBS` split into
+`AGENT_JOBS`/`AWS_JOBS`, because "invokes an agent" and "reaches AWS" stopped being
+the same set). And the web application stopped reading the index for *what is
+happening*: `lib/dispatch.ts:runProgress` reads the jobs and `pending_deployments`,
+`lib/ci-view.ts` translates them, and the stored document is used only for *what the
+run produced*. **GitHub answers what is happening; the document answers what it
+produced, and the two never cross** — a `develop` job exits 3 on a BLOCK and GitHub
+reports that as an ordinary failure, so `reconcileStatus` may turn a stale `running`
+into an ending and may NEVER replace one ending with another.
+
+### OPENING AN ISSUE IS A TRIGGER, SO "Start a run" MADE TWO RUNS
+
+Measured on issue #61: two runs three seconds apart, one `trigger: ui` and one
+`trigger: issue`, the duplicate queueing behind the first on the concurrency group
+and starting an hour later. `cancelWebhookDuplicate` exists to kill the webhook's
+copy and could not: `GET /actions/runs` does not return a run's inputs, and
+`display_title` read `run-pipeline` for both.
+
+**ITS FALLBACK WAS INVERTED.** It cancelled "everything but the newest", asserting
+ours would be newest because the issue is created first. Ours was the OLDER one by
+three seconds — a direct POST beats a delivery through Lambda, EventBridge and an
+API destination. So when it fired it would have cancelled the APPLICATION's run and
+kept the webhook's, which hardcodes `poisoned: "false"` and sends no `repo`: **a
+poisoned demo running clean, with every job green.**
+
+`run-name: "#${{ inputs.ticket_id }} (${{ inputs.trigger }})"` puts the two
+distinguishing inputs into `display_title`, which the list API does return. Verified
+three for three — every `(issue)` twin cancelled, every `(ui)` run kept.
+`test_the_run_name_is_what_the_web_app_matches_on_to_cancel_a_duplicate` renders the
+YAML template and compares it to the TypeScript literal, because neither file can
+see the other.
+
+**This is the first thing that DEPENDS on `trigger`'s values differing** rather than
+merely recording them.
+
+### THE `repo` INPUT, AND `DEMO_REPO` RESOLVED ONCE
+
+The target repository was a repository VARIABLE, so it was a property of the
+WORKFLOW rather than of the run: a tenant could hold three repositories in scope and
+every run still went to whichever one `vars.DEMO_REPO` named. `run-pipeline.yml`
+now takes `repo`, defaulted EMPTY, resolved once at workflow level as
+`${{ inputs.repo || vars.DEMO_REPO }}` — the ten per-job copies are deleted, because
+ten copies of an `||` is ten chances to fix nine, and a `develop` left on the
+variable would open the pull request on a different repository from the one `plan`
+commented its plan onto, with every job green.
+
+**THE INPUT AUTHORISES NOTHING.** The dispatch token already reaches every
+repository the App was installed on, so the bound is `web/app/api/runs/route.ts`
+refusing a repository outside the caller's tenant-scoped list BEFORE the token is
+read.
+
+### EVERY COST ROW IN EVERY RUN SAID `plan` — CLOSED
+
+CLAUDE.md carried this as an open item in "the integrator's files". `_emit` called
+`build_cost_record()` with no argument, so `llm.attribute_usage_to` was never called
+and every row took `_stage_or_fallback`'s `plan`. `run_stage._cost_stage` reads the
+stage the process was invoked with (each cloud stage is its own process) and is
+recorded ONCE by `main`, because `_emit` has eleven call sites. It filters to `Stage`
+members: `STAGES` also holds `gate1-rejected` and friends, and attributing one makes
+pydantic raise inside the module that "must never be the thing that fails a run".
+
+Measured before and after on live rows: run 59 `['plan','plan','plan']`, run 64
+`['plan','develop','sre']`.
+
+### VERIFIED 2026-09-22, THE FULL SWEEP
+
+```
+pytest -q                      2164 passed, 7 skipped
+ruff / actionlint / tf fmt     exit 0
+web: tsc / eslint / vitest     0 · 0 problems · 24 files 311 tests
+web: next build                0 warnings
+preflight.py                   all EIGHT checks PASS, runtimes v52
+  check 3                      LINES: [3, 4]  provenance: scanners
+poisoned run 35679536930       status=blocked  blocking=2  provenance=scanners
+                               gitleaks app/auth.py:3 and :4
+                               develop exit 3, gate2/sre/gate3/promote skipped
+                               UI renders: status blocked, no gate button,
+                               spine develop=blocked and nothing after it
+```
 
 ## WHAT IS STILL OPEN, as of 2026-09-15
 
