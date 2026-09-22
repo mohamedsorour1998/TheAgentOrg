@@ -177,12 +177,18 @@ function statusOf(
     case "success":
       return "done";
     case "skipped":
-      // A GATE SKIPPED AFTER ITS PREDECESSOR SUCCEEDED IS A REFUSAL. Anything else
-      // skipped is a stage the run never reached, which is not a status at all.
+      // A GATE SKIPPED AFTER ITS PREDECESSOR SUCCEEDED IS A REFUSAL -- a reviewer
+      // clicking Reject in the Actions UI. Anything else skipped is a stage the run
+      // never reached, which is not a status at all.
       return isRefusedGate(stage, progress) ? "rejected" : null;
     case "cancelled":
       return "failed";
     case "failure":
+      // A GATE ENDING `failure` IS A REFUSAL BEFORE IT IS A FAULT. Rejecting through
+      // the REST API -- which is what this application's Reject button does -- ends
+      // the gate job `failure`, not `skipped`. Checked first, because `failed` here
+      // would paint a person's decision as a crash.
+      if (isRefusedGate(stage, progress)) return "rejected";
       // `develop` EXITS 3 ON A BLOCK, and GitHub cannot tell that from a crash.
       // The document can: the verdict is the run's own record of why it stopped.
       return stage === "develop" && verdictIsBlock(state) ? "blocked" : "failed";
@@ -196,9 +202,37 @@ function verdictIsBlock(state: RunStateDoc | null): boolean {
   return security?.verdict === "block";
 }
 
-/** True when this gate was skipped and the stage before it succeeded. */
+/**
+ * True when a person refused this gate: the stage before it SUCCEEDED and the gate
+ * itself did not.
+ *
+ * **IT USED TO TEST FOR `skipped` AND ONLY `skipped`, AND THAT MISSED EVERY
+ * REJECTION THE APPLICATION ITSELF MAKES.** CLAUDE.md records that "a rejected
+ * GitHub Environment SKIPS its job", which is true when a reviewer clicks Reject in
+ * the Actions UI. MEASURED on runs 35678602890 and 35676065361, both refused
+ * through this application's own button -- which rejects through
+ * `POST .../pending_deployments` with a comment:
+ *
+ *     approvals -> gate1: rejected by mohamedsorour1998 -- "stop"
+ *     jobs      -> gate1: completed/failure        <- NOT skipped
+ *
+ * So both runs rendered as **FAILED** when a person had **REFUSED** them. That is
+ * the one distinction this product exists to draw, inverted: "somebody decided" read
+ * as "something broke", on the demo's third beat.
+ *
+ * **THE RULE IS NOW THE RECORDERS' RULE, VERBATIM.** `run-pipeline.yml`'s three
+ * `gate*-rejected` jobs fire on `result != 'success' && result != 'cancelled'` --
+ * they never enumerate the passing spellings, which is exactly why they got this
+ * right and this did not. Cancelled stays excluded for its own recorded reason: a
+ * cancelled run is one where NOBODY decided, and attributing a decision to a person
+ * who never saw the gate is the inverse of the defect the recorders prevent.
+ */
 function isRefusedGate(stage: Stage, progress: CiProgress): boolean {
   if (!(GATES as readonly string[]).includes(stage)) return false;
+  const outcome = progress.jobs[JOB[stage]]?.conclusion ?? "";
+  if (outcome === "success" || outcome === "cancelled" || outcome === "") return false;
+  // THE DISCRIMINATOR: a gate the run never REACHED is also not-success, so the
+  // stage before it must have succeeded for this to be a person's decision.
   const before = BEFORE[stage as Gate];
   return progress.jobs[JOB[before]]?.conclusion === "success";
 }
@@ -234,10 +268,12 @@ export function reconcileStatus(
   // credential-free gate and promote jobs leave, and the order below is the order
   // the pipeline's own exit codes are defined in.
   if (progress.jobs.promote?.conclusion === "success") return "promoted";
+  // A PERSON'S REFUSAL, BEFORE ANY FAULT. `isRefusedGate` now carries the whole
+  // rule -- not-success, not-cancelled, predecessor succeeded -- so this no longer
+  // pre-filters on a spelling, which is how `failure` (every rejection this
+  // application makes) was missed.
   for (const gate of GATES) {
-    if (progress.jobs[gate]?.conclusion === "skipped" && isRefusedGate(gate, progress)) {
-      return "rejected";
-    }
+    if (isRefusedGate(gate, progress)) return "rejected";
   }
   if (progress.jobs.develop?.conclusion === "failure" && verdictIsBlock(state)) {
     return "blocked";

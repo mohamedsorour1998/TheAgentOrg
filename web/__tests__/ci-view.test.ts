@@ -253,3 +253,107 @@ describe("when GitHub cannot be asked at all", () => {
     expect(reconcileStatus("nonsense", null, PRODUCED)).toBe("running");
   });
 });
+
+describe("a gate a person refused THROUGH THIS APPLICATION", () => {
+  /**
+   * **TRANSCRIBED FROM TWO RUNS THAT WERE RENDERED WRONG.** Runs 35678602890 and
+   * 35676065361 were both refused with the app's own Reject button, and both showed
+   * as FAILED:
+   *
+   *     approvals -> gate1: rejected by mohamedsorour1998 -- "stop"
+   *     jobs      -> gate1: completed/failure        <- NOT skipped
+   *
+   * CLAUDE.md records that a rejected Environment SKIPS its job, and that is true of
+   * the Actions UI. Rejecting through `POST .../pending_deployments` with a comment
+   * -- which is what this application does, and therefore what every refusal in the
+   * product looks like -- ends the job `failure` instead.
+   *
+   * So the reconciler read a person's decision as a crash: the exact
+   * somebody-decided-versus-something-broke inversion this product exists to refuse,
+   * on the demo's third beat.
+   */
+  const REFUSED_VIA_API: CiProgress = {
+    status: "completed",
+    conclusion: "failure",
+    jobs: {
+      plan: { status: "completed", conclusion: "success" },
+      gate1: { status: "completed", conclusion: "failure" },
+      "gate1-rejected": { status: "completed", conclusion: "failure" },
+    },
+    awaiting: [],
+  };
+
+  it("reads as rejected, not failed", () => {
+    expect(reconcileStatus("running", REFUSED_VIA_API, { status: "running" })).toBe(
+      "rejected",
+    );
+  });
+
+  it("marks the gate itself as where the run stopped", () => {
+    expect(phaseOf(REFUSED_VIA_API, { status: "running" }, "gate1")).toBe("rejected");
+  });
+
+  /**
+   * THE DISCRIMINATOR STILL HOLDS, and it is the half that keeps this honest. A
+   * gate that failed while the stage BEFORE it did not succeed is a run that
+   * stopped earlier -- not a person's decision. `run-pipeline.yml`'s recorders
+   * carry the same clause, and this repository has already recorded a BLOCK being
+   * overwritten as `rejected` and attributed to somebody who never saw the gate.
+   */
+  it("is NOT a refusal when the stage before it did not succeed", () => {
+    const stopped_earlier: CiProgress = {
+      ...REFUSED_VIA_API,
+      jobs: {
+        plan: { status: "completed", conclusion: "failure" },
+        gate1: { status: "completed", conclusion: "failure" },
+      },
+    };
+    expect(reconcileStatus("running", stopped_earlier, { status: "running" })).toBe(
+      "failed",
+    );
+    expect(phaseOf(stopped_earlier, { status: "running" }, "gate1")).toBe("failed");
+  });
+
+  /**
+   * CANCELLED IS STILL NOT A REFUSAL, and that exclusion is load-bearing. A
+   * cancelled run is one where NOBODY decided. MEASURED on run 32575709109: a
+   * recorder fired on `cancelled` and posted "REJECTED by mohamedsorour1998" to an
+   * issue, naming a human who never saw the gate -- which CLAUDE.md calls the
+   * inverse of the defect that job exists to prevent.
+   */
+  it("is NOT a refusal when the gate was cancelled", () => {
+    const cancelled: CiProgress = {
+      ...REFUSED_VIA_API,
+      jobs: {
+        plan: { status: "completed", conclusion: "success" },
+        gate1: { status: "completed", conclusion: "cancelled" },
+      },
+    };
+    expect(reconcileStatus("running", cancelled, { status: "running" })).not.toBe(
+      "rejected",
+    );
+  });
+
+  /**
+   * AND A BLOCK IS STILL A BLOCK. `develop` exits 3 on a refused change and GitHub
+   * reports that as an ordinary `failure` -- the gate branch must not swallow it,
+   * because exit 3 is deliberately not 1 so the poisoned demo is distinguishable
+   * from a broken workflow.
+   */
+  it("does not turn a blocked develop into a rejection", () => {
+    const blocked: CiProgress = {
+      status: "completed",
+      conclusion: "failure",
+      jobs: {
+        plan: { status: "completed", conclusion: "success" },
+        gate1: { status: "completed", conclusion: "success" },
+        develop: { status: "completed", conclusion: "failure" },
+        gate2: { status: "completed", conclusion: "skipped" },
+      },
+      awaiting: [],
+    };
+    expect(reconcileStatus("running", blocked, { security: { verdict: "block" } })).toBe(
+      "blocked",
+    );
+  });
+});
