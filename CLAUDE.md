@@ -4601,6 +4601,47 @@ poisoned run 35679536930       status=blocked  blocking=2  provenance=scanners
                                spine develop=blocked and nothing after it
 ```
 
+### CI WAS RED ON EVERY COMMIT FOR A MONTH, AND NOTHING LOCAL COULD SAY SO — 2026-09-24
+
+`ci.yml`'s `test` job failed on **every** push from `8147b72` (2026-08-28) to
+`9c53850` (2026-09-22) — 40+ runs, the SAME two tests on the first red run and the
+last, both green on every laptop. Fixed in `8bb4404`; first green run `35956226837`.
+
+| Test | Why green here | Why red in CI |
+|---|---|---|
+| `test_every_measure_script_runs_and_exits_zero[measure_prompts.py]` | a SUBPROCESS escapes all six conftest guards, so it made **live Bedrock calls** — measured 55.82s | `LLM_DISABLED` at job level, no credentials: the script correctly REFUSED a fixture-read measurement, exit 1 |
+| `test_the_scorecard_records_a_rejection_with_a_commit_that_exists` | full clone | `actions/checkout` defaults to depth 1 — reproduced in `git clone --depth 1`, same 8 SHAs |
+
+**The first row is two defects, not one.** The test demanded `exit 0` from a script
+whose designed behaviour with no model is to refuse — and on a laptop it spent money
+on every `pytest -q` to get it. **Any test that runs one of our scripts as a subprocess
+has left the guards behind**; pass the environment CI gives it
+(`env={**os.environ, "LLM_DISABLED": "true"}`). `MODEL_BACKED` is now a literal and
+such a script must REFUSE.
+
+**The lesson is about who reads a gate.** Every pre-demo check in this file —
+`preflight.py`, the eight gates, `next start` + `curl` — reads the DEPLOYED path or
+the WORKING TREE. None reads the Actions tab, which is the one surface a judge opening
+the repository sees first. **A gate nobody reads is not a gate.** Before a demo:
+`gh run list --workflow ci.yml --branch main --limit 1`.
+
+**A RUN PARKED AT A GATE HOLDS THE ONLY PIPELINE SLOT.** `run-pipeline.yml`'s
+concurrency is one group per ref with `cancel-in-progress: false`, and a job waiting
+on an Environment is IN PROGRESS. Run #69 (a 2026-09-22 test) sat at gate2 for two
+days, so every run started on demo day would have queued behind it with nothing
+saying why. Cancelled — **not rejected**: a REST rejection posts `REJECTED by <the
+token's owner>` for a decision nobody made. Before a demo:
+`gh run list --workflow run-pipeline.yml --status waiting`.
+
+**THIS LAPTOP RAN OUT OF DISK, AND SWAP IS WHAT FILLS IT.** 2026-09-24: 861 MiB, then
+126 MiB, free of 228 GiB, falling while nothing was being written — swap at 16.6 GB,
+15.1 GB used, and on Apple Silicon swap files share the container's free space. The
+tool itself failed with `ENOSPC` writing its own output, and a `gh run cancel` died
+before it ran while reading as issued. `uv cache prune` recovered 2.4 GiB. The large
+items are `~/.cache/uv` (12G), `~/.local/share/containers` (10G), `~/.cache/huggingface`
+(6.8G) and `~/.ollama` (4.4G, the self-hosted model this project does not use).
+**A reboot drops swap entirely** and is the first move before presenting.
+
 ## WHAT IS STILL OPEN, as of 2026-09-15
 
 ### THE DATABASE IS DYNAMODB, BY THE OPERATOR'S DECISION — 2026-09-15
