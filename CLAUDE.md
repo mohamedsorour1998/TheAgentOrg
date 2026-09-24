@@ -4637,7 +4637,8 @@ token's owner>` for a decision nobody made. Before a demo:
 126 MiB, free of 228 GiB, falling while nothing was being written — swap at 16.6 GB,
 15.1 GB used, and on Apple Silicon swap files share the container's free space. The
 tool itself failed with `ENOSPC` writing its own output, and a `gh run cancel` died
-before it ran while reading as issued. `uv cache prune` recovered 2.4 GiB. The large
+before it ran while reading as issued. Free space went 126 MiB -> 3.3 GiB across a `uv cache prune`, but swap moves at
+the same time, so the prune's own share is not isolated. The large
 items are `~/.cache/uv` (12G), `~/.local/share/containers` (10G), `~/.cache/huggingface`
 (6.8G) and `~/.ollama` (4.4G, the self-hosted model this project does not use).
 **A reboot drops swap entirely** and is the first move before presenting.
