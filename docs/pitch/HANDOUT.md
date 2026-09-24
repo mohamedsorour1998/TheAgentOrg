@@ -1,6 +1,6 @@
 # Team handout — The Agent Org at the DevOps Hackathon Finals
 
-**TD63 RosettaTeam · Friday 26 September 2026 · Glass Room 1 · 3:50 PM · Creativa Giza**
+**TD63 RosettaTeam · 26 September 2026 · Glass Room 1 · 3:50 PM · Creativa Giza**
 
 Mohamed Sorour presents; all five of us stand up, and each of us takes the questions on
 our own part. **Everyone reads sections 1 to 5. Then study your own part in section 6,
@@ -215,7 +215,7 @@ own empty workspace — you cannot see anyone else's runs.
 
 ---
 
-## 9 · Before Friday
+## 9 · Before the finals
 
 - [ ] Everyone: read sections 1–5; study your part in section 6; practise your answers aloud
 - [ ] Sorour: one timed rehearsal on the presenting laptop, with the HDMI adapter
