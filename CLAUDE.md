@@ -3480,6 +3480,22 @@ from this one rather than from scratch.
 
 ---
 
+### The FINALS deck is generated in `technical-presentations`, not here — 2026-09-24
+
+`scripts/make_deck.py` above built the PRE-FINAL deck. The finals deck is
+`~/sorour/technical-presentations/talks/devops-hackathon-final/`: `build_deck.py`
+generates it, `pitch/REHEARSAL.md` is both the speaking script and the deck's speaker
+notes (the build fails if they drift), and `pitch/HANDOUT.md` is the team's study guide.
+`docs/pitch/` here holds MIRRORS of those four files — edit there, rebuild, copy here.
+That repository's `deckkit.snapshot` renders the deck in PowerPoint slide by slide; read
+its CLAUDE.md before touching the deck.
+
+**The live UI marks a block on `develop`, not on `security`**, and a judge may notice the
+slide says otherwise. `web/lib/ci-view.ts:194` marks the GitHub JOB, and review and
+security run inside the `develop` job, so the run page shows develop `blocked` and review
+and security `done`. The slide marks the stage that refused. Left as is two days before
+the demo; the demo plan and rehearsal script carry the one-line answer.
+
 ## Lint rules that cannot be relaxed
 
 ```bash
@@ -5521,7 +5537,7 @@ built and what that costs.
 | `scripts/run_stage.py` | One pipeline stage as one Actions job (the cloud path) |
 | `scripts/preflight.py` | Four checks proving the DEPLOYED path is real; exit 0 or 1 |
 | `scripts/measure_prompts.py` | Lane M's gate: two prompt changes, one arm each, model-backed. A prompt edit is a behaviour change with no compiler, and `pytest` cannot see it |
-| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — **5 of 76** modules, **2** module-level at `d6165c8`. Replaced four grep counts that reproduced under no scope |
+| `scripts/measure_dependencies.py` | Vendor coupling over the **AST** — **8 of 83** modules touch a vendor SDK, **2** at module level, measured at `deabeef` 2026-09-24 (was 5 of 76 at `d6165c8`). Replaced four grep counts that reproduced under no scope |
 | `scripts/measure_{scorecard,sbom,cost}.py` | **Lane L.** The evolution scorecard's row, the container SBOM, and what one change costs. Each **exits non-zero when it cannot measure what it claims** — `--require-real-scanners` and `--require-model` are the two flags that stop a fixture-read figure wearing a real number's clothes |
 | `docs/final/evidence/` | **Lane L.** Six documents, four JSON artifacts, every number traced to a command. The scorecard carries **two** measured rows and **seven** recorded rejections; `limitations.md` costs **seventeen** limitations; `competitors.md`'s "where they are better" section is longer than the one where we win |
 | `scripts/scan_gate.py` | Real scanners over both fixtures; CI's `scan` job |
