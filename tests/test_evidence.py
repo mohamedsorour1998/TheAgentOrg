@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -73,6 +74,12 @@ SCRIPTS = REPO_ROOT / "scripts"
 EVIDENCE = REPO_ROOT / "docs" / "final" / "evidence"
 
 MEASURE_SCRIPTS = sorted(SCRIPTS.glob("measure_*.py"))
+
+# Scripts whose WHOLE claim is a model measurement. With no model they must
+# REFUSE -- exit non-zero and say why -- rather than publish a number read off a
+# fixture. A literal rather than derived from the scripts, so deleting a refusal
+# cannot also delete the expectation that it exists.
+MODEL_BACKED = {"measure_prompts.py"}
 
 
 def _module(path: pathlib.Path) -> ast.Module:
@@ -128,6 +135,18 @@ def test_there_is_at_least_one_measure_script():
     )
 
 
+def test_every_model_backed_name_is_a_real_script():
+    """A misspelled MODEL_BACKED entry would route nothing to the refusal branch.
+
+    The script would then be held to `exit 0`, fail with no model, and the fix for
+    a month of red CI would be to delete the name -- silently re-arming live model
+    calls from a laptop's test run.
+    """
+    names = {p.name for p in MEASURE_SCRIPTS}
+    assert MODEL_BACKED, "MODEL_BACKED is empty; the refusal branch would pin nothing"
+    assert MODEL_BACKED <= names, f"not scripts: {sorted(MODEL_BACKED - names)}"
+
+
 @pytest.mark.parametrize("script", MEASURE_SCRIPTS, ids=lambda p: p.name)
 def test_every_measure_script_parses_and_has_a_main(script: pathlib.Path):
     """A script that cannot be run cannot be the source of a published number."""
@@ -156,6 +175,16 @@ def test_every_measure_script_runs_and_exits_zero(
     the test owns; `tmp_path` is removed for us.
 
     `--runs 1` keeps this to one walk per arm. The scorecard's own default is 10.
+
+    `LLM_DISABLED=true` IS PASSED EXPLICITLY, AND ITS ABSENCE KEPT CI RED FOR A
+    MONTH. A subprocess escapes all six conftest guards, so on a laptop with AWS
+    credentials `measure_prompts.py` made LIVE Bedrock calls -- measured 55.82s
+    for that one case -- and passed; in CI, which sets `LLM_DISABLED` at job level
+    and holds no credentials, the same script correctly refused a fixture-read
+    measurement and exited 1. Red on every commit from 2026-08-28 to 2026-09-24,
+    green only on the machine that paid for it. The subprocess now gets the model
+    environment CI gives it, and a MODEL_BACKED script is required to REFUSE --
+    that refusal is the behaviour worth pinning, not an exit code of 0.
     """
     args = [sys.executable, str(script), "--out", str(tmp_path / f"{script.stem}.json")]
     if script.name == "measure_scorecard.py":
@@ -163,8 +192,21 @@ def test_every_measure_script_runs_and_exits_zero(
 
     result = subprocess.run(
         args, capture_output=True, text=True, check=False, cwd=str(REPO_ROOT),
-        timeout=600,
+        timeout=600, env={**os.environ, "LLM_DISABLED": "true"},
     )
+    if script.name in MODEL_BACKED:
+        assert result.returncode != 0, (
+            f"{script.name} exited 0 with no model available. A model-backed "
+            f"measurement that succeeds on fixture replies publishes a canned "
+            f"answer as a measured number.\n--- stdout ---\n{result.stdout[-3000:]}"
+        )
+        assert "INVALID MEASUREMENT" in result.stdout, (
+            f"{script.name} exited {result.returncode} but did not say it refused; "
+            f"a crash and a refusal must not read the same.\n"
+            f"--- stdout ---\n{result.stdout[-3000:]}\n"
+            f"--- stderr ---\n{result.stderr[-3000:]}"
+        )
+        return
     assert result.returncode == 0, (
         f"{script.name} exited {result.returncode}\n"
         f"--- stdout ---\n{result.stdout[-3000:]}\n"

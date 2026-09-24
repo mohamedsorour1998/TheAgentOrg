@@ -60,7 +60,14 @@ jobs:
       # the other side, for laptops that DO have credentials.
       LLM_DISABLED: "true"
     steps:
+      # FULL HISTORY. tests/test_evidence.py resolves every commit SHA the
+      # scorecard's rejection log quotes, and the default depth-1 checkout holds
+      # exactly one commit -- so that test failed here on every push from
+      # 2026-08-28 while passing on every laptop, which clones everything.
+      # Reproduced in a `git clone --depth 1`: the same 8 SHAs unresolved.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
