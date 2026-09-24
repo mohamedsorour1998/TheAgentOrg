@@ -6,9 +6,9 @@ Speaker: Sorour, alone. All five present; all five take questions in their own a
 **The slot is 20 minutes and it includes the judges' questions.** Budget:
 
 ```
-slides      9:30
+slides     10:20   (17 slides, the two backups now in the main flow)
 live demo   5:00
-questions   5:30
+questions   4:40
 ```
 
 Verify the sum rather than trusting it:
@@ -28,19 +28,43 @@ the last build, rebuild the deck rather than correcting it aloud.
 
 ---
 
-## 1 · Title — 0:20
+## 1 · Title — 0:15
 
 **SHOW** Security gates for agent-written code.
 
-**SAY** Good afternoon. We are RosettaTeam. Our project is called The Agent Org.
-Five AI agents take a ticket all the way to a merged pull request — and three human
-gates and one deterministic rule decide whether it ships. I have twenty minutes
-including your questions, so I will keep the slides short and spend five of those
-minutes showing you the thing running.
+**SAY** Good afternoon. Our project is called The Agent Org. Five AI agents take a
+ticket all the way to a merged pull request — and three human gates and one
+deterministic rule decide whether it ships. I have twenty minutes including your
+questions, so I will keep the slides short and spend five of those minutes showing
+you the thing running.
 
 ---
 
-## 2 · An agent can write the code. Who checks it? — 0:45
+## 2 · RosettaTeam — 0:25
+
+**SHOW** Five photographs, each with a title and a workplace. This is the speaker page.
+
+**SAY** We are RosettaTeam. I am Mohamed Sorour, a senior DevOps engineer at Vezeeta,
+aiming for a master's in computer science with an AI specialization at Georgia Tech.
+Mariam is an associate solution engineer at RENOSYSTEMS. Habiba is a junior DevOps
+engineer, and Reem and Aya are junior testing engineers — all three Digilians alumni.
+We divided the work by file rather than by feature. All five are here and take
+questions in their own areas.
+
+---
+
+## 3 · Agenda — 0:20
+
+**SHOW** Eight rows: each section of the brief, one line on what it covers, and its minutes.
+
+**SAY** Here is the twenty minutes. Three on the overview, then the architecture, the
+business impact, and how this differs from what vendors ship. Then what is built,
+your ten notes, and what it does not do. What is next, five minutes live, and the
+rest of the slot is yours.
+
+---
+
+## 4 · An agent can write the code. Who checks it? — 0:40
 
 **SHOW** Three bullets, then the line in cyan.
 
@@ -58,7 +82,7 @@ will come back to that on the differentiation slide.
 
 ---
 
-## 3 · Nine stages. Three of them are people. — 0:45
+## 5 · Nine stages. Three of them are people. — 0:40
 
 **SHOW** The nine-stage spine. Point at the rings.
 
@@ -70,7 +94,7 @@ model, which is the next slide.
 
 ---
 
-## 4 · Non-deterministic models. A deterministic gate. — 1:00
+## 6 · Non-deterministic models. A deterministic gate. — 1:00
 
 **THE MOST IMPORTANT SLIDE. Do not rush it.**
 
@@ -97,31 +121,50 @@ require a named person.
 
 ---
 
-## 5 · What runs where — 1:05
+## 7 · How a finding becomes a verdict — 0:45
 
-**SHOW** Six lanes: trigger, orchestration, agents, the gate, state, the product.
+**SHOW** Three scanners, how each severity is decided, and four rules.
 
-**SAY** Top to bottom. An issue opens on the target repository; a Lambda verifies an
-HMAC signature and publishes to EventBridge, which dispatches the workflow — with a
-dead-letter queue, which has earned its keep once already. GitHub Actions runs seven
-jobs, and three of them are Environments with required reviewers: those Environments
-*are* the gates. Each agent call goes to its own Bedrock AgentCore runtime — five
-runtimes, one arm64 image, differing only by a role variable — and the model is Nova
-2 Lite. The security lane is the one with no AWS icon on purpose: three scanners and
-our own comparison. State is two DynamoDB tables, one for the audit trail and one
-for tenancy. And the product on top is Cognito, Amplify server-side rendering, and
-Next.js.
+**SAY** This is the rule that decides, since you asked about it in the pre-final.
+Semgrep and Trivy report their own severities, and one table maps them. Gitleaks
+reports no severity at all, so a secret is critical by policy — a committed
+credential has no lesser grade. The rule is one comparison: block when any finding is
+at or above the threshold. Two things keep it safe. A severity we do not recognise
+fails closed at the block threshold, and a threshold outside the vocabulary is
+refused, never clamped.
 
-Fourteen AWS services. Every step assumes a role through OIDC — there is not a single
-static AWS key anywhere in the project.
+**IF ASKED — "why is gitleaks always critical?"** It reports no severity field — rule,
+file, line, an entropy score. So the severity has to come from somewhere, and ranking
+credentials would mean deciding which ones we are willing to merge.
+
+---
+
+## 8 · What runs where — 1:10
+
+**SHOW** The AWS diagram. Point at each number as you say it.
+
+**SAY** Follow the numbers. One: an engineer opens an issue — or starts a run from our
+app. Two: GitHub sends a signed webhook to a Lambda function, which verifies the HMAC
+before anything else happens and publishes to EventBridge. Three: a rule matches
+opened issues and dispatches the pipeline; a failed dispatch lands in an SQS
+dead-letter queue. The pipeline is seven GitHub Actions jobs. Four: each job assumes
+an IAM role through OIDC — there is no static AWS key anywhere — and invokes that
+agent's Bedrock AgentCore runtime. Five: the agents call Amazon Nova 2 Lite. Six: the
+security stage is three scanners and a fixed threshold, with no model in it. Seven:
+the gates are GitHub Environments that wait for a named reviewer, in GitHub or in our
+app. Eight: the app, on Amplify with Cognito sign-in, reads the run index from
+DynamoDB through a role that can only see its own tenant's partition.
 
 **IF ASKED — "why AgentCore and not just Lambda?"** Each agent is an isolated runtime
 with its own identity and its own log group, and the security image is the only one
 carrying the three scanner binaries. Isolation is the point.
 
+**IF ASKED — "where is the run's state?"** It travels between jobs as a GitHub Actions
+artifact, and every stage writes a copy onto the DynamoDB run index the app reads.
+
 ---
 
-## 6 · What it costs, and what it buys — 0:50
+## 9 · What it costs, and what it buys — 0:45
 
 **SAY** A change costs between one and one-point-seven cents of model time. That is
 measured over three consecutive clean runs, priced from the AWS Pricing API. The
@@ -144,7 +187,7 @@ minutes of human attention per change, and we have not measured that at scale.
 
 ---
 
-## 7 · Every vendor's AI review is advisory. They say so. — 0:50
+## 10 · Every vendor's AI review is advisory. They say so. — 0:45
 
 **SHOW** The table of their own documentation.
 
@@ -168,7 +211,7 @@ approval gates between stages, as one pipeline. Individually, each exists.
 
 ---
 
-## 8 · Three shipped products fail open — 0:40
+## 11 · Three shipped products fail open — 0:30
 
 **SAY** And this is the argument for the whole design. Cursor's hooks: exit code 2
 denies, any other exit code and the action proceeds — fail-open by default. Claude
@@ -180,9 +223,9 @@ raises rather than returning an empty list of findings.
 
 ---
 
-## 9 · What is built — 0:45
+## 12 · What is built — 0:40
 
-**SAY** Two thousand one hundred and seventy-one automated tests across ninety-three
+**SAY** Two thousand one hundred and seventy-two automated tests across ninety-three
 files, plus three hundred and eleven for the web application. Five agent runtimes
 deployed, all reporting ready at the same version — a split version would mean a
 partial deploy and we check for it before every demo. It runs in the cloud on a real
@@ -193,7 +236,7 @@ refuses another tenant's data, our code does not have to remember to.
 
 ---
 
-## 10 · Your ten notes from the pre-final — 1:00
+## 13 · Your ten notes from the pre-final — 0:50
 
 **THE SLIDE THAT EARNS THE MOST GOODWILL. Slow down.**
 
@@ -207,12 +250,25 @@ a table at all. That is now one policy table, with a floor derived from it rathe
 written down twice. Your note produced a real correction, and I would rather say that
 than claim we were right all along.
 
-**IF ASKED about any single row** — the backup slides after the close cover scoring
-and limits in detail; ask and I will jump to them.
+**IF ASKED about any single row** — scoring is slide 7 and the limits are slide 14;
+ask and I will go back to either.
 
 ---
 
-## 11 · What is next — 0:45
+## 14 · What this does not do — 0:35
+
+**SHOW** Four bullets. Say them before the roadmap, not after.
+
+**SAY** And what it does not do. A repository admin can bypass a gate — an operator
+setting, reported by our pre-flight check on every run. If the scanners miss
+something, the reviewer is the only thing that saw it, and the reviewer is advisory.
+One language, one target repository, three scanners: breadth is where competitors are
+ahead. And a merged pull request carries the reviewed diff as an artifact; applying
+it to the source is next.
+
+---
+
+## 15 · What is next — 0:40
 
 **SAY** Four things, and the first two are honest gaps. Today a merged pull request
 carries the reviewed diff as an artifact rather than applying it to the source —
@@ -224,7 +280,7 @@ more languages and more scanners — the gate is a table, so adding a scanner is
 
 ---
 
-## 12 · The demonstration — 0:15
+## 16 · The demonstration — 0:10
 
 **SAY** Let me show you the half that matters: a ticket that deliberately carries a
 credential.
@@ -233,15 +289,7 @@ credential.
 
 ---
 
-## 13 · RosettaTeam — 0:20
-
-**SAY** Five engineers. We divided the work by file rather than by feature, which is
-how fourteen parallel workstreams landed without collisions. They are all here and
-they will take questions in their own areas.
-
----
-
-## 14 · Thank you — 0:10
+## 17 · Thank you — 0:10
 
 **SAY** That is The Agent Org. It is live at theagentorg.rosettacloud.app. Questions.
 
@@ -256,7 +304,7 @@ they will take questions in their own areas.
 | a judge asks for the clean run | open the merged pull request, then play the 90-second recording |
 | a video will not play | press Escape; the poster frame is the LAST frame, so narrate the still |
 | a gate approval 403s | say the token needs `deployments: write` and move on; do not debug on stage |
-| you are running long | cut slide 8 (fail-open) and slide 13 (team) — 1:00 back |
+| you are running long | say slide 11 (fail-open) in one sentence and slide 14 (limits) as its first bullet — about 0:45 back. The team slide stays: it is the speaker page |
 
 # Questions to have answers ready for
 
