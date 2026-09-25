@@ -290,9 +290,9 @@ and more scanners; the scoring is a table, so a new scanner is one row.
 **SAY** Let me show you the half that matters: a ticket that deliberately carries a
 credential. Watch the line numbers when it blocks.
 
-**IF ASKED — "why does the screen say develop, not security?"** The review and the
-security check run inside one GitHub job called develop, and the product marks the job.
-Open the security panel: it shows the verdict and the two line numbers.
+**IF ASKED — "what are the three cards?"** One per scanner, each showing its own worst
+finding against the threshold. Only gitleaks reached it, so only gitleaks blocks. That
+comparison is the whole decision, and a run that passes shows it too.
 
 → **switch to the browser. See DEMO-PLAN.md.**
 

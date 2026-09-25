@@ -38,11 +38,11 @@ so no forgotten setting can let it through.
 | 5 | The develop stage runs: about **2 min 19 s**, measured on run 35679536930. Use the time to explain that the reviewer is advisory and the scanners are not | 2:20 |
 | 6 | **The block.** Status `blocked`, two blocking findings, provenance `scanners`, and nothing after it runs | 0:50 |
 
-**On screen, the block is marked on `develop`, not on `security`.** The review and the
-security check run inside the one GitHub job called `develop`, and the product marks the
-job. Say it once — "security runs inside the develop job" — then open the security panel
-to show the verdict and the two line numbers. The slide's diagram marks the security
-stage because that is the step that refused.
+**On screen, the block is marked on `security`, as on the slide.** The line runs green
+through develop and review and stops in rose at security; nothing after it runs. The
+security panel opens on its own: `critical ≥ high`, then one card per scanner, each
+showing its own worst finding against the threshold. Point at the gitleaks card, the one
+that blocks, then at the two line numbers in the findings table.
 
 ## The one field that proves it
 

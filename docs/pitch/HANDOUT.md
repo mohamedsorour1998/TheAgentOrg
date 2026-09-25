@@ -92,9 +92,11 @@ sentence and offer the rest at the end.
    the scanners are not.
 5. **The block**: status blocked, two findings, provenance `scanners`, lines 3 and 4.
 
-**The screen marks the block on `develop`, not `security`.** The review and the security
-check run inside the one GitHub job called develop. If anyone asks: "security runs inside
-the develop job — here is its verdict," and open the security panel.
+**The screen marks the block on security, as the slide does.** The line runs green
+through develop and review and stops in rose at security. The security panel shows
+`critical ≥ high` and one card per scanner, each with its own worst finding against the
+threshold; gitleaks is the one that blocks. A run that passes shows the same comparison
+the other way round, for example `low < high`.
 
 **If the live run stalls:** open the earlier poisoned run, 35679536930, and say plainly it
 is an earlier run. There is no recording in the deck.
