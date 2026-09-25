@@ -54,7 +54,7 @@ sentence and offer the rest at the end.
 | 9 | What it costs, and what it buys | 1.3–1.7¢ per change, 7.88 min median, 0 of 12 merged changes carried a credential |
 | 10 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
 | 11 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
-| 12 | What is built | 2176 + 338 tests, five runtimes on one version, a real product, multi-tenant |
+| 12 | What is built | 2182 + 338 tests, five runtimes on one version, a real product, multi-tenant |
 | 13 | Your ten notes from the pre-final | every note answered |
 | 14 | What this does not do | four honest limits |
 | 15 | What is next | four next steps; the first answers the last limit |
@@ -75,8 +75,8 @@ sentence and offer the rest at the end.
 | **81 s** | the demo ticket, from approving gate1 to the block | run #73, rehearsed 25 September |
 | **CVE-2018-18074** | the high-severity vulnerability in requests 2.19.0 that blocks the demo | Trivy, from its vulnerability database |
 | **lines 3 and 4** | where the deployed scanners report the key in the pre-flight reference change | the stand-in reports 4 and 5 — that pair proves a real scan |
-| **2176** | automated tests, across 95 files | plus **338** for the web app, across 26 files |
-| **v55** | the version all five agent runtimes are on (deployed 25 September with the scanner fix) | checked before every demo |
+| **2182** | automated tests, across 96 files | plus **338** for the web app, across 26 files |
+| **v56** | the version all five agent runtimes are on (25 September: the scanner fix, and the knowledge bases switched on) | checked before every demo |
 | **6/8 → 8/8** | the reviewer catching a plan mismatch, before and after adding its knowledge base | measured over 8 trials each |
 | **8 of 83** | code modules that touch a vendor SDK; only 2 load one at start-up | measured by reading the code |
 | **20 in a row** | consecutive poisoned runs that all blocked, in the determinism test | the test suite |
@@ -227,6 +227,12 @@ approving each stage.
 **"Why does a clean run sometimes not merge?"** — *Reem.* The reviewer is a real model: if
 the change does not do what the ticket asked, it sends it back, up to three times, and the
 run ends without merging. That is the reviewer doing its job.
+
+**"Is the knowledge base (RAG) real?"** — *Sorour.* Yes: three hand-written knowledge
+bases — why past changes were sent back, the team's conventions, security advisories.
+Four agents look up what is relevant before answering, with keyword matching, no vector
+database. With it the reviewer caught a ticket mismatch 8 of 8 times, without it 6 of 8.
+It is on in the deployed system and never touches the security verdict.
 
 **"Can we try it?"** — *Sorour.* Yes: theagentorg.rosettacloud.app. Sign up, and you get your
 own empty workspace — you cannot see anyone else's runs.

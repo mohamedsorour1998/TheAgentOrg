@@ -4719,6 +4719,30 @@ fixture`), not the developer — read the stored state, not `last_source`.
 **The general form:** a demo path with a safety net measures the safety net. The gate had
 only ever been shown input the net had normalised.
 
+### RETRIEVAL WAS NEVER ON IN PRODUCTION — switched on 2026-09-25, runtimes v56
+
+`config.RETRIEVAL_ENABLED` defaults to false and nothing in `.github/` set it, so the three
+knowledge bases wired into the planner, developer, reviewer and security explanation were
+never read by a deployed agent — run #73's retrieval record was empty while slide 13 said
+"used by four of the agents". Every earlier retrieval measurement (6/8 → 8/8) was a local
+harness with the switch on.
+
+**Switching it on alone would have been unprovable.** `_prompt` writes `state.retrieval`
+on the CONTAINER's copy of the run, and the 200 envelope carried `result`, `source`,
+`usage` and nothing else, so the runner's record stayed empty either way. The envelope
+now carries `retrieval` and `agent_client._absorb_retrieval` REPLACES the runner's record
+(the container started from it; appending double-counts). `deploy.yml` sets
+`RETRIEVAL_ENABLED=true` on all five runtimes, read back with `get-agent-runtime`.
+
+**Verified on run #75 (36116159979), no demo flag:** all three corpora `retrieved`, 18
+documents, 4 lookups on the saved run; the reviewer still approved the vulnerable pin;
+Trivy still blocked on CVE-2018-18074. Locally, 3 of 3 trials the same.
+
+**A local trial that looked like a regression was the network.** The first retrieval-on
+run read `security=pass` twice — the laptop had lost DNS for `bedrock-runtime`, every agent
+served its fixture, and the fixture diff carries no pin. Count `not c.fixture` in
+`llm.usage()` before believing a model-backed trial; a pass from fixtures measures nothing.
+
 ### Three smaller things from the same day
 
 - **A vendor rewrote a page the deck quoted.** GitHub's Copilot review page no longer says

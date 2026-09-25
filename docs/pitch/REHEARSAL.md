@@ -250,7 +250,7 @@ exactly what we refuse: in our pipeline, a missing or crashed scanner blocks the
 
 **SHOW** Three figures and three cards.
 
-**SAY** Two thousand one hundred and seventy-six automated tests across ninety-five
+**SAY** Two thousand one hundred and eighty-two automated tests across ninety-six
 files, plus three hundred and thirty-eight for the web app. Five agent runtimes, all ready on
 the same version; a split would mean a half-finished deploy, and we check for it before
 every demo. It runs in the cloud from a real issue. It is a product, not a script: you
@@ -272,6 +272,13 @@ was simply typed where each finding was created: no table, no policy. There is n
 scoring table for all three scanners, and the rule for secrets is written down as a
 policy. Your note produced a real correction, and I would rather say so than claim we
 were right all along.
+
+**IF ASKED — "is the knowledge base real?"** Yes. Three hand-written knowledge bases: why
+past changes were sent back, the team's settled conventions, and security advisories.
+Before answering, four of the agents look up what is relevant, with plain keyword
+matching, no vector database. Measured: with it, the reviewer caught a change that did
+not match its ticket 8 times out of 8; without it, 6. It is switched on in the deployed
+system, and it never touches the security verdict.
 
 **IF ASKED about any single row** — scoring is slide 7 and the limits are slide 14; ask
 and I will go back to either.
