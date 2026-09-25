@@ -209,6 +209,54 @@ describe("what GitHub is NOT allowed to overwrite", () => {
     );
   });
 
+  /**
+   * **RUN 71, AS THE DEPLOYED APP DREW IT.** `develop` in rose, `review` and
+   * `security` drawn as never having run, and "Stopped at develop. Nothing after it
+   * ran" -- above a security panel showing the verdict those two stages produced.
+   * The block is decided by security, inside the develop job; the mark goes there.
+   */
+  const BLOCKED_RECORD = {
+    status: "blocked",
+    dev: { branch: "feat/x" },
+    review: { verdict: "changes_requested" },
+    security: { verdict: "block" },
+  };
+
+  it("marks the block on security, and review and develop as having run", () => {
+    expect(phaseOf(BLOCKED_JOBS, BLOCKED_RECORD, "develop")).toBe("done");
+    expect(phaseOf(BLOCKED_JOBS, BLOCKED_RECORD, "review")).toBe("done");
+    expect(phaseOf(BLOCKED_JOBS, BLOCKED_RECORD, "security")).toBe("blocked");
+    expect(phaseOf(BLOCKED_JOBS, BLOCKED_RECORD, "gate2")).toBeNull();
+  });
+
+  it("marks the revision cap on review, with security having passed after it", () => {
+    // `_stage_develop` exits 4 when the reviewer never approved: the scanners ran
+    // AFTER the loop and cleared the diff, so security is done and review is where
+    // the run stopped.
+    const capped = {
+      status: "failed",
+      dev: { branch: "feat/x" },
+      review: { verdict: "changes_requested" },
+      security: { verdict: "pass" },
+    };
+    expect(phaseOf(BLOCKED_JOBS, capped, "develop")).toBe("done");
+    expect(phaseOf(BLOCKED_JOBS, capped, "review")).toBe("failed");
+    expect(phaseOf(BLOCKED_JOBS, capped, "security")).toBe("done");
+  });
+
+  it("leaves a crash on develop, because nothing recorded says otherwise", () => {
+    // Mid-loop the review verdict is routinely `changes_requested` and the status
+    // still `running`: that is a crash, not a reviewer's refusal.
+    const crashed = {
+      status: "running",
+      dev: { branch: "feat/x" },
+      review: { verdict: "changes_requested" },
+    };
+    expect(phaseOf(BLOCKED_JOBS, crashed, "develop")).toBe("failed");
+    expect(phaseOf(BLOCKED_JOBS, crashed, "review")).toBe("done");
+    expect(phaseOf(BLOCKED_JOBS, crashed, "security")).toBeNull();
+  });
+
   it("does not read a skipped gate after a block as somebody refusing it", () => {
     // THE REJECTION RECORDERS' DISCRIMINATOR. A gate the run never reached is
     // skipped too, so the gate's own result reads identically for "a human refused

@@ -158,7 +158,9 @@ function statusOf(
   // they are honestly unknown: the document gains `dev`, `review` and `security`
   // together, when the job finishes.
   if (!JOB[stage]) {
-    return produced(state, stage === "review" ? "review" : "security") ? "done" : null;
+    if (!produced(state, stage === "review" ? "review" : "security")) return null;
+    if (stoppedInsideDevelop(state) !== stage) return "done";
+    return stage === "security" ? "blocked" : "failed";
   }
 
   const job = jobOf(progress, stage);
@@ -189,12 +191,53 @@ function statusOf(
       // the gate job `failure`, not `skipped`. Checked first, because `failed` here
       // would paint a person's decision as a crash.
       if (isRefusedGate(stage, progress)) return "rejected";
-      // `develop` EXITS 3 ON A BLOCK, and GitHub cannot tell that from a crash.
-      // The document can: the verdict is the run's own record of why it stopped.
-      return stage === "develop" && verdictIsBlock(state) ? "blocked" : "failed";
+      // `develop` EXITS NON-ZERO WHEN A STAGE INSIDE IT STOPPED THE RUN, and GitHub
+      // cannot tell that from a crash. The document can -- and when it names the
+      // stage that stopped, the developer itself did its work and the mark goes on
+      // that stage instead. See `stoppedInsideDevelop`.
+      if (stage === "develop" && stoppedInsideDevelop(state) !== null) return "done";
+      return "failed";
     default:
       return null;
   }
+}
+
+/**
+ * WHICH STAGE INSIDE THE `develop` JOB ENDED THE RUN, from the run's own record.
+ *
+ * **THE BLOCK WAS DRAWN ON `develop`, AND THE SPINE THEN ERASED THE TWO STAGES THAT
+ * DECIDED IT.** Reported from the deployed app on run 71: the spine read `develop`
+ * in rose, `review` and `security` as never having run, and "Stopped at develop.
+ * Nothing after it ran" -- directly above a security panel showing the verdict those
+ * scanners produced. Both stages had run; the job they run inside is what GitHub
+ * reports, so the block landed on the job and everything after it was drawn dead.
+ *
+ * `scripts/run_stage.py:_stage_develop` has exactly two deliberate non-zero exits,
+ * and each is decided by one stage:
+ *
+ *     security verdict `block`                      exit 3   -> "security"
+ *     reviewer never approved, scanners passed      exit 4   -> "review"
+ *
+ * Anything else -- a crash, or a record that says neither -- answers `null`, and
+ * the job's failure stays on `develop`, because that is all anybody knows.
+ *
+ * The cap case reads `status === "failed"` as well as the verdicts: mid-loop the
+ * review verdict is routinely `changes_requested`, so the verdict alone would call
+ * a crash during the second developer pass a reviewer's refusal.
+ */
+export function stoppedInsideDevelop(state: RunStateDoc | null): "security" | "review" | null {
+  if (verdictIsBlock(state)) return "security";
+  const security = (state?.security ?? null) as Record<string, unknown> | null;
+  const review = (state?.review ?? null) as Record<string, unknown> | null;
+  if (
+    state?.status === "failed" &&
+    security?.verdict === "pass" &&
+    review != null &&
+    review.verdict !== "approve"
+  ) {
+    return "review";
+  }
+  return null;
 }
 
 function verdictIsBlock(state: RunStateDoc | null): boolean {
