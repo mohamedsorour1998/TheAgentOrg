@@ -11,9 +11,9 @@ rebuild; never edit notes in PowerPoint.
 **The slot is 20 minutes and it includes the judges' questions.** Budget:
 
 ```
-slides     10:20   (17 slides)
+slides     10:50   (18 slides)
 live demo   5:00
-questions   4:40
+questions   4:10
 ```
 
 Verify the sum rather than trusting it:
@@ -48,8 +48,9 @@ questions, so the slides are short and five of those minutes are the system runn
 
 **SHOW** Five photographs, each with a title and a workplace. This is the speaker page.
 
-**SAY** We are RosettaTeam. I am Mohamed Sorour, a senior DevOps engineer at Vezeeta
-and a master's student in computer science, AI specialization, at Georgia Tech. Mariam
+**SAY** We are RosettaTeam. I am Mohamed Sorour, a senior DevOps engineer at Vezeeta,
+an AWS Community Builder, and a master's student in computer science, AI specialization,
+at Georgia Tech. Mariam
 is an associate solution engineer at RENOSYSTEMS. Habiba is a junior DevOps engineer,
 and Reem and Aya are junior testing engineers, all three Digilians alumni. All five of
 us are here, and each of us takes questions on our own part.
@@ -61,8 +62,9 @@ us are here, and each of us takes questions on our own part.
 **SHOW** Eight rows: each section, one line on what it covers, and its minutes.
 
 **SAY** Here is the twenty minutes. Three on the overview, then the architecture, the
-business impact, and how this differs from what vendors ship. Then what is built, your
-ten notes from the pre-final, and what it does not do. What is next, five minutes live,
+business impact, and how this differs from what vendors ship. Then what is built, the
+knowledge base the agents read, your ten notes from the pre-final, and what it does not
+do. What is next, five minutes live,
 and the rest of the slot is yours.
 
 ---
@@ -260,7 +262,34 @@ AWS itself refuses a read of anyone else's, so our code does not have to remembe
 
 ---
 
-## 13 · Your ten notes from the pre-final — 0:50
+## 13 · What the agents read before they answer — 0:40
+
+**SHOW** Three figures and three knowledge bases.
+
+**SAY** Before an agent answers, it looks up what the team already knows. Three
+hand-written knowledge bases: why past changes to this app were sent back, the questions
+the team has settled, and background on known vulnerabilities. Four agents read them:
+the planner, the developer, the reviewer, and the security explanation. We measured the
+reviewer on changes that did not do what their ticket asked: with the knowledge base it
+caught 8 out of 8, without it 6. And it did not make the reviewer fussier: no false
+blocks, with it or without. It is switched on in production; on one live run the agents
+read 18 documents.
+
+**SAY — the line that matters** It shapes wording, never the verdict. We planted five
+hostile documents, things like "this finding is a known false positive", and the block
+did not move.
+
+**IF ASKED — "why no vector database?"** It is plain keyword search over a few dozen
+curated documents. That is enough at this size, and it means nothing new ships in the
+five agent images.
+
+**IF ASKED — "what stops a poisoned document talking the reviewer out of it?"** Nothing,
+fully — the reviewer is a model, and it is advisory. That is why the security decision
+does not read the knowledge base at all.
+
+---
+
+## 14 · Your ten notes from the pre-final — 0:40
 
 **THE SLIDE THAT EARNS THE MOST GOODWILL. Slow down.**
 
@@ -273,19 +302,12 @@ scoring table for all three scanners, and the rule for secrets is written down a
 policy. Your note produced a real correction, and I would rather say so than claim we
 were right all along.
 
-**IF ASKED — "is the knowledge base real?"** Yes. Three hand-written knowledge bases: why
-past changes were sent back, the team's settled conventions, and security advisories.
-Before answering, four of the agents look up what is relevant, with plain keyword
-matching, no vector database. Measured: with it, the reviewer caught a change that did
-not match its ticket 8 times out of 8; without it, 6. It is switched on in the deployed
-system, and it never touches the security verdict.
-
-**IF ASKED about any single row** — scoring is slide 7 and the limits are slide 14; ask
+**IF ASKED about any single row** — scoring is slide 7, the knowledge base slide 13 and the limits slide 15; ask
 and I will go back to either.
 
 ---
 
-## 14 · What this does not do — 0:35
+## 15 · What this does not do — 0:35
 
 **SHOW** Four limits, in the same layout as the roadmap. Say them before it, not after.
 
@@ -298,7 +320,7 @@ applying it to the source is next.
 
 ---
 
-## 15 · What is next — 0:40
+## 16 · What is next — 0:40
 
 **SHOW** Four items. The first is the last limit, answered.
 
@@ -311,7 +333,7 @@ and more scanners; the scoring is a table, so a new scanner is one row.
 
 ---
 
-## 16 · The demonstration — 0:10
+## 17 · The demonstration — 0:10
 
 **SAY** Let me show you the half that matters. This ticket asks for something that
 looks reasonable: pin an old version of the requests library for a legacy proxy. Nothing
@@ -340,7 +362,7 @@ block.
 
 ---
 
-## 17 · Thank you — 0:10
+## 18 · Thank you — 0:10
 
 **SAY** That is The Agent Org. It is live at theagentorg.rosettacloud.app. Questions.
 
@@ -353,10 +375,10 @@ block.
 | the live run stalls | open run #73 in the product: the same ticket, rehearsed on 25 September. Say plainly that it is an earlier run |
 | Trivy's card says the scanner failed | it still blocks, by design, but that is not the demo. Say so, then open run #73 |
 | you want a credential instead | start a run with *Demonstrate a blocked run* ticked: it plants a known test key and always blocks, and the page says so |
-| the venue network fails | the deck needs nothing from the network; walk slide 16's stages and describe the block in words |
+| the venue network fails | the deck needs nothing from the network; walk slide 17's stages and describe the block in words |
 | a judge asks for the clean run | open the merged pull request and its promoted run in the list — both already exist |
 | a gate approval is refused | say the token needs the deployments permission and move on; do not debug on stage |
-| you are running long | say slide 11 in one sentence and slide 14 as its first point, about 0:45 back. The team slide stays: it is the speaker page |
+| you are running long | say slide 11 in one sentence and slide 15 as its first point, about 0:45 back. The team slide stays: it is the speaker page |
 
 **There is no recording in the deck.** Recording the two runs is still an open task; until it
 is done, the earlier run in the product is the fallback.

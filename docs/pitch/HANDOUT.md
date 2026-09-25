@@ -29,9 +29,9 @@ entirely. It would not block with the scanners removed.**
 ## 2 · The twenty minutes
 
 ```
-slides          10:20   17 slides — Sorour
+slides          10:50   18 slides — Sorour
 live demo        5:00   one real ticket, blocked by Trivy
-questions        4:40   all five of us
+questions        4:10   all five of us
 ```
 
 The slot includes the questions. If a question comes up mid-talk, answer it in one
@@ -55,11 +55,12 @@ sentence and offer the rest at the end.
 | 10 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
 | 11 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
 | 12 | What is built | 2182 + 338 tests, five runtimes on one version, a real product, multi-tenant |
-| 13 | Your ten notes from the pre-final | every note answered |
-| 14 | What this does not do | four honest limits |
-| 15 | What is next | four next steps; the first answers the last limit |
-| 16 | The demonstration | hand over to the live product |
-| 17 | Thank you | questions |
+| 13 | What the agents read before they answer | the knowledge base: three sources, four agents, 8/8 vs 6/8, never the verdict |
+| 14 | Your ten notes from the pre-final | every note answered |
+| 15 | What this does not do | four honest limits |
+| 16 | What is next | four next steps; the first answers the last limit |
+| 17 | The demonstration | hand over to the live product |
+| 18 | Thank you | questions |
 
 ---
 
@@ -127,8 +128,8 @@ When a question lands in your area, take it. Answer in two or three sentences, t
 If it is not yours, pass it by name: "Habiba built that part."
 
 ### Mohamed Sorour — the architecture, AWS, the product, the cost
-Slides 1–9 and 12. The eight numbered steps on the architecture slide; why AgentCore;
-how multi-tenancy works; what a run costs and why.
+Slides 1–9, 12 and 13. The eight numbered steps on the architecture slide; why AgentCore;
+how multi-tenancy works; the knowledge base; what a run costs and why.
 > "Every AWS step takes a role through OIDC. There is not one stored AWS key anywhere."
 
 ### Habiba Megahed — the security scanners and the scoring
@@ -143,7 +144,7 @@ three gates, the pull request and issue comments, and how the five runtimes are 
 > "Everything a judge can see on GitHub, my code wrote."
 
 ### Reem Shkeep — the app the agents edit, the tickets, the baseline
-Slides 4 and 16. The subject app, the tickets — including the demo ticket, which pins a
+Slides 4 and 17. The subject app, the tickets — including the demo ticket, which pins a
 library with a known vulnerability — and the baseline with no checks at all.
 > "The demo ticket asks for something that looks reasonable. Nothing is planted: the
 > scanner finds the problem on its own, and the reviewer, a model, approved it."
@@ -194,7 +195,7 @@ model in it, so there is nothing to talk to.
 
 **"Did the code actually change?"** — *Sorour.* The pull request carries the reviewed change
 as a file; every gate and the scanners read it. Applying it to the source is our first
-next step. Say it plainly — it is on slide 14.
+next step. Say it plainly — it is on slide 15.
 
 **"How is the webhook protected?"** — *Mariam.* GitHub signs each delivery, and the Lambda
 checks the signature before it does anything else. An unsigned or wrongly signed request
