@@ -250,8 +250,8 @@ exactly what we refuse: in our pipeline, a missing or crashed scanner blocks the
 
 **SHOW** Three figures and three cards.
 
-**SAY** Two thousand one hundred and seventy-two automated tests across ninety-three
-files, plus three hundred and thirty-four for the web app. Five agent runtimes, all ready on
+**SAY** Two thousand one hundred and seventy-six automated tests across ninety-five
+files, plus three hundred and thirty-eight for the web app. Five agent runtimes, all ready on
 the same version; a split would mean a half-finished deploy, and we check for it before
 every demo. It runs in the cloud from a real issue. It is a product, not a script: you
 sign in, pick a repository, start a run, watch each stage, approve a gate and read what

@@ -54,7 +54,7 @@ sentence and offer the rest at the end.
 | 9 | What it costs, and what it buys | 1.3–1.7¢ per change, 7.88 min median, 0 of 12 merged changes carried a credential |
 | 10 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
 | 11 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
-| 12 | What is built | 2172 + 334 tests, five runtimes on v54, a real product, multi-tenant |
+| 12 | What is built | 2176 + 338 tests, five runtimes on one version, a real product, multi-tenant |
 | 13 | Your ten notes from the pre-final | every note answered |
 | 14 | What this does not do | four honest limits |
 | 15 | What is next | four next steps; the first answers the last limit |
@@ -74,8 +74,8 @@ sentence and offer the rest at the end.
 | **0 of 12** | merged changes carrying a credential | the same scan finds 3 in unmerged pull request #72, so the zero is real |
 | **2 min 19 s** | the poisoned run, from approving gate1 to the block | run 35679536930 |
 | **lines 3 and 4** | where the real scanners report the planted key | the stand-in reports 4 and 5 — that pair proves a real scan |
-| **2172** | automated tests, across 93 files | plus **334** for the web app, across 26 files |
-| **v54** | the version all five agent runtimes are on | checked before every demo |
+| **2176** | automated tests, across 95 files | plus **338** for the web app, across 26 files |
+| **v55** | the version all five agent runtimes are on (deployed 25 September with the scanner fix) | checked before every demo |
 | **6/8 → 8/8** | the reviewer catching a plan mismatch, before and after adding its knowledge base | measured over 8 trials each |
 | **8 of 83** | code modules that touch a vendor SDK; only 2 load one at start-up | measured by reading the code |
 | **20 in a row** | consecutive poisoned runs that all blocked, in the determinism test | the test suite |
