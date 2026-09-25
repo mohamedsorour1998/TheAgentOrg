@@ -87,6 +87,9 @@ describe("run status", () => {
     // `contract.ts`: a UI that painted these alike "would show the demo's
     // central beat as a crash".
     expect(RUN_STATUS.blocked.tone).not.toBe(RUN_STATUS.failed.tone);
+    // A PERSON'S REFUSAL IS NOT THE RULE'S. Reported from the deployed run list:
+    // BLOCKED and REJECTED shared rose, so a human decision read as the scanner block.
+    expect(RUN_STATUS.rejected.tone).not.toBe(RUN_STATUS.blocked.tone);
   });
 
   it("does not paint a block the way it paints a promotion", () => {

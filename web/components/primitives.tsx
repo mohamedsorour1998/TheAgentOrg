@@ -23,6 +23,7 @@ const TONE: Readonly<Record<MarkValue["tone"], string>> = {
   neutral: "var(--text)",
   accent: "var(--accent)",
   refused: "var(--refused)",
+  declined: "var(--declined)",
   shipped: "var(--shipped)",
   muted: "var(--text-muted)",
 };

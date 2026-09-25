@@ -64,7 +64,20 @@ const WHAT: Readonly<Record<Stage, string>> = {
  * How a stage is drawn. Derived from the job's status, not from its position:
  * position tells you what SHOULD have happened and the row tells you what did.
  */
-export type Phase = "done" | "objected" | "running" | "waiting" | "refused" | "pending" | "never";
+export type Phase =
+  | "done"
+  | "objected"
+  | "running"
+  | "waiting"
+  | "refused"
+  | "declined"
+  | "pending"
+  | "never";
+
+/** Where the run ENDED: the rule or a crash (`refused`), or a person at a gate (`declined`). */
+export function isStop(phase: Phase): boolean {
+  return phase === "refused" || phase === "declined";
+}
 
 function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
   if (!view) return runEnded ? "never" : "pending";
@@ -75,8 +88,10 @@ function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
       return "running";
     case "paused":
       return "waiting";
-    case "blocked":
     case "rejected":
+      // A PERSON refused this gate. Its own colour -- see RUN_STATUS.rejected.
+      return "declined";
+    case "blocked":
     case "failed":
       return "refused";
     case "already_final":
@@ -95,6 +110,7 @@ function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
 const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
   done: "var(--shipped)",
   objected: "var(--refused)",
+  declined: "var(--declined)",
   running: "var(--accent)",
   waiting: "var(--accent)",
   refused: "var(--refused)",
@@ -124,6 +140,7 @@ const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
 const PHASE_TEXT: Readonly<Record<Phase, string>> = {
   done: "var(--shipped)",
   objected: "var(--refused)",
+  declined: "var(--declined)",
   running: "var(--accent)",
   waiting: "var(--accent)",
   refused: "var(--refused)",
@@ -135,6 +152,7 @@ const PHASE_TEXT: Readonly<Record<Phase, string>> = {
 export const PHASE_WORD: Readonly<Record<Phase, string>> = {
   done: "done",
   objected: "asked for changes — advisory",
+  declined: "refused by a person",
   running: "running now",
   waiting: "waiting for a person",
   refused: "stopped here",
@@ -203,7 +221,7 @@ export function spineSentence(
     ? " The reviewer asked for changes; it is advisory, so the run went on."
     : "";
 
-  const stopped = rows.find((r) => r.phase === "refused");
+  const stopped = rows.find((r) => isStop(r.phase));
   if (stopped) {
     // NAME THE LAST STAGE THAT RAN, which is not always the one that stopped: at the
     // revision cap the run stops at `review` and the scanners still run after it.

@@ -16,7 +16,7 @@ import { describe, expect, it } from "vitest";
 
 import { stagesFromCi } from "../../lib/ci-view";
 import type { CiProgress } from "../../lib/dispatch";
-import { phases, spineSentence } from "../StageSpine";
+import { isStop, phases, spineSentence } from "../StageSpine";
 
 /** `develop` failed and nothing after it ran -- the shape of exits 3 and 4 alike. */
 const DEVELOP_FAILED: CiProgress = {
@@ -124,5 +124,25 @@ describe("a run that hit the revision cap", () => {
     expect(sentence).toBe(
       "Stopped at review. Nothing after security ran — those stages are not waiting, they will never start.",
     );
+  });
+});
+
+describe("a gate a person refused", () => {
+  const REFUSED_AT_GATE1: CiProgress = {
+    status: "completed",
+    conclusion: "failure",
+    jobs: {
+      plan: { status: "completed", conclusion: "success" },
+      gate1: { status: "completed", conclusion: "failure" },
+    },
+    awaiting: [],
+  };
+
+  it("is its own phase -- a person's no, not the rule's -- and it is where the run stopped", () => {
+    const rows = phases(stagesFromCi(REFUSED_AT_GATE1, { status: "rejected" }), true);
+    const gate1 = rows.find((r) => r.stage === "gate1");
+    expect(gate1?.phase).toBe("declined");
+    expect(isStop(gate1!.phase)).toBe(true);
+    expect(spineSentence(rows, [], true)).toMatch(/^Stopped at gate1\./);
   });
 });

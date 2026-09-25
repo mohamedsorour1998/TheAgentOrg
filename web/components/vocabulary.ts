@@ -35,7 +35,7 @@ export interface Mark {
   label: string;
   /** What it means, for a title attribute or an adjacent line. */
   meaning: string;
-  tone: "neutral" | "accent" | "refused" | "shipped" | "muted";
+  tone: "neutral" | "accent" | "refused" | "declined" | "shipped" | "muted";
   form: "solid" | "dashed" | "struck";
 }
 
@@ -107,10 +107,13 @@ export const RUN_STATUS: Readonly<Record<RunStatus, Mark>> = {
     tone: "refused",
     form: "solid",
   },
+  // AMBER, NOT ROSE. Reported from the deployed run list: BLOCKED and REJECTED
+  // were the same colour, so a person's decision read as the rule refusing. Rose
+  // is the deterministic rule; amber is somebody saying no.
   rejected: {
     label: "Rejected",
     meaning: "A person refused a gate.",
-    tone: "refused",
+    tone: "declined",
     form: "solid",
   },
   promoted: {

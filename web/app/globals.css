@@ -22,6 +22,7 @@
   --text-muted: #8b97ab;
   --accent: #22d3ee; /* cyan: every structural mark */
   --refused: #fb7185; /* rose: a stated failure */
+  --declined: #fbbf24; /* amber: a PERSON said no -- never the rule's rose */
   --shipped: #6ee7b7; /* mint: a stated success */
   --border: #1f2937;
 

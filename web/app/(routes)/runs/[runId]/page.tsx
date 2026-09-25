@@ -41,7 +41,7 @@ import { AgentOutput } from "@/components/AgentOutput";
 import { DecisionLog, GateControls } from "@/components/GateControls";
 import { ErrorState, Mark, Skeleton } from "@/components/primitives";
 import { SecurityPanel } from "@/components/SecurityPanel";
-import { PHASE_WORD, StageSpine, phases, spineSentence } from "@/components/StageSpine";
+import { PHASE_WORD, StageSpine, isStop, phases, spineSentence } from "@/components/StageSpine";
 import { useRunStream } from "@/components/useRunStream";
 import { RUN_STATUS } from "@/components/vocabulary";
 import { getJson } from "@/components/fetching";
@@ -156,7 +156,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
     if (open) return open.stage;
     const running = rows.find((r) => r.phase === "running");
     if (running) return running.stage;
-    const stopped = rows.find((r) => r.phase === "refused");
+    const stopped = rows.find((r) => isStop(r.phase));
     if (stopped) return stopped.stage;
     return rows.filter((r) => r.phase === "done").at(-1)?.stage ?? "plan";
   }, [run, rows]);
@@ -570,7 +570,7 @@ function GateStage({ gate, run, phase }: { gate: Gate; run: RunDetail; phase: st
       </p>
     );
   }
-  if (phase === "refused") {
+  if (phase === "refused" || phase === "declined") {
     return (
       <p className="prose" style={{ fontSize: "var(--step-small)" }}>
         The run stopped at this gate.
