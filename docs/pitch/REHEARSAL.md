@@ -61,11 +61,10 @@ us are here, and each of us takes questions on our own part.
 
 **SHOW** Eight rows: each section, one line on what it covers, and its minutes.
 
-**SAY** Here is the twenty minutes. Three on the overview, then the architecture, the
-business impact, and how this differs from what vendors ship. Then what is built, the
-knowledge base the agents read, your ten notes from the pre-final, and what it does not
-do. What is next, five minutes live,
-and the rest of the slot is yours.
+**SAY** Here is the twenty minutes. Four on the overview, ending with what the agents
+read. Then the architecture, the business impact, and how this differs from what vendors
+ship. Then what is built, your ten notes from the pre-final, and what it does not do.
+What is next, five minutes live, and the rest of the slot is yours.
 
 ---
 
@@ -151,7 +150,34 @@ counts as high is a severity word the table has never seen.
 
 ---
 
-## 8 · What runs where — 1:10
+## 8 · What the agents read before they answer — 0:40
+
+**SHOW** Three figures and three knowledge bases.
+
+**SAY** Before an agent answers, it looks up what the team already knows. Three
+hand-written knowledge bases: why past changes to this app were sent back, the questions
+the team has settled, and background on known vulnerabilities. Four agents read them:
+the planner, the developer, the reviewer, and the security explanation. We measured the
+reviewer on changes that did not do what their ticket asked: with the knowledge base it
+caught 8 out of 8, without it 6. And it did not make the reviewer fussier: no false
+blocks, with it or without. It is switched on in production; on one live run the agents
+read 18 documents.
+
+**SAY — the line that matters** It shapes wording, never the verdict. We planted five
+hostile documents, things like "this finding is a known false positive", and the block
+did not move.
+
+**IF ASKED — "why no vector database?"** It is plain keyword search over a few dozen
+curated documents. That is enough at this size, and it means nothing new ships in the
+five agent images.
+
+**IF ASKED — "what stops a poisoned document talking the reviewer out of it?"** Nothing,
+fully — the reviewer is a model, and it is advisory. That is why the security decision
+does not read the knowledge base at all.
+
+---
+
+## 9 · What runs where — 1:10
 
 **SHOW** The AWS diagram. Point at each number as you say it.
 
@@ -185,7 +211,7 @@ purpose, so a gate's decision reaches DynamoDB with the next job.
 
 ---
 
-## 9 · What it costs, and what it buys — 0:45
+## 10 · What it costs, and what it buys — 0:45
 
 **SHOW** Three figures, then two points and the honest caveat.
 
@@ -208,7 +234,7 @@ that at scale.
 
 ---
 
-## 10 · Every vendor's AI review is advisory. They say so. — 0:45
+## 11 · Every vendor's AI review is advisory. They say so. — 0:45
 
 **SHOW** The table of their own documentation.
 
@@ -235,7 +261,7 @@ between stages, as one pipeline. Each of the three exists somewhere on its own.
 
 ---
 
-## 11 · When their check breaks, the change goes through — 0:30
+## 12 · When their check breaks, the change goes through — 0:30
 
 **SHOW** Three products, three ways a broken check lets a change through.
 
@@ -248,7 +274,7 @@ exactly what we refuse: in our pipeline, a missing or crashed scanner blocks the
 
 ---
 
-## 12 · What is built — 0:40
+## 13 · What is built — 0:40
 
 **SHOW** Three figures and three cards.
 
@@ -259,33 +285,6 @@ every demo. It runs in the cloud from a real issue. It is a product, not a scrip
 sign in, pick a repository, start a run, watch each stage, approve a gate and read what
 it cost. And it is multi-tenant: each customer's data sits in its own partition, and
 AWS itself refuses a read of anyone else's, so our code does not have to remember to.
-
----
-
-## 13 · What the agents read before they answer — 0:40
-
-**SHOW** Three figures and three knowledge bases.
-
-**SAY** Before an agent answers, it looks up what the team already knows. Three
-hand-written knowledge bases: why past changes to this app were sent back, the questions
-the team has settled, and background on known vulnerabilities. Four agents read them:
-the planner, the developer, the reviewer, and the security explanation. We measured the
-reviewer on changes that did not do what their ticket asked: with the knowledge base it
-caught 8 out of 8, without it 6. And it did not make the reviewer fussier: no false
-blocks, with it or without. It is switched on in production; on one live run the agents
-read 18 documents.
-
-**SAY — the line that matters** It shapes wording, never the verdict. We planted five
-hostile documents, things like "this finding is a known false positive", and the block
-did not move.
-
-**IF ASKED — "why no vector database?"** It is plain keyword search over a few dozen
-curated documents. That is enough at this size, and it means nothing new ships in the
-five agent images.
-
-**IF ASKED — "what stops a poisoned document talking the reviewer out of it?"** Nothing,
-fully — the reviewer is a model, and it is advisory. That is why the security decision
-does not read the knowledge base at all.
 
 ---
 
@@ -302,7 +301,7 @@ scoring table for all three scanners, and the rule for secrets is written down a
 policy. Your note produced a real correction, and I would rather say so than claim we
 were right all along.
 
-**IF ASKED about any single row** — scoring is slide 7, the knowledge base slide 13 and the limits slide 15; ask
+**IF ASKED about any single row** — scoring is slide 7, the knowledge base slide 8 and the limits slide 15; ask
 and I will go back to either.
 
 ---
@@ -378,7 +377,7 @@ block.
 | the venue network fails | the deck needs nothing from the network; walk slide 17's stages and describe the block in words |
 | a judge asks for the clean run | open the merged pull request and its promoted run in the list — both already exist |
 | a gate approval is refused | say the token needs the deployments permission and move on; do not debug on stage |
-| you are running long | say slide 11 in one sentence and slide 15 as its first point, about 0:45 back. The team slide stays: it is the speaker page |
+| you are running long | say slide 12 in one sentence and slide 15 as its first point, about 0:45 back. The team slide stays: it is the speaker page |
 
 **There is no recording in the deck.** Recording the two runs is still an open task; until it
 is done, the earlier run in the product is the fallback.

@@ -50,12 +50,12 @@ sentence and offer the rest at the end.
 | 5 | Nine stages. Three of them are people. | five agents, three human gates, one rule that is not a model |
 | 6 | Non-deterministic models. A deterministic gate. | **the core idea** — the reviewer advises, the scanners decide |
 | 7 | How a finding becomes a verdict | the scoring: one table, gitleaks is always critical, unknowns cannot pass |
-| 8 | What runs where | the AWS architecture, eight numbered steps |
-| 9 | What it costs, and what it buys | 1.3–1.7¢ per change, 7.88 min median, 0 of 12 merged changes carried a credential |
-| 10 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
-| 11 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
-| 12 | What is built | 2182 + 338 tests, five runtimes on one version, a real product, multi-tenant |
-| 13 | What the agents read before they answer | the knowledge base: three sources, four agents, 8/8 vs 6/8, never the verdict |
+| 8 | What the agents read before they answer | the knowledge base: three sources, four agents, 8/8 vs 6/8, never the verdict |
+| 9 | What runs where | the AWS architecture, eight numbered steps |
+| 10 | What it costs, and what it buys | 1.3–1.7¢ per change, 7.88 min median, 0 of 12 merged changes carried a credential |
+| 11 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
+| 12 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
+| 13 | What is built | 2182 + 338 tests, five runtimes on one version, a real product, multi-tenant |
 | 14 | Your ten notes from the pre-final | every note answered |
 | 15 | What this does not do | four honest limits |
 | 16 | What is next | four next steps; the first answers the last limit |
@@ -128,18 +128,18 @@ When a question lands in your area, take it. Answer in two or three sentences, t
 If it is not yours, pass it by name: "Habiba built that part."
 
 ### Mohamed Sorour — the architecture, AWS, the product, the cost
-Slides 1–9, 12 and 13. The eight numbered steps on the architecture slide; why AgentCore;
+Slides 1–10 and 13. The eight numbered steps on the architecture slide; why AgentCore;
 how multi-tenancy works; the knowledge base; what a run costs and why.
 > "Every AWS step takes a role through OIDC. There is not one stored AWS key anywhere."
 
 ### Habiba Megahed — the security scanners and the scoring
-Slides 6, 7 and 11. The three scanner wrappers, the scoring table, and the difference
+Slides 6, 7 and 12. The three scanner wrappers, the scoring table, and the difference
 between a scanner that is missing and one that is broken.
 > "My scanners' findings are what block the change. I deliberately do not return a
 > verdict: the decision is one comparison — arithmetic, not judgement."
 
 ### Mariam Abdelkader — GitHub, the workflows, the deploy
-Slides 5 and 8 (steps 2, 3 and 7). How an issue starts a run, the seven jobs and the
+Slides 5 and 9 (steps 2, 3 and 7). How an issue starts a run, the seven jobs and the
 three gates, the pull request and issue comments, and how the five runtimes are deployed.
 > "Everything a judge can see on GitHub, my code wrote."
 
@@ -150,7 +150,7 @@ library with a known vulnerability — and the baseline with no checks at all.
 > scanner finds the problem on its own, and the reviewer, a model, approved it."
 
 ### Aya Ebrahim — determinism, failure testing, the metrics
-Slides 6 and 9. The twenty-in-a-row determinism test, what happens when a gate is never
+Slides 6 and 10. The twenty-in-a-row determinism test, what happens when a gate is never
 answered, and the numbers on the cost slide.
 > "A demo that blocks once proves nothing. I run the poisoned ticket twenty times in a row
 > and every one blocks."
