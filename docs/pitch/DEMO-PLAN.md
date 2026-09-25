@@ -39,7 +39,9 @@ so no forgotten setting can let it through.
 | 6 | **The block.** Status `blocked`, two blocking findings, provenance `scanners`, and nothing after it runs | 0:50 |
 
 **On screen, the block is marked on `security`, as on the slide.** The line runs green
-through develop and review and stops in rose at security; nothing after it runs. The
+through develop; review shows a hollow rose mark, because the reviewer asked for changes,
+and that is advisory, so the line carries on; it stops in filled rose at security, and
+nothing after it runs. The
 security panel opens on its own: `critical ≥ high`, then one card per scanner, each
 showing its own worst finding against the threshold. Point at the gitleaks card, the one
 that blocks, then at the two line numbers in the findings table.

@@ -93,7 +93,8 @@ sentence and offer the rest at the end.
 5. **The block**: status blocked, two findings, provenance `scanners`, lines 3 and 4.
 
 **The screen marks the block on security, as the slide does.** The line runs green
-through develop and review and stops in rose at security. The security panel shows
+through develop. Review shows a hollow rose mark: the reviewer asked for changes, which
+is advisory, so the line carries on. It stops in filled rose at security. The security panel shows
 `critical ≥ high` and one card per scanner, each with its own worst finding against the
 threshold; gitleaks is the one that blocks. A run that passes shows the same comparison
 the other way round, for example `low < high`.
