@@ -224,7 +224,10 @@ def render(data: dict) -> str:
             f"  positive control: PR #{next(iter(data['positive_control']))} (not merged) carries "
             f"{next(iter(data['positive_control'].values()))} credential match(es) on added lines"
         ),
-        "  A COUNT AND A DENOMINATOR, NEVER A RATE. Zero over nine merges is not a low",
+        (
+            f"  A COUNT AND A DENOMINATOR, NEVER A RATE. {escaped} over "
+            f"{len(data['escaped_by_pr'])} merges is not a low"
+        ),
         "  rate; and the scanners bind on credentials, CVEs and injectable patterns only,",
         "  so this is silent about a logic defect that shipped.",
     ]

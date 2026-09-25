@@ -97,6 +97,23 @@ ESCAPED DEFECTS  0 credential escapes over 9 merged pull requests
   positive control: PR #50 (not merged) carries 3 credential match(es)
 ```
 
+**RE-MEASURED 2026-09-25** with `--refresh`, the day before the finals, and the figures
+moved -- which is why the deck quotes these and not the ones above:
+
+```
+TIME TO MERGE   n=12 pipeline-produced merges
+  ticket opened -> merged   min 4.47  median  7.88  max 2476.08  minutes
+  pr opened     -> merged   min 2.52  median  2.92  max 1045.72  minutes
+  SURVIVORSHIP: 12 merges out of 57 pipeline runs (cancelled=21, failure=19, success=17)
+
+ESCAPED DEFECTS  0 credential escapes over 13 merged pull requests
+  positive control: PR #72 (not merged) carries 3 credential match(es) on added lines
+```
+
+The median rose because later runs waited on people: PR #58's gates were clicked the
+next day (2476 minutes), and #62 and #60 waited 65 and 31. A median of human-clicked
+runs is a floor on machine time and a ceiling on nothing.
+
 **Three things those numbers do not say, and all three are printed beside them.**
 
 - **SURVIVORSHIP.** 8 merges out of **37** runs (`cancelled=11, failure=13,
