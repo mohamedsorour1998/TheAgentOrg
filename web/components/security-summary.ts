@@ -152,6 +152,15 @@ export function findingRows(security: SecurityView): FindingRow[] {
   return [...out.filter((r) => r.blocks), ...out.filter((r) => !r.blocks)];
 }
 
+/**
+ * WHERE A FINDING IS, as the table shows it. Line 0 means the finding has no line:
+ * Trivy reports a vulnerable PACKAGE, not a line of code, and a scanner fault is
+ * filed against `<tool scanner>`. "requirements.txt · 0" read as an added line.
+ */
+export function whereLabel(file: string, line: number): string {
+  return line > 0 ? `${file} · ${line}` : file;
+}
+
 /** The scanner's own severity word, said plainly. */
 export function nativeWord(native: string | null): string {
   if (native === null || native === "<not recorded>") return "not recorded";

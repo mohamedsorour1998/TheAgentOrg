@@ -42,6 +42,7 @@ import {
   runComparison,
   scannerComparisons,
   thresholdOf,
+  whereLabel,
   type Comparison,
   type FindingRow,
   type ScannerComparison,
@@ -316,10 +317,7 @@ function Findings({
               <td style={{ fontFamily: "var(--mono)" }} title={f.description}>
                 {f.rule}
               </td>
-              <td className="ident">
-                {f.file}
-                <span style={{ color: "var(--text-muted)" }}> · {f.line}</span>
-              </td>
+              <td className="ident">{whereLabel(f.file, f.line)}</td>
               <td style={{ fontFamily: "var(--mono)", color: "var(--text-muted)" }}>
                 {nativeWord(native)}
               </td>

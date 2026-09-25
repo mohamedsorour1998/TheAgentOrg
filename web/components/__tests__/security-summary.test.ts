@@ -20,6 +20,7 @@ import {
   runComparison,
   scannerComparisons,
   thresholdOf,
+  whereLabel,
 } from "../security-summary";
 
 const KEY_ID = {
@@ -174,5 +175,16 @@ describe("the scanner list", () => {
     const policy = [...source.matchAll(/^\s{4}"(\w+)": ScannerScoring\(/gm)].map((m) => m[1]);
     expect(policy.length, "no POLICY keys found; this test would pin nothing").toBeGreaterThan(0);
     expect([...policy].sort()).toEqual([...SCANNERS].sort());
+  });
+});
+
+describe("where a finding is", () => {
+  it("shows the added line when there is one", () => {
+    expect(whereLabel("app/auth.py", 3)).toBe("app/auth.py · 3");
+  });
+
+  it("shows only the file for a package-level finding, which has no line", () => {
+    // Trivy's CVE findings on a pinned requirement arrive with line 0.
+    expect(whereLabel("requirements.txt", 0)).toBe("requirements.txt");
   });
 });
