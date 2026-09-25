@@ -367,10 +367,22 @@ table.data tbody tr:last-child th {
 }
 
 /* A row the deterministic rule refused. The left mark is the signal; the row is
-   not filled, because a filled row makes the text on it harder to read. */
-table.data tr[data-blocking="true"] td:first-child {
-  border-left: 3px solid var(--refused);
+   not filled, because a filled row makes the text on it harder to read.
+
+   EVERY row of such a table carries the same inset, with the mark transparent where
+   the row did not block. Indenting only the blocking rows put the tool name of a
+   row that cleared a gutter's width to the left of the rows above it. */
+table.data tr[data-blocking] td:first-child {
+  border-left: 3px solid transparent;
   padding-left: var(--gap-3);
+}
+
+table.data tr[data-blocking="true"] td:first-child {
+  border-left-color: var(--refused);
+}
+
+table.data:has(tr[data-blocking]) thead th:first-child {
+  padding-left: calc(var(--gap-3) + 3px);
 }
 
 /* ── CARDS AND BUTTONS ────────────────────────────────────────────────────── */
