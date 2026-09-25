@@ -102,11 +102,49 @@ def _header_path(line: str) -> str | None:
     return target
 
 
+# Lines inside a file's body that carry no `+`, `-` or ` ` marker and are still
+# diff syntax rather than code.
+_META_PREFIXES = ("\\", "@@", "--- ", "diff ", "index ", "new file mode", "deleted file mode",
+                  "old mode", "new mode", "similarity index", "dissimilarity index",
+                  "rename from", "rename to", "copy from", "copy to", "Binary files")
+
+
+def _unmarked(line: str, in_run: bool) -> bool:
+    """Is this body line part of the change although it carries no `+`?
+
+    MEASURED 2026-09-25, and it was a credential walking past the gate. A ticket that
+    pasted an AWS key, run with the demo checkbox OFF: the model wrote the key into
+    `os.environ.get('AWS_ACCESS_KEY_ID', 'AKIA...')` -- the way real leaks happen --
+    inside a new function whose lines it did not prefix with `+`. This parser kept
+    only `+` lines, so the scanners were handed a file without the key, found nothing,
+    and security answered PASS with `scan_provenance: scanners`. `open_pr` commits the
+    diff TEXT, so the key would have been on the branch.
+
+    A NON-EMPTY LINE WITH NO MARKER is malformed and in the text that ships: added.
+
+    AND EVERY LINE AFTER IT, TO THE END OF THE HUNK (`in_run`). The key itself sat on
+    an INDENTED line, and a leading space is exactly what a context line looks like,
+    so the first character cannot tell them apart. What can is the unmarked line
+    above it (`def log_failed_login(...)`): once the model stops writing diff syntax,
+    a leading space is indentation. Fail closed: scanning a pre-existing line costs a
+    possible finding on code already in the repository; skipping a new one ships it.
+
+    BLANK lines stay out. A blank context line that lost its space is the commonest
+    malformation there is, and counting it would renumber every added line below it
+    -- which moves the `{3, 4}` pair the real-scanner discriminator rests on. A hunk
+    with no unmarked line parses exactly as before, and the reference diff has none.
+    """
+    if not line.strip() or line.startswith(_META_PREFIXES) or line[0] in "+-":
+        return False
+    return line[0] != " " or in_run
+
+
 def added_files(diff: str | None) -> dict[str, str]:
     """Rebuild the files `diff` proposes: `{path: added lines, joined}`.
 
-    Only `+` lines count, and only after a `+++ <path>` header has said which
-    file they belong to -- added lines before the first header belong to no file
+    `+` lines count -- and so does a non-empty line carrying NO marker at all, which
+    is malformed and in the text that ships (see `_unmarked`) -- and only after a
+    `+++ <path>` header has said which file they belong to -- added lines before the first header belong to no file
     and are dropped, which is the second way "somewhere in the diff text" and
     "in this change" disagree. A `/dev/null` target names a deleted file and
     materialises nothing. Paths repeated across headers keep the last body.
@@ -128,8 +166,10 @@ def added_files(diff: str | None) -> dict[str, str]:
     # gets a guard deleted.
     recognised_headers = 0
 
+    in_run = False  # an unmarked line has been seen in this hunk -- see `_unmarked`
     for line in (diff or "").splitlines():
         if line.startswith(_PLUS_HEADER):
+            in_run = False
             if current is not None:
                 files[current] = "\n".join(body)
             relative = _header_path(line)
@@ -145,6 +185,11 @@ def added_files(diff: str | None) -> dict[str, str]:
         # `+++` is the header marker, never content -- see the docstring.
         if line.startswith("+") and not line.startswith("+++"):
             body.append(line[1:])
+        elif line.startswith("@@"):
+            in_run = False
+        elif current is not None and _unmarked(line, in_run):
+            body.append(line)
+            in_run = True
 
     if current is not None:
         files[current] = "\n".join(body)
