@@ -41,7 +41,7 @@ import { SK_REPO, SK_RUN, isSafeRunId, sk, tenantForRunState, tenantPk } from ".
 // table or a token. `dispatch` itself is imported lazily at the call sites, because
 // it reaches Secrets Manager at module scope's expense and the read path must not
 // pay for it when there is no `ci_run_id` to ask about.
-import { gatesAwaiting, reconcileStatus, stagesFromCi } from "../ci-view";
+import { gatesAwaiting, reconcileStatus, stagesFromCi, stoppedInsideDevelop } from "../ci-view";
 // TYPE ONLY, so nothing from `dispatch` is pulled in at module scope -- it opens a
 // Secrets Manager client, and this module is imported by every read.
 import type { CiProgress } from "../dispatch";
@@ -392,6 +392,13 @@ function stagesFrom(state: RunStateDoc, row: Row): unknown[] {
       enqueued_at: String(state.started_at ?? row.created_at ?? ""),
       updated_at: "", reclaimed_from: "",
     });
+  }
+  // WHERE THE RUN STOPPED, by the same rule the live path uses. Without it a blocked
+  // run read from the stored record drew every stage it reached as done, the
+  // security stage included -- green on the one stage that refused the change.
+  const stop = stoppedInsideDevelop(state);
+  for (const view of out as { stage: string; status: string }[]) {
+    if (view.stage === stop) view.status = stop === "security" ? "blocked" : "failed";
   }
   return out;
 }

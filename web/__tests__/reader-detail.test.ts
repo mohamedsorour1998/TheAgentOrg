@@ -91,7 +91,10 @@ describe("the detail screen reflects the run", () => {
     expect(byName.gate1).toBe("done");
     expect(byName.develop).toBe("done");
     expect(byName.review).toBe("done");
-    expect(byName.security).toBe("done");
+    // THE STOP, ON THE STAGE THAT DECIDED IT. This read `"done"` until run 71 was
+    // reported: a stored-record screen then drew the security stage green on a run
+    // it had blocked.
+    expect(byName.security).toBe("blocked");
 
     // A BLOCKED RUN IS WAITING FOR NOBODY. `gate2` must not be listed as paused —
     // the run ended at the security verdict, and a gate marked "your decision" on a
