@@ -79,9 +79,10 @@ no checks in the loop: a poisoned change reached the branch every time. So the q
 is not whether an agent can write the change. It is what stands between that change and
 production.
 
-**IF ASKED — "isn't this what branch protection is for?"** Branch protection enforces a
-status check, and every AI reviewer in our research reports a neutral status: it never
-fails the check. We come back to that on the differentiation slide.
+**IF ASKED — "isn't this what branch protection is for?"** Branch protection enforces what
+it is told to. The AI reviewers we checked leave a comment or report a neutral status by
+default, so requiring them does not stop a merge. We come back to that on the
+differentiation slide.
 
 ---
 
@@ -106,8 +107,11 @@ component that stops a change is deliberately not one of them. Compare the two c
 The reviewer is a model reading the change. It catches intent, logic and a plan
 mismatch, and it is advisory: when it objects, the change goes back to the developer,
 but it cannot stop the run. The security stage is three scanners and a fixed rule. Same
-input, same answer, every time, and there is no model in it, so there is nothing to
-argue with.
+input, same answer, every time, and no model takes part in the decision, so there is
+nothing to argue with.
+
+**IF ASKED — "but the security agent calls a model?"** Only to write the sentence that
+explains the verdict, after the verdict is decided. That text cannot change it.
 
 And the block is part of the pipeline's structure, not a status check someone has to
 remember to require. When security refuses, its job fails, and the next gate is built
@@ -153,19 +157,29 @@ counts as high is a severity word the table has never seen.
 app. Two: GitHub sends a signed webhook to a Lambda function, which checks the signature
 before anything else happens and hands the event to EventBridge. Three: a rule matches
 new issues and starts the pipeline; if that fails, the event waits in an SQS dead-letter
-queue. The pipeline is seven GitHub Actions jobs. Four: each job takes an AWS role
-through OIDC, so there is no stored AWS key anywhere, and calls that agent's Bedrock
-AgentCore runtime. Five: the agents call Amazon Nova 2 Lite. Six: the security stage is
-three scanners and a fixed threshold, with no model in it. Seven: the gates wait for a
-named person, in GitHub or in our app. Eight: the app, on Amplify with Cognito sign-in,
-reads each run from DynamoDB through a role that can only see its own tenant's data.
+queue. The pipeline is seven GitHub Actions jobs. Four: each agent job takes an AWS role
+through OIDC, so there is no stored AWS key anywhere, and calls its agent on Bedrock
+AgentCore: planner, developer, reviewer, security, SRE. Five: the agents call Amazon
+Nova 2 Lite. Six: the security stage decides with three scanners and a fixed threshold,
+no model; the model only writes the explanation afterwards. Seven: the gates wait for a
+named person, in GitHub or in our app. Eight: the app, on Amplify, reads each run from
+DynamoDB through a role that can only see its own tenant's data.
+
+**IF ASKED — "the security agent calls the model too?"** Yes, for one thing: the
+sentence explaining the verdict. The verdict is computed first, by the scanners and the
+threshold, and the model's text goes into a separate field that cannot change it. Take
+the model away and the block still happens.
 
 **IF ASKED — "why AgentCore and not just Lambda?"** Each agent is an isolated runtime
 with its own identity and logs, and the security image is the only one carrying the
 three scanners. Isolation is the point.
 
 **IF ASKED — "where is a run's state kept?"** It is passed from job to job by GitHub
-Actions, and every stage writes a copy to DynamoDB, which is what the app reads.
+Actions. The four jobs that hold an AWS role (plan, develop, SRE and promote) write a
+copy to DynamoDB, which is what the app reads. The gates hold no AWS credentials on
+purpose, so a gate's decision reaches DynamoDB with the next job.
+
+**IF ASKED — "how do people sign in?"** Email through Amazon Cognito, or GitHub.
 
 ---
 
@@ -177,11 +191,11 @@ Actions, and every stage writes a copy to DynamoDB, which is what the app reads.
 measured over three clean runs and priced from the AWS Pricing API. The model is 99.9
 percent of that. Lambda, EventBridge and DynamoDB together came to twelve millionths of
 a dollar, which is why the only cost work worth doing is prompt caching. The median
-time from ticket to merge is five point four minutes, and none of the eight merged
+time from ticket to merge is just under eight minutes, and none of the twelve merged
 changes carried a credential.
 
-**SAY THE CAVEAT — do not wait to be asked.** Eight of thirty-seven runs merged, so the
-median covers the runs that finished. And the zero is a real result: the same scan
+**SAY THE CAVEAT — do not wait to be asked.** Twelve of fifty-seven runs merged, so the
+median covers the runs that finished, and a person clicked every gate in it. And the zero is a real result: the same scan
 finds three credentials in an unmerged pull request, so it is not a scan that finds
 nothing.
 
@@ -196,11 +210,16 @@ that at scale.
 
 **SHOW** The table of their own documentation.
 
-**SAY** None of this is our wording. GitHub Copilot's review "will not block merging
-changes". Anthropic's code review "always completes with a neutral conclusion so it
-never blocks". OpenAI's Codex guidance says it doesn't "replace tests, branch
-protections, or required approvals". Cursor's findings default to neutral. And Snyk's
-own page puts our thesis in six words: the generator cannot be the validator.
+**SAY** None of this is our wording. GitHub Copilot's review leaves, by default, "a
+Comment review, not a Request changes review", so it never blocks. Anthropic's code
+review "always completes with a neutral conclusion so it never blocks merging". OpenAI's
+Codex guidance says it doesn't "replace tests, branch protections, or required
+approvals". Cursor's findings "default to neutral". And Snyk's own page puts our thesis
+in six words: the generator cannot be the validator.
+
+**IF ASKED — "can't Copilot approve pull requests now?"** Yes, if a team turns that on.
+That lets the model pass a change; it still cannot block one. It makes our point
+sharper, not weaker.
 
 **SAY — and concede, because it is stronger** We are not the only ones with rules
 outside the model. Claude Code's permission rules and Factory's commit blocks are
@@ -221,8 +240,8 @@ between stages, as one pipeline. Each of the three exists somewhere on its own.
 **SAY** This is the argument for the whole design. With Cursor's hooks, if the hook
 itself fails, the action goes ahead; their documentation calls it fail-open by default.
 With Claude Code's hooks, only one specific failure blocks; any other lets the action
-through, and a mistyped path silently disables the gate. And if Semgrep crashes, it
-reports success. A check that did not run, reading as a check that passed. That is
+through, and in their words, "a mistyped path in settings.json leaves the gate silently
+disabled". And by default, if Semgrep crashes, it still reports success. A check that did not run, reading as a check that passed. That is
 exactly what we refuse: in our pipeline, a missing or crashed scanner blocks the change.
 
 ---
@@ -232,7 +251,7 @@ exactly what we refuse: in our pipeline, a missing or crashed scanner blocks the
 **SHOW** Three figures and three cards.
 
 **SAY** Two thousand one hundred and seventy-two automated tests across ninety-three
-files, plus three hundred and eleven for the web app. Five agent runtimes, all ready on
+files, plus three hundred and thirty-four for the web app. Five agent runtimes, all ready on
 the same version; a split would mean a half-finished deploy, and we check for it before
 every demo. It runs in the cloud from a real issue. It is a product, not a script: you
 sign in, pick a repository, start a run, watch each stage, approve a gate and read what

@@ -51,10 +51,10 @@ sentence and offer the rest at the end.
 | 6 | Non-deterministic models. A deterministic gate. | **the core idea** — the reviewer advises, the scanners decide |
 | 7 | How a finding becomes a verdict | the scoring: one table, gitleaks is always critical, unknowns cannot pass |
 | 8 | What runs where | the AWS architecture, eight numbered steps |
-| 9 | What it costs, and what it buys | 1.3–1.7¢ per change, 5.39 min median, 0 of 8 merged changes carried a credential |
+| 9 | What it costs, and what it buys | 1.3–1.7¢ per change, 7.88 min median, 0 of 12 merged changes carried a credential |
 | 10 | Every vendor's AI review is advisory | their own documentation says their AI review never blocks |
 | 11 | When their check breaks, the change goes through | three products that let a change through when the check itself fails |
-| 12 | What is built | 2172 + 311 tests, five runtimes on v54, a real product, multi-tenant |
+| 12 | What is built | 2172 + 334 tests, five runtimes on v54, a real product, multi-tenant |
 | 13 | Your ten notes from the pre-final | every note answered |
 | 14 | What this does not do | four honest limits |
 | 15 | What is next | four next steps; the first answers the last limit |
@@ -69,12 +69,12 @@ sentence and offer the rest at the end.
 |---|---|---|
 | **1.3–1.7¢** | model cost of one change | three clean runs, priced from the AWS Pricing API |
 | **99.9%** | the model's share of that cost; the rest came to $0.0000125 | the same three runs |
-| **5.39 min** | median time from ticket to merged pull request | 8 merges |
-| **8 of 37** | runs that reached a merge (the rest were blocked, refused or unfinished) | GitHub's own records |
-| **0 of 8** | merged changes carrying a credential | the same scan finds 3 in unmerged pull request #50, so the zero is real |
+| **7.88 min** | median time from ticket to merged pull request; a person clicked every gate | 12 merges, measured 25 September |
+| **12 of 57** | runs that reached a merge (the rest were blocked, refused or unfinished) | GitHub's own records |
+| **0 of 12** | merged changes carrying a credential | the same scan finds 3 in unmerged pull request #72, so the zero is real |
 | **2 min 19 s** | the poisoned run, from approving gate1 to the block | run 35679536930 |
 | **lines 3 and 4** | where the real scanners report the planted key | the stand-in reports 4 and 5 — that pair proves a real scan |
-| **2172** | automated tests, across 93 files | plus **311** for the web app, across 24 files |
+| **2172** | automated tests, across 93 files | plus **334** for the web app, across 26 files |
 | **v54** | the version all five agent runtimes are on | checked before every demo |
 | **6/8 → 8/8** | the reviewer catching a plan mismatch, before and after adding its knowledge base | measured over 8 trials each |
 | **8 of 83** | code modules that touch a vendor SDK; only 2 load one at start-up | measured by reading the code |
@@ -156,6 +156,11 @@ than overclaim.
 **"What if a scanner crashes?"** — *Habiba.* The change is blocked. A crashed or missing
 scanner on the deployed system produces a blocking finding, never an empty result — an
 empty result would read as a pass.
+
+**"The security agent calls an AI model — so the gate uses a model?"** — *Habiba.* No. The
+scanners and the fixed threshold decide first. Only then does the agent ask the model to
+write one sentence explaining the verdict, and that text goes into a separate field that
+cannot change the decision. Take the model away and the block still happens.
 
 **"Why is the reviewer only advisory?"** — *Sorour.* Because it is a model, and a model can
 be wrong or talked into things. When it objects, the change goes back to the developer,
