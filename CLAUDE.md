@@ -3490,11 +3490,31 @@ notes (the build fails if they drift), and `pitch/HANDOUT.md` is the team's stud
 That repository's `deckkit.snapshot` renders the deck in PowerPoint slide by slide; read
 its CLAUDE.md before touching the deck.
 
-**The live UI marks a block on `develop`, not on `security`**, and a judge may notice the
-slide says otherwise. `web/lib/ci-view.ts:194` marks the GitHub JOB, and review and
-security run inside the `develop` job, so the run page shows develop `blocked` and review
-and security `done`. The slide marks the stage that refused. Left as is two days before
-the demo; the demo plan and rehearsal script carry the one-line answer.
+**The live UI now marks a block on `security`, as the slide does — fixed 2026-09-25.**
+Reported on run 71: `develop` in rose, `review` and `security` drawn as never having run,
+and "Stopped at develop. Nothing after it ran" above the verdict those stages produced.
+Two causes, one per layer, and a test of either layer alone passed while the screen was
+wrong: `ci-view` put the job's failure on `develop`, and `StageSpine.phases` drew every
+stage after the first stop as dead **whatever it had recorded**. `ci-view.stoppedInsideDevelop`
+now reads the record for `_stage_develop`'s two deliberate exits — a block is security's,
+the revision cap is review's — and both the live and the stored-record path use it.
+`components/__tests__/spine.test.ts` drives the page's whole chain for both endings.
+
+**The security panel shows the comparison for a PASS too, and per scanner.** Every `≥`/`<`
+is read off the rule's own `blocking` list in `components/security-summary.ts` — never a
+local comparison, for `score_findings`' reason. **A run with no findings records no
+threshold** (the reader takes it off the first scoring row), so the panel names `high` as
+the default rather than as a measurement; nothing in `.github/` sets
+`SECURITY_BLOCK_THRESHOLD`.
+
+**`next dev` WRITES INTO THE TREE, twice.** It generates `web/AGENTS.md` and
+`web/CLAUDE.md` (Next's agent-rules boilerplate; `agentRules: false` in `next.config`
+disables it), and `.next/dev/types/validator.ts`, which keeps referencing any page you
+delete afterwards — so `tsc` and `next build` then fail with `Cannot find module
+'…/page.js'` for a file that is correctly gone. `rm -rf web/.next/dev`. A local visual
+check is worth it all the same: a temporary page under `app/(routes)/` plus a dummy
+`agentorg_session` cookie gets past `proxy.ts` (it checks presence only), and
+`~/.cache/selenium` holds Chrome for Testing 153 with a matching chromedriver.
 
 ## Lint rules that cannot be relaxed
 
