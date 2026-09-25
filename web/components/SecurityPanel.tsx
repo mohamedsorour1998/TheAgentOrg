@@ -352,8 +352,11 @@ function Findings({
           maxWidth: "var(--measure)",
         }}
       >
-        The added line counts the lines the change adds, not lines in the file, so it
-        is not a position you can jump to.
+        {/* Only when a row HAS a line: a package-level finding (Trivy) has none, and
+            the sentence under a table of CVEs explained a column nobody could see. */}
+        {rows.some((r) => r.finding.line > 0)
+          ? "The added line counts the lines the change adds, not lines in the file, so it is not a position you can jump to."
+          : null}
         {rows.some((r) => r.native === "")
           ? " “None — policy” means gitleaks reports no severity: any credential it finds is critical by rule."
           : null}
