@@ -138,7 +138,10 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
     return () => clearInterval(id);
   }, [ended, run, reload]);
 
-  const rows = useMemo(() => (run ? phases(run.stages, ended) : []), [run, ended]);
+  const rows = useMemo(
+    () => (run ? phases(run.stages, ended, run.review?.verdict ?? null) : []),
+    [run, ended],
+  );
 
   /**
    * WHICH STAGE THE PAGE OPENS ON, in the order a reader would look.
@@ -255,6 +258,7 @@ export default function RunPage({ params }: { params: Promise<{ runId: string }>
         <StageSpine
           stages={run.stages}
           runEnded={ended}
+          reviewVerdict={run.review?.verdict ?? null}
           awaitingGates={run.awaiting_gates}
           selected={selected}
           onSelect={setPicked}

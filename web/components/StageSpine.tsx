@@ -64,7 +64,7 @@ const WHAT: Readonly<Record<Stage, string>> = {
  * How a stage is drawn. Derived from the job's status, not from its position:
  * position tells you what SHOULD have happened and the row tells you what did.
  */
-export type Phase = "done" | "running" | "waiting" | "refused" | "pending" | "never";
+export type Phase = "done" | "objected" | "running" | "waiting" | "refused" | "pending" | "never";
 
 function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
   if (!view) return runEnded ? "never" : "pending";
@@ -94,6 +94,7 @@ function phaseOf(view: StageView | undefined, runEnded: boolean): Phase {
  */
 const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
   done: "var(--shipped)",
+  objected: "var(--refused)",
   running: "var(--accent)",
   waiting: "var(--accent)",
   refused: "var(--refused)",
@@ -122,6 +123,7 @@ const PHASE_COLOUR: Readonly<Record<Phase, string>> = {
  */
 const PHASE_TEXT: Readonly<Record<Phase, string>> = {
   done: "var(--shipped)",
+  objected: "var(--refused)",
   running: "var(--accent)",
   waiting: "var(--accent)",
   refused: "var(--refused)",
@@ -132,6 +134,7 @@ const PHASE_TEXT: Readonly<Record<Phase, string>> = {
 /** The word for a phase, said in full. Used in the sentence, not on the mark. */
 export const PHASE_WORD: Readonly<Record<Phase, string>> = {
   done: "done",
+  objected: "asked for changes — advisory",
   running: "running now",
   waiting: "waiting for a person",
   refused: "stopped here",
@@ -143,6 +146,10 @@ export const PHASE_WORD: Readonly<Record<Phase, string>> = {
 export function phases(
   stages: StageView[],
   runEnded: boolean,
+  // THE REVIEWER'S LAST VERDICT, because "ran" is not what a reader takes green to
+  // mean. Reported on run 71: review drawn green above "CHANGES REQUESTED". The
+  // reviewer is advisory -- the run went on -- so this is its own phase, not a stop.
+  reviewVerdict: string | null = null,
 ): { stage: Stage; phase: Phase; view: StageView | undefined }[] {
   const byStage = new Map<string, StageView>();
   // A reclaimed job can appear more than once, so the LAST row wins -- it is the
@@ -164,7 +171,11 @@ export function phases(
     // `security` carries a real result there -- overriding it with "did not run"
     // erased exactly that, the same way run 71's block erased review and security.
     const stopped = refusedAt >= 0 && i > refusedAt && view === undefined;
-    return { stage, view, phase: stopped ? "never" : phaseOf(view, runEnded) };
+    let phase: Phase = stopped ? "never" : phaseOf(view, runEnded);
+    if (stage === "review" && phase === "done" && reviewVerdict === "changes_requested") {
+      phase = "objected";
+    }
+    return { stage, view, phase };
   });
 }
 
@@ -188,13 +199,17 @@ export function spineSentence(
   const running = rows.find((r) => r.phase === "running");
   if (running) return `${running.stage} is running now. ${WHAT[running.stage]}.`;
 
+  const objected = rows.some((r) => r.phase === "objected")
+    ? " The reviewer asked for changes; it is advisory, so the run went on."
+    : "";
+
   const stopped = rows.find((r) => r.phase === "refused");
   if (stopped) {
     // NAME THE LAST STAGE THAT RAN, which is not always the one that stopped: at the
     // revision cap the run stops at `review` and the scanners still run after it.
     const last = rows.filter((r) => r.phase !== "never" && r.phase !== "pending").at(-1);
     const after = last && last.stage !== stopped.stage ? last.stage : "it";
-    return `Stopped at ${stopped.stage}. Nothing after ${after} ran — those stages are not waiting, they will never start.`;
+    return `Stopped at ${stopped.stage}. Nothing after ${after} ran — those stages are not waiting, they will never start.${objected}`;
   }
 
   const promoted = rows.find((r) => r.stage === "promote" && r.phase === "done");
@@ -215,14 +230,16 @@ export function StageSpine({
   awaitingGates,
   selected,
   onSelect,
+  reviewVerdict = null,
 }: {
   stages: StageView[];
   runEnded: boolean;
+  reviewVerdict?: string | null;
   awaitingGates: readonly Gate[];
   selected: Stage;
   onSelect: (stage: Stage) => void;
 }) {
-  const rows = phases(stages, runEnded);
+  const rows = phases(stages, runEnded, reviewVerdict);
 
   return (
     <ol className="spine">
@@ -316,5 +333,8 @@ function rail(phase: Phase, dead: boolean): string {
   // token: the rail is a connector, and `--border-strong` between two dim marks
   // reads as a drawn relationship where there is not one yet.
   if (phase === "pending") return "var(--border)";
+  // THE RUN WENT ON PAST AN OBJECTION, so the rail leaving it is the colour of a
+  // stage that ran. Rose here would draw the advisory verdict as the stop.
+  if (phase === "objected") return PHASE_COLOUR.done;
   return PHASE_COLOUR[phase];
 }

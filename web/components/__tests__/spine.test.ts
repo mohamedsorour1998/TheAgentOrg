@@ -35,7 +35,8 @@ const DEVELOP_FAILED: CiProgress = {
 };
 
 function spine(record: Record<string, unknown>) {
-  const rows = phases(stagesFromCi(DEVELOP_FAILED, record), true);
+  const review = record.review as { verdict?: string } | undefined;
+  const rows = phases(stagesFromCi(DEVELOP_FAILED, record), true, review?.verdict ?? null);
   return {
     phase: Object.fromEntries(rows.map((r) => [r.stage, r.phase])),
     sentence: spineSentence(rows, [], true),
@@ -51,10 +52,11 @@ describe("a run the security rule blocked", () => {
     security: { verdict: "block" },
   });
 
-  it("draws develop and review as done and the stop on security", () => {
+  it("draws develop as done, review's objection, and the stop on security", () => {
     expect(phase.plan).toBe("done");
     expect(phase.develop).toBe("done");
-    expect(phase.review).toBe("done");
+    // Ran, and objected: not green, and not the stop either.
+    expect(phase.review).toBe("objected");
     expect(phase.security).toBe("refused");
   });
 
@@ -64,10 +66,40 @@ describe("a run the security rule blocked", () => {
     }
   });
 
-  it("says where it stopped, and that the stop was security", () => {
+  it("says where it stopped, and that the reviewer's objection did not stop it", () => {
     expect(sentence).toBe(
-      "Stopped at security. Nothing after it ran — those stages are not waiting, they will never start.",
+      "Stopped at security. Nothing after it ran — those stages are not waiting, they will never start. The reviewer asked for changes; it is advisory, so the run went on.",
     );
+  });
+});
+
+describe("the reviewer's verdict on the spine", () => {
+  /**
+   * **RUN 71 AGAIN: review drawn GREEN directly above "CHANGES REQUESTED".** Green
+   * meant "the stage ran", and a reader takes it as "approved". The reviewer is
+   * advisory -- the run went on -- so an objection is its own phase: not done, and
+   * not the stop, which stays on security.
+   */
+  it("draws an objection as its own phase, and leaves the stop on security", () => {
+    const { phase } = spine({
+      status: "blocked",
+      dev: { branch: "feat/x" },
+      review: { verdict: "changes_requested" },
+      security: { verdict: "block" },
+    });
+    expect(phase.review).toBe("objected");
+    expect(phase.security).toBe("refused");
+  });
+
+  it("draws an approval as done", () => {
+    const { phase, sentence } = spine({
+      status: "blocked",
+      dev: { branch: "feat/x" },
+      review: { verdict: "approve" },
+      security: { verdict: "block" },
+    });
+    expect(phase.review).toBe("done");
+    expect(sentence).not.toContain("asked for changes");
   });
 });
 
