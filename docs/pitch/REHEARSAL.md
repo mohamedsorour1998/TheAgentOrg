@@ -306,12 +306,28 @@ and more scanners; the scoring is a table, so a new scanner is one row.
 
 ## 16 · The demonstration — 0:10
 
-**SAY** Let me show you the half that matters: a ticket that deliberately carries a
-credential. Watch the line numbers when it blocks.
+**SAY** Let me show you the half that matters. This ticket asks for something that
+looks reasonable: pin an old version of the requests library for a legacy proxy. Nothing
+is planted and no demo flag is set. Watch what the reviewer says, and what the scanners
+say.
+
+**IF THE REVIEWER APPROVED IT — say it, it is the point.** The reviewer is a model, and
+the pin looked reasonable, so it approved. The rule did not. That is the whole design:
+the reviewer advises, the scanners decide. (It is a model, so on the day it may object
+instead; then say that the objection is advisory and the run went on to security.)
 
 **IF ASKED — "what are the three cards?"** One per scanner, each showing its own worst
-finding against the threshold. Only gitleaks reached it, so only gitleaks blocks. That
-comparison is the whole decision, and a run that passes shows it too.
+finding against the threshold. Only Trivy reached it, with a high-severity CVE; the
+medium ones stay below the line. That comparison is the whole decision.
+
+**IF ASKED — "the explanation under the verdict is wrong"** It can be: that paragraph is
+written by the model after the verdict, and it has no say in it. That is exactly why the
+model does not decide.
+
+**IF ASKED — "why does the page say a stage used a canned answer?"** The agent that writes
+tests from the ticket did not get an answer from the model this time, so it used its
+built-in stand-in, and the page says so rather than hiding it. It does not affect the
+block.
 
 → **switch to the browser. See DEMO-PLAN.md.**
 
@@ -327,7 +343,9 @@ comparison is the whole decision, and a run that passes shows it too.
 
 | If | Then |
 |---|---|
-| the live run stalls | open the poisoned run from earlier (run 35679536930) in the product and its pull request, and say plainly that it is an earlier run |
+| the live run stalls | open run #73 in the product: the same ticket, rehearsed on 25 September. Say plainly that it is an earlier run |
+| Trivy's card says the scanner failed | it still blocks, by design, but that is not the demo. Say so, then open run #73 |
+| you want a credential instead | start a run with *Demonstrate a blocked run* ticked: it plants a known test key and always blocks, and the page says so |
 | the venue network fails | the deck needs nothing from the network; walk slide 16's stages and describe the block in words |
 | a judge asks for the clean run | open the merged pull request and its promoted run in the list — both already exist |
 | a gate approval is refused | say the token needs the deployments permission and move on; do not debug on stage |
@@ -342,10 +360,11 @@ is done, the earlier run in the product is the fallback.
 check prints it on every run, and we chose to report it rather than fail on it. Say this
 before being asked if the topic comes near.
 
-**"How do you know the scanners really ran?"** The line numbers. The real scanners
-report the credential at lines 3 and 4 of the added code; the built-in stand-in, used
-only when a scanner is unavailable, reports 4 and 5. That pair is the only thing that
-tells the two apart, and our pre-flight check confirms it against the deployed system.
+**"How do you know the scanners really ran?"** On this run, the finding is a CVE
+number from Trivy's vulnerability database; the built-in stand-in has no Trivy findings
+at all. And every morning our pre-flight check runs the deployed scanners on a reference
+change: they report the planted key at lines 3 and 4, where the stand-in reports 4 and
+5.
 
 **"Did the code actually change?"** The pull request carries the reviewed change as a
 file: every gate reads it, the scanners read it, the humans approve it. Applying it to

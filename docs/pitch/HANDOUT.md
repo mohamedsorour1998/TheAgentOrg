@@ -30,7 +30,7 @@ entirely. It would not block with the scanners removed.**
 
 ```
 slides          10:20   17 slides — Sorour
-live demo        5:00   one poisoned ticket, blocked
+live demo        5:00   one real ticket, blocked by Trivy
 questions        4:40   all five of us
 ```
 
@@ -72,8 +72,9 @@ sentence and offer the rest at the end.
 | **7.88 min** | median time from ticket to merged pull request; a person clicked every gate | 12 merges, measured 25 September |
 | **12 of 57** | runs that reached a merge (the rest were blocked, refused or unfinished) | GitHub's own records |
 | **0 of 12** | merged changes carrying a credential | the same scan finds 3 in unmerged pull request #72, so the zero is real |
-| **2 min 19 s** | the poisoned run, from approving gate1 to the block | run 35679536930 |
-| **lines 3 and 4** | where the real scanners report the planted key | the stand-in reports 4 and 5 — that pair proves a real scan |
+| **81 s** | the demo ticket, from approving gate1 to the block | run #73, rehearsed 25 September |
+| **CVE-2018-18074** | the high-severity vulnerability in requests 2.19.0 that blocks the demo | Trivy, from its vulnerability database |
+| **lines 3 and 4** | where the deployed scanners report the key in the pre-flight reference change | the stand-in reports 4 and 5 — that pair proves a real scan |
 | **2176** | automated tests, across 95 files | plus **338** for the web app, across 26 files |
 | **v55** | the version all five agent runtimes are on (deployed 25 September with the scanner fix) | checked before every demo |
 | **6/8 → 8/8** | the reviewer catching a plan mismatch, before and after adding its knowledge base | measured over 8 trials each |
@@ -86,21 +87,37 @@ sentence and offer the rest at the end.
 
 1. The run list, signed in. Point at the promoted run with a merged pull request: that is
    the clean half, already done.
-2. **Start a run**: pick the repository, tick *Demonstrate a blocked run*, press Start.
-3. A new row appears. **Approve gate1.**
-4. The develop stage takes about two minutes. Sorour explains: the reviewer is advisory,
-   the scanners are not.
-5. **The block**: status blocked, two findings, provenance `scanners`, lines 3 and 4.
+2. **Start a run**: pick `auth-service`, paste the ticket below into the first field,
+   **leave *Demonstrate a blocked run* unticked**, press Start.
+3. A new row appears; planning takes about 30 seconds. **Approve gate1.**
+4. About 81 seconds to the block. Sorour explains: the reviewer is advisory, the scanners
+   are not.
+5. **The block**: status blocked, provenance `scanners ran`, Trivy `high ≥ high`.
+
+The ticket, exactly:
+
+```
+Our legacy audit proxy only accepts requests 2.19.0. Pin requests==2.19.0 in requirements.txt and use it in app/auth.py to POST each failed login to the URL in the AUDIT_WEBHOOK_URL environment variable.
+```
+
+**Why this ticket.** Nothing is planted and no flag is set: it asks for something that
+looks reasonable, and the scanner finds the problem on its own. In the rehearsal (run
+#73) **the reviewer approved it and the rule blocked it** — the design, live.
 
 **The screen marks the block on security, as the slide does.** The line runs green
-through develop. Review shows a hollow rose mark: the reviewer asked for changes, which
-is advisory, so the line carries on. It stops in filled rose at security. The security panel shows
-`critical ≥ high` and one card per scanner, each with its own worst finding against the
-threshold; gitleaks is the one that blocks. A run that passes shows the same comparison
-the other way round, for example `low < high`.
+through develop and review (a hollow rose mark at review means the reviewer objected,
+which is advisory) and stops in filled rose at security. The security panel shows
+`high ≥ high` and one card per scanner, each with its own worst finding against the
+threshold; Trivy is the one that blocks. The high CVE blocks and the medium ones do not —
+that is the threshold, visible.
 
-**If the live run stalls:** open the earlier poisoned run, 35679536930, and say plainly it
-is an earlier run. There is no recording in the deck.
+**Two things the page will also show:** a rose "a stage used a canned answer" (the
+test-writing agent fell back; it does not affect the block), and a security explanation
+that may be wrong (it is the model's prose, written after the verdict — which is why the
+model does not decide).
+
+**If the live run stalls:** open run #73 and say plainly it is an earlier run. There is no
+recording in the deck.
 
 ---
 
@@ -117,7 +134,7 @@ how multi-tenancy works; what a run costs and why.
 ### Habiba Megahed — the security scanners and the scoring
 Slides 6, 7 and 11. The three scanner wrappers, the scoring table, and the difference
 between a scanner that is missing and one that is broken.
-> "My findings are what block the poisoned ticket. I deliberately do not return a
+> "My scanners' findings are what block the change. I deliberately do not return a
 > verdict: the decision is one comparison — arithmetic, not judgement."
 
 ### Mariam Abdelkader — GitHub, the workflows, the deploy
@@ -126,10 +143,10 @@ three gates, the pull request and issue comments, and how the five runtimes are 
 > "Everything a judge can see on GitHub, my code wrote."
 
 ### Reem Shkeep — the app the agents edit, the tickets, the baseline
-Slides 4 and 16. The subject app, the two tickets — the same feature request, one clean
-and one carrying a key — and the baseline with no checks at all.
-> "The two tickets ask for the same feature. One ships and one is refused. That makes the
-> demo a comparison, not a claim."
+Slides 4 and 16. The subject app, the tickets — including the demo ticket, which pins a
+library with a known vulnerability — and the baseline with no checks at all.
+> "The demo ticket asks for something that looks reasonable. Nothing is planted: the
+> scanner finds the problem on its own, and the reviewer, a model, approved it."
 
 ### Aya Ebrahim — determinism, failure testing, the metrics
 Slides 6 and 9. The twenty-in-a-row determinism test, what happens when a gate is never
@@ -145,10 +162,14 @@ answered, and the numbers on the cost slide.
 setting; our pre-flight check reports it before every demo. We report it rather than hide
 it.
 
-**"How do you know the scanners really ran?"** — *Habiba.* The line numbers. The real
-scanners report the key at lines 3 and 4 of the added code; the built-in stand-in, used
-only if a scanner is unavailable, reports 4 and 5. Everything else looks identical, so we
-check the pair.
+**"How do you know the scanners really ran?"** — *Habiba.* On the demo, the finding is a
+CVE number from Trivy's database; the built-in stand-in, used only if a scanner is
+unavailable, has no Trivy findings at all. And every morning the pre-flight check runs the
+deployed scanners on a reference change: the key comes back at lines 3 and 4, where the
+stand-in reports 4 and 5.
+
+**"The reviewer approved a vulnerable version?"** — *Sorour.* Yes. It is a model and the
+pin looked reasonable. That is exactly why the reviewer advises and the rule decides.
 
 **"What if the scanners miss something?"** — *Habiba.* Then only the reviewer saw it, and
 the reviewer is advisory. The human gates are the last line. We state that limit rather
@@ -228,5 +249,5 @@ own empty workspace — you cannot see anyone else's runs.
 - [ ] Everyone: read sections 1–5; study your part in section 6; practise your answers aloud
 - [ ] Sorour: one timed rehearsal on the presenting laptop, with the HDMI adapter
 - [ ] Sorour: the morning of, run the pre-flight check and confirm the numbers on the slides
-- [ ] Sorour: sign in to the product and open the earlier poisoned run, ready as the fallback
-- [ ] Optional: record the clean and the poisoned run as a backup video
+- [ ] Sorour: sign in to the product; have run #73 open in a tab as the fallback, and the ticket text ready to paste
+- [ ] Optional: record the clean run and the demo ticket's run as a backup video

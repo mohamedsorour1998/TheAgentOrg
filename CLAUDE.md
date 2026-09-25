@@ -4707,6 +4707,15 @@ reference poisoned diff has zero unmarked lines and still reads `LINES: [3, 4]`.
 
 Trivy's CVE findings are package-level and carry `line: 0`; the panel shows the file alone.
 
+**VERIFIED IN THE CLOUD, run #73 (36096705514), no demo flag.** Issue #73 opened on
+auth-service triggered the pipeline through the webhook; after gate1: `POISONED: false`,
+`status=blocked`, `trivy high requirements.txt:0 CVE-2018-18074`, exit 3, 81 s from the gate1
+approval to the block. So Trivy's database is reachable from inside the security runtime,
+which nothing had checked before. **The reviewer APPROVED the vulnerable pin** and the rule
+blocked it — the thesis, measured. The run is the finals demo; its fallback is #73 itself.
+`_source=fixture` on that run was the test-writing agent (`generated_tests.source:
+fixture`), not the developer — read the stored state, not `last_source`.
+
 **The general form:** a demo path with a safety net measures the safety net. The gate had
 only ever been shown input the net had normalised.
 
