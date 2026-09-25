@@ -159,7 +159,11 @@ export function phases(
 
   return STAGE_ORDER.map((stage, i) => {
     const view = byStage.get(stage);
-    const stopped = refusedAt >= 0 && i > refusedAt;
+    // ONLY A STAGE WITH NO RECORD OF ITS OWN is drawn dead past a stop. The revision
+    // cap stops the run at `review` and the scanners still run after the loop, so
+    // `security` carries a real result there -- overriding it with "did not run"
+    // erased exactly that, the same way run 71's block erased review and security.
+    const stopped = refusedAt >= 0 && i > refusedAt && view === undefined;
     return { stage, view, phase: stopped ? "never" : phaseOf(view, runEnded) };
   });
 }
@@ -186,7 +190,11 @@ export function spineSentence(
 
   const stopped = rows.find((r) => r.phase === "refused");
   if (stopped) {
-    return `Stopped at ${stopped.stage}. Nothing after it ran — the stages below are not waiting, they will never start.`;
+    // NAME THE LAST STAGE THAT RAN, which is not always the one that stopped: at the
+    // revision cap the run stops at `review` and the scanners still run after it.
+    const last = rows.filter((r) => r.phase !== "never" && r.phase !== "pending").at(-1);
+    const after = last && last.stage !== stopped.stage ? last.stage : "it";
+    return `Stopped at ${stopped.stage}. Nothing after ${after} ran — those stages are not waiting, they will never start.`;
   }
 
   const promoted = rows.find((r) => r.stage === "promote" && r.phase === "done");
