@@ -75,10 +75,10 @@ from __future__ import annotations
 import json
 import logging
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..agents.server import AGENTS
-from ..state import RunState
+from ..state import RetrievalRecord, RunState
 from . import config, llm
 
 # Bounds on the two calls this module makes. botocore's defaults are
@@ -554,5 +554,26 @@ def call_agent(role: str, state: RunState, **kwargs) -> BaseModel:
     # the second means it reported that it spent nothing.
     if isinstance(envelope, dict):
         llm.absorb_usage_payload(envelope.get("usage"))
+        _absorb_retrieval(state, envelope.get("retrieval"))
 
     return _validate(role, envelope)
+
+
+def _absorb_retrieval(state: RunState, payload: object) -> None:
+    """Put the container's retrieval record on the runner's copy of the run.
+
+    REPLACE, NOT APPEND. The container started from THIS state's record (it travelled
+    in the payload) and added its own lookups to it, so what comes back is the whole
+    record -- appending would count every earlier lookup twice. Absent, or `None`,
+    leaves the record as it was: an older container, or an agent that looked nothing
+    up. Malformed is logged and ignored -- bookkeeping must never fail a stage, the
+    rule `absorb_usage_payload` follows one line above.
+    """
+    if not isinstance(payload, dict):
+        return
+    try:
+        state.retrieval = RetrievalRecord.model_validate(payload)
+    except ValidationError:
+        logging.getLogger(__name__).warning(
+            "ignored a malformed retrieval record from the container", exc_info=True
+        )

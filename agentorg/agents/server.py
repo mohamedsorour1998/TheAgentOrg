@@ -201,6 +201,15 @@ class Handler(BaseHTTPRequestHandler):
             # `absorb_usage_payload(None)` is a no-op recording nothing, which is
             # distinct from a fixture fallback recording a zero ROW.
             "usage": llm.usage_payload(),
+            # WHAT THE AGENT LOOKED UP, for the same reason again: `_prompt` writes
+            # `state.retrieval` on THIS process's copy of the run, and without this key
+            # the runner's record stays empty -- so a run with retrieval switched on
+            # cannot be told from one with it off. Measured on run #73: RETRIEVAL was
+            # off and the record was empty; with it on and no key here it would still
+            # be empty. `None` when the agent retrieved nothing.
+            "retrieval": (
+                state.retrieval.model_dump(mode="json") if state.retrieval is not None else None
+            ),
         })
 
 

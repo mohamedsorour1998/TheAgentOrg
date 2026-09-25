@@ -263,7 +263,14 @@ jobs:
             # credential in five more places for no capability. A private target gets
             # no snapshot and the pipeline still completes -- degraded, stated in
             # repo_snapshot's docstring, and preferable to the token.
-            env_vars="AGENT_ROLE=${agent},DEMO_REPO=${{ vars.DEMO_REPO }}"
+            #
+            # RETRIEVAL_ENABLED ON EVERY RUNTIME. config defaults it to false and nothing
+            # set it, so the three knowledge bases the planner, developer, reviewer and
+            # security explanation are wired to were never read by a deployed agent --
+            # measured on run #73, whose retrieval record was empty. It is context for
+            # prose and drafting only: `retrieval/guard.py` refuses any consumer that
+            # reaches the verdict, so switching it on cannot change a block.
+            env_vars="AGENT_ROLE=${agent},DEMO_REPO=${{ vars.DEMO_REPO }},RETRIEVAL_ENABLED=true"
             if [ "$agent" = "security" ]; then
               env_vars="${env_vars},SCANNERS_REQUIRED=true"
             fi

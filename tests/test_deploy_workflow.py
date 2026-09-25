@@ -1492,6 +1492,25 @@ def test_every_runtime_still_gets_its_own_agent_role(tmp_path, runtimes_exist):
         )
 
 
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+@pytest.mark.parametrize("runtimes_exist", [True, False], ids=["update", "create"])
+def test_every_runtime_reads_its_knowledge_bases(tmp_path, runtimes_exist):
+    """RETRIEVAL_ENABLED=true on all five, in both branches of the loop.
+
+    config defaults it to false and nothing set it, so the three knowledge bases four
+    agents are wired to were never read by a deployed agent -- measured on run #73,
+    whose retrieval record was empty while the deck said "used by four of the agents".
+    Executed, not grepped: the value that matters is the one a runtime receives, and
+    config compares against the literal "true", so a misspelling would read as off.
+    """
+    per_agent, api_call = _env_vars_per_agent(tmp_path, runtimes_exist=runtimes_exist)
+    for agent in AGENTS:
+        assert per_agent[agent].get("RETRIEVAL_ENABLED") == "true", (
+            f"{agent} reached {api_call} with RETRIEVAL_ENABLED="
+            f"{per_agent[agent].get('RETRIEVAL_ENABLED')!r}; its knowledge bases stay unread"
+        )
+
+
 # The three scanner tools, in run_all_scanners' fan-out order. Mirrors
 # tests/provenance.py's SCANNER_TOOLS; named here because this file must not
 # import a module that pulls in agentorg just to read three strings.
